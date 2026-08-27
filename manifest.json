@@ -1,0 +1,13 @@
+{
+    "display_name": "Persona Manager",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "dependencies": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "Penterson",
+    "version": "0.1.8",
+    "homePage": "",
+    "auto_update": false
+}

@@ -1,0 +1,2819 @@
+/* Persona Manager. No literal colors: derive everything from SillyTavern theme variables.
+ *
+ * DESIGN TOKENS (2026-08-26). The user brought a reference app (Blobs) and asked for
+ * its look with the colours still coming from their SillyTavern theme. Those two
+ * things pull apart, so the split is explicit:
+ *
+ *   - What the reference contributes is FORM: raised rounded cards instead of flat
+ *     bordered rows, a soft blob curve where a header meets the body, pill chips,
+ *     a big circular avatar strip, one filled accent action per screen.
+ *   - What it cannot contribute is its palette. Its navy-and-peach is a fixed
+ *     scheme; ours has to be whatever the user picked. So we define RELATIONSHIPS
+ *     (how far a surface is raised, where the accent lands, how much contrast a
+ *     line carries) and let the theme supply the actual colours.
+ *
+ * Every surface is a translucent lift over the theme's own tint rather than a fixed
+ * shade, so the same rules read correctly on a dark theme and a light one: a lift of
+ * currentColor is darker on light themes and lighter on dark ones automatically.
+ *
+ * The tokens live on our three roots and not on :root, because writing variables
+ * onto the document would leak this extension's scale into SillyTavern's own UI. */
+.pm-panel,
+.pm-quickbar-panel,
+.pm-manager-panel,
+.pm-settings {
+    /* Surfaces, in order of how far they sit above the panel's ground. */
+    --pm-lift-1: color-mix(in srgb, currentColor 6%, transparent);
+    --pm-lift-2: color-mix(in srgb, currentColor 11%, transparent);
+    --pm-lift-3: color-mix(in srgb, currentColor 17%, transparent);
+    /* Lines. Hairline separates inside a card, edge outlines a card. */
+    --pm-hairline: color-mix(in srgb, currentColor 12%, transparent);
+    --pm-edge: color-mix(in srgb, currentColor 18%, transparent);
+    /* The accent, and the two weights it is used at. */
+    --pm-accent: var(--SmartThemeQuoteColor);
+    --pm-accent-wash: color-mix(in srgb, var(--SmartThemeQuoteColor) 20%, transparent);
+    --pm-accent-edge: color-mix(in srgb, var(--SmartThemeQuoteColor) 55%, transparent);
+    /* Radii: none. The reference is a hard grid of hairlines and filled blocks
+       with not one rounded corner in it, and rounding is exactly what made the
+       first attempt read as generic. The only curves left in this stylesheet are
+       the avatar circles and the user-chosen tile shape, both of which are about
+       cropping a picture rather than about decorating a box. */
+    --pm-r-card: 0;
+    --pm-r-inner: 0;
+    --pm-r-pill: 0;
+    /* The grid line. One weight everywhere, drawn from the ink rather than from a
+       washed out border colour, because in this reference the line IS the layout
+       and a faint line reads as an accident. */
+    --pm-rule: 1px solid color-mix(in srgb, currentColor 42%, transparent);
+    --pm-rule-strong: 1px solid currentColor;
+
+    /* RHYTHM. Two distances, because there are two relationships.
+
+       --pm-rhythm is the air AROUND a block: from the rule above it to its first
+       line, and from its last line to the rule below. --pm-pair is the gap
+       INSIDE one, between a label and the line it labels.
+
+       They are deliberately different. The first pass at this made every gap the
+       same 10px, which is what "통일" reads as if you take it literally, and the
+       result was three lines floating at equal distances with nothing to say
+       which belonged to which: 현재 stopped looking like the caption of the name
+       under it. A caption sits close to its subject and the pair stands apart
+       from its neighbours - that is the thing being made uniform, not the number.
+
+       What one value still buys is that every block is spaced by the SAME pair of
+       numbers, so no block drifts on its own. */
+    --pm-rhythm: 14px;
+    --pm-pair: 4px;
+
+    /* TYPE. A note on why there is no webfont here.
+       The words this design sets large are Korean: 편집 버전 이력 에셋 그룹, ten
+       glyphs. The Latin display faces this reference is built from (Space Grotesk,
+       Archivo, and the rest of that family) contain no Hangul at all, so naming one
+       does nothing except fall back silently to whatever the system already had.
+       A Korean display face would have to be bundled, and a full Hangul weight is
+       megabytes on a phone that loads this from local storage.
+
+       So the display voice is built from what CSS can do to any face: maximum
+       weight, tight tracking, and a horizontal stretch, which is exactly what the
+       reference's own wordmark is. --pm-font-display is a hook: point it at a face
+       in SillyTavern's custom CSS and everything below picks it up. */
+    --pm-font-display: inherit;
+    --pm-display-stretch: 1.06;
+    /* THE MASS. The reference's loudest move is a big solid shape with a liquid
+       edge, and the extreme two-tone that comes with it. Both ends are already in
+       the theme: SillyTavern guarantees BodyColor reads against BlurTintColor,
+       because that is its text-on-background pair. So the mass is the ink and the
+       type on it is the ground, which inverts correctly on a light theme and a
+       dark one without a single literal colour.
+       The drips below are made of the same variable, so they cannot drift. */
+    --pm-mass: var(--SmartThemeBodyColor);
+    --pm-on-mass: var(--SmartThemeBlurTintColor);
+    --pm-mass-muted: color-mix(in srgb, var(--SmartThemeBlurTintColor) 68%, var(--SmartThemeBodyColor));
+    /* Secondary text. NOT --SmartThemeEmColor: that value belongs to whoever wrote
+       the theme, and measured across four of them it fell to 4.04:1 on the sepia
+       one, under the 4.5:1 floor for body text. Deriving it from the body colour
+       keeps a fixed fraction of a contrast SillyTavern already guarantees, so a
+       theme with a washed out em colour cannot make our text unreadable.
+       --pm-muted-2 is for labels and captions, which are the smallest things here
+       and so need the most, not the least. */
+    --pm-muted: color-mix(in srgb, currentColor 74%, transparent);
+    --pm-muted-2: color-mix(in srgb, currentColor 82%, transparent);
+}
+
+.pm-panel {
+    background: var(--SmartThemeBlurTintColor);
+    color: var(--SmartThemeBodyColor);
+    border: 1px solid var(--pm-edge);
+    }
+
+.pm-row {
+    border-bottom: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+    padding: 10px 12px;
+    cursor: pointer;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.pm-row:last-child { border-bottom: none; }
+
+@media (hover: hover) {
+    .pm-row:hover { background: color-mix(in srgb, currentColor 8%, transparent); }
+}
+
+.pm-row:active { background: color-mix(in srgb, currentColor 14%, transparent); }
+
+/* Quick switch bar. No Android tap highlight, and no
+   text selection outside inputs, because a long press on a row otherwise starts a
+   selection instead of registering as a tap. */
+.pm-quickbar,
+.pm-quickbar-panel {
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+}
+
+.pm-quickbar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 4px;
+    cursor: pointer;
+    max-width: 40vw;
+}
+
+.pm-quickbar-img {
+    width: 22px;
+    height: 22px;
+    object-fit: cover;
+}
+
+.pm-quickbar-label {
+    font-size: 0.8em;
+    color: var(--pm-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pm-quickbar-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 9998;
+    background: color-mix(in srgb, var(--SmartThemeShadowColor) 45%, transparent);
+}
+
+.pm-quickbar-panel {
+    position: fixed;
+    z-index: 9999;
+    left: 50%;
+    bottom: 12px;
+    transform: translateX(-50%);
+    width: min(420px, 94vw);
+    /* max-height is set from visualViewport.height in quickbar.js, because a vh
+       based height ignores the on screen keyboard. */
+    display: flex;
+    flex-direction: column;
+    /* The panel clips, .pm-scroll scrolls. When the panel was
+       itself the scroll container the scrollbar was painted over the rounded
+       corner and outside the 1px border. */
+    overflow: hidden;
+    padding: 8px 0;
+}
+
+/* The one scrolling box inside each panel. min-height:0 is what lets a flex item
+   shrink below its content and actually scroll; without it the item grows and the
+   panel clips the overflow with nothing to drag. scrollbar-gutter reserves the
+   width so the content does not shift when a list crosses the scroll threshold,
+   and a build that does not know the property simply ignores it. */
+.pm-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-gutter: stable;
+    -webkit-overflow-scrolling: touch;
+}
+
+.pm-quickbar-group {
+    border-bottom: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+    padding-bottom: 4px;
+}
+
+.pm-quickbar-group:last-of-type { border-bottom: none; }
+
+.pm-quickbar-head,
+.pm-manager-head {
+    padding: 10px 16px 4px;
+    font-size: 0.72em;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--pm-muted-2);
+}
+
+.pm-quickbar-current {
+    padding: 4px 12px 8px;
+    font-weight: 600;
+    color: var(--SmartThemeQuoteColor);
+}
+
+.pm-quickbar-note,
+.pm-manager-note {
+    padding: 4px 12px 8px;
+    font-size: 0.8em;
+    color: var(--pm-muted);
+}
+
+.pm-quickbar-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.pm-quickbar-name {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* The check column is a small target next to a tappable row, so the
+   hit area grows without the drawn mark changing size. */
+.pm-check {
+    position: relative;
+    flex: 0 0 auto;
+    min-width: 1em;
+    text-align: center;
+    /* Full ink, not the accent. --SmartThemeQuoteColor is whatever the theme
+       author picked and it measured 3.64:1 against a light panel, under the floor
+       for a mark this small. In the grid language a tick is a mark, and a mark is
+       ink; the accent stays reserved for the one ring that means "current". */
+    color: currentColor;
+    font-weight: 800;
+}
+
+.pm-check::before {
+    content: '';
+    position: absolute;
+    inset: -6px;
+}
+
+/* The 40px floor for the manager's dropdowns. A select cannot borrow the ::before
+   trick the check column uses: it is a replaced element, so no browser generates
+   a pseudo-element box for it. A select's hit area is its own border box and
+   nothing else, so the border box is what has to grow. box-sizing keeps
+   min-height honest, and with the padding inside it the box is 40px tall while
+   the option text stays at its natural size, which is what rule 4 asks for.
+   (The quick panel's per item dropdowns that shared this rule left in design
+   doc 24.1.) */
+.pm-manager-select {
+    flex: 0 1 auto;
+    max-width: 55%;
+    box-sizing: border-box;
+    /* Its own box is its whole hit area (a select generates no ::before), so the
+       44px floor has to be here rather than borrowed from a pseudo element the
+       way the buttons borrow it. */
+    min-height: 44px;
+    background: color-mix(in srgb, currentColor 8%, transparent);
+    color: var(--SmartThemeBodyColor);
+    border: var(--pm-rule);
+    padding: 8px 10px;
+}
+
+.pm-disabled {
+    opacity: 0.5;
+    cursor: default;
+    pointer-events: none;
+}
+
+.pm-quickbar-banner,
+.pm-manager-banner {
+    margin: 6px 8px;
+    padding: 8px 10px;
+    border: var(--pm-rule);
+    background: color-mix(in srgb, currentColor 10%, transparent);
+    user-select: text;
+}
+
+.pm-quickbar-warn,
+.pm-manager-warn {
+    border-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 60%, var(--SmartThemeBorderColor));
+}
+
+.pm-quickbar-banner-text,
+.pm-manager-banner-text {
+    font-size: 0.85em;
+    margin-bottom: 6px;
+}
+
+.pm-quickbar-actions,
+.pm-quickbar-footer,
+.pm-manager-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.pm-quickbar-footer {
+    justify-content: flex-end;
+    padding: 8px 12px 2px;
+}
+
+.pm-quickbar-btn,
+.pm-manager-btn {
+    position: relative;
+    padding: 8px 14px;
+    /* 40px, matching the manager's own floor further down. The ::before below
+       adds 6px on every side, so the target clears 44px either way, but the
+       drawn box was 38px in the quick panel and 40px in the manager for no
+       reason anybody could name. */
+    min-height: 40px;
+    border: 1px solid var(--pm-edge);
+    background: var(--pm-lift-1);
+    color: var(--SmartThemeBodyColor);
+    font: inherit;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+
+/* Half the gap, never the whole of it. The rows these buttons stand in have a
+   6px gap, so a 6px reach on both sides of it makes two hit areas OVERLAP by six
+   pixels, and a tap in that band goes to whichever button comes later in the
+   markup rather than to the one under the finger. Measured in the quick panel:
+   검색 overlapping 선택 by 8px, and the wrapped footer overlapping itself by 12px
+   between rows, which is 편집 and 에셋 trading taps along a band the width of the
+   panel. The device reported the visible half of that: 검색 눌러도 편집탭으로 이동.
+
+   The chip rule further down had this right from the start and said so; these two
+   did not. 40px of button plus 3px each side is 46px, still over the 44px floor. */
+.pm-quickbar-btn::before,
+.pm-manager-btn::before {
+    content: '';
+    position: absolute;
+    inset: -3px;
+}
+
+.pm-quickbar-btn:active,
+.pm-manager-btn:active { background: color-mix(in srgb, currentColor 18%, transparent); }
+
+@media (hover: hover) {
+    .pm-quickbar:hover .pm-quickbar-label { color: var(--SmartThemeQuoteColor); }
+    .pm-quickbar-btn:hover,
+    .pm-manager-btn:hover { background: color-mix(in srgb, currentColor 14%, transparent); }
+}
+
+/* Sort control and edit toggle on the persona group's own head
+   row, and the label chip row above the persona list. */
+.pm-quickbar-rosterhead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+}
+
+/* A line of its own under the heading (user request), so the five controls stand
+   in one row instead of spilling 그룹 편집 onto a line by itself. The padding
+   matches the rows below it, and the gap is 4px rather than 6px because four gaps
+   at 6px is the difference between one row and two on a 411px phone. */
+.pm-quickbar-rosterhead-controls {
+    display: flex;
+    align-items: center;
+    /* nowrap, not "wrap and hope". Five controls fit in a 411px panel only at
+       their minimum, so on a device whose Korean font runs a little wider the
+       wrapping version puts one button on a line by itself again, which is the
+       thing being fixed. Nothing here may wrap; the selects below give up width
+       instead, and they are the only two that have width to give. */
+    flex-wrap: nowrap;
+    gap: 4px;
+    padding: 0 12px 6px;
+    /* What happens when even the floor is not enough. SillyTavern themes set their
+       own font size, and measured on this panel the five controls hold to 24px and
+       lose one over the right edge of the panel at 28px, where the two selects are
+       already down to their floor and the buttons are all that is still growing. A
+       control painted outside the panel is a control the user cannot reach, so the
+       row scrolls instead: nothing is lost, and at any ordinary size there is
+       nothing to scroll. The bar itself is hidden because this row is 40px tall and
+       a scrollbar inside it costs more than it explains. */
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+}
+
+.pm-quickbar-rosterhead-controls::-webkit-scrollbar {
+    display: none;
+}
+
+/* Only in this row. The same buttons keep their usual padding everywhere else;
+   here they are five abreast and the 3px they each give back is what buys the
+   single line. The ::before hit area is untouched, so the targets do not shrink
+   with them. */
+.pm-quickbar-rosterhead-controls > .pm-quickbar-btn {
+    flex: 0 0 auto;
+    padding-left: 10px;
+    padding-right: 10px;
+}
+
+/* This row is tighter than the others (4px), so the same rule gives a smaller
+   horizontal reach. Vertically there is no neighbour to collide with. */
+.pm-quickbar-rosterhead-controls > .pm-quickbar-btn::before {
+    inset: -3px -2px;
+}
+
+/* The two that absorb whatever is left. A select cannot shrink below its widest
+   option unless it is told it may, which is what min-width does here. */
+.pm-quickbar-rosterhead-controls > .pm-quickbar-sort {
+    flex: 1 1 0;
+    /* Not zero. Zero let them shrink to 49px on a 320px screen, which is an arrow
+       and about one and a half syllables. This is the width below which the
+       control stops being readable, and the media query further down is what
+       happens instead of going under it. */
+    min-width: 68px;
+}
+
+/* Mirrors .pm-manager-select above: a select cannot host the ::before hit area
+   trick (it is a replaced element with no generated pseudo box), so the tap
+   target is grown by the select's own border box instead. */
+.pm-quickbar-sort {
+    box-sizing: border-box;
+    /* A select cannot host the ::before the buttons use (it is a replaced
+       element), so its hit area IS its border box and the box has to carry the
+       whole 44px on its own. It was 40px, which the audit caught only once the
+       buttons around it had stopped overlapping it. */
+    min-height: 44px;
+    max-width: 40vw;
+    background: color-mix(in srgb, currentColor 8%, transparent);
+    color: var(--SmartThemeBodyColor);
+    border: var(--pm-rule);
+    padding: 4px 8px;
+    font-size: 0.78em;
+}
+
+.pm-quickbar-chips {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    padding: 4px 12px 8px;
+}
+
+.pm-quickbar-chip {
+    position: relative;
+    flex: 0 0 auto;
+    padding: 7px 14px;
+    min-height: 34px;
+    border: 1px solid var(--pm-edge);
+    background: var(--pm-lift-1);
+    color: var(--SmartThemeBodyColor);
+    font: inherit;
+    font-size: 0.82em;
+    white-space: nowrap;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+
+/* Grows the tap target without growing the pill itself. The
+   horizontal reach is half the 6px gap in .pm-quickbar-chips, not all of it: at -6px
+   each chip claimed the whole gap, so the right hand neighbour's hit area started
+   where the left one's ended and a tap in between went to whichever was painted
+   later. Vertically there is no neighbour to collide with, so the full expansion
+   stays. */
+.pm-quickbar-chip::before {
+    content: '';
+    position: absolute;
+    inset: -6px -3px;
+}
+
+/* Selection is shown by weight and border color, never by hover.
+   The chip's own filled state is defined once, with the other filled controls,
+   further down: the version of it that used to sit here declared the same four
+   properties and every one of them was overridden there. */
+
+@media (hover: hover) {
+    .pm-quickbar-chip:hover { background: color-mix(in srgb, currentColor 14%, transparent); }
+}
+
+.pm-quickbar-labeleditor {
+    padding: 2px 12px 10px 28px;
+}
+
+/* The row is a checkbox plus one line of text, which came out around
+   30px tall. 40px is the floor for anything a thumb has to hit, and the content stays
+   centred in it rather than the row growing a gap at the bottom. */
+.pm-quickbar-labelrow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    box-sizing: border-box;
+    min-height: 40px;
+    padding: 7px 0;
+    cursor: pointer;
+}
+
+/* Same reason as .pm-settings-label:active. The row is the hit target, so the row
+   is what has to look pressed; the checkbox alone is 24px under a fingertip.
+   accent-color used to live here and stopped meaning anything once .pm-checkbox
+   took appearance: none. */
+.pm-quickbar-labelrow:active {
+    background: color-mix(in srgb, currentColor 10%, transparent);
+    }
+
+.pm-quickbar-labelname {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pm-quickbar-newlabel {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding-top: 4px;
+}
+
+/* The input exception: the panel turns off user-select and the tap
+   highlight everywhere else, but this is the one place text is typed and both
+   have to come back. */
+.pm-quickbar-newlabel-input {
+    flex: 1 1 auto;
+    box-sizing: border-box;
+    min-height: 40px;
+    background: color-mix(in srgb, currentColor 8%, transparent);
+    color: var(--SmartThemeBodyColor);
+    border: var(--pm-rule);
+    padding: 4px 8px;
+    font: inherit;
+    user-select: text;
+    -webkit-user-select: text;
+}
+
+/* Rendered persona images. Without max-width a full size sprite overflows the
+   chat column on a phone. There are three display styles. */
+.pm-asset {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin: 8px 0;
+    }
+
+.pm-asset-bordered {
+    border: var(--pm-rule);
+    padding: 4px;
+}
+
+.pm-asset-polaroid {
+    background: var(--SmartThemeBlurTintColor);
+    border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+        /* The wide bottom edge is what makes it read as a photo print. */
+    padding: 10px 10px 28px;
+    box-shadow: 0 2px 8px color-mix(in srgb, currentColor 25%, transparent);
+}
+
+/* Top layer host for the quick panel. The top layer is pinned to the viewport by
+   the spec, so a theme transforming body can no longer drag the panel off screen. */
+.pm-quickbar-host {
+    position: fixed;
+    inset: 0;
+    width: auto;
+    height: auto;
+    max-width: none;
+    max-height: none;
+    margin: 0;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    overflow: visible;
+}
+
+.pm-quickbar-host::backdrop {
+    background: transparent;
+}
+
+.pm-quickbar-host .pm-quickbar-backdrop,
+.pm-quickbar-host .pm-quickbar-panel {
+    position: absolute;
+}
+
+/* The send form slot is about 28px wide; a text label cannot fit next to the
+   thumbnail there. The version name lives on the tooltip and in the panel header. */
+#pm-quickbar .pm-quickbar-label {
+    display: none;
+}
+
+/* The persona row grows a second line only when the user asked
+   for the version names, so the text half is a column and the check mark and the
+   thumbnail stay centred against the whole of it. */
+.pm-quickbar-rowtext {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.pm-quickbar-rowtop {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+}
+
+.pm-quickbar-versionbadge {
+    flex: 0 0 auto;
+    font-size: 0.75em;
+    color: var(--pm-muted);
+}
+
+/* One line whatever the persona carries. A list of thirty personas cannot grow by
+   however many versions each of them happens to have. */
+.pm-quickbar-versionline {
+    font-size: 0.75em;
+    color: var(--pm-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Row identity for the persona list: same-named personas differ only by avatar. */
+.pm-quickbar-rowimg {
+    width: 40px;
+    height: 40px;
+    object-fit: cover;
+    flex: none;
+    margin-right: 10px;
+    border: 2px solid var(--pm-edge);
+    background: var(--pm-lift-1);
+}
+
+
+/* Manager screen. Rides its own top layer dialog for the same
+   measured reason the quick panel does: a themed ancestor with a transform
+   becomes the containing block for position fixed and drags the overlay off
+   screen. The shell is full viewport and scrolls its body, never the page. */
+.pm-manager-host {
+    position: fixed;
+    inset: 0;
+    width: auto;
+    height: auto;
+    max-width: none;
+    max-height: none;
+    margin: 0;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    overflow: visible;
+}
+
+.pm-manager-host::backdrop {
+    background: color-mix(in srgb, var(--SmartThemeShadowColor) 45%, transparent);
+}
+
+/* height and top come from visualViewport in manager.js, because a vh
+   based height ignores the on screen keyboard, and this screen has a textarea
+   in it, so a vh shell puts the save button under the keyboard. */
+.pm-manager-panel {
+    position: absolute;
+    left: 0;
+    right: 0;
+    box-sizing: border-box;
+    width: min(560px, 100%);
+    margin: 0 auto;
+    border-radius: 0;
+    display: flex;
+    flex-direction: column;
+    /* Same as the quick panel: the shell clips and .pm-scroll
+       inside it scrolls, so the scrollbar stays within the panel's own edge. */
+    overflow: hidden;
+    /* No Android tap highlight, and no text selection outside
+       the editor, so a long press on a row does not start a selection. */
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+}
+
+/* A file input is in the tree rather than made on demand, so syncing can take it
+   dead with everything else; this is what keeps it from being drawn as a second
+   unexplained button next to ours. The settings drawer has the same pair. */
+.pm-manager-panel .pm-hidden {
+    display: none;
+}
+
+/* A flex row of the panel, above .pm-scroll rather than
+   sticky inside it: nothing ever passes underneath, so the theme's translucent
+   tint has nothing to let show through, at no compositing cost. */
+.pm-manager-sticky {
+    flex: 0 0 auto;
+}
+
+.pm-manager-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 14px 16px 18px;
+    flex: 0 0 auto;
+    /* .pm-mass in the markup supplies the ink block and the liquid edge. The
+       26px of drip hangs outside this box, so the tab row below owns the matching
+       top padding rather than this element growing to contain decoration. */
+    position: relative;
+    z-index: 1;
+}
+
+.pm-manager-tabs {
+    display: flex;
+    gap: 6px;
+    /* Clears the drip hanging out of the header above it. */
+    padding: 34px 12px 6px;
+    flex: 0 0 auto;
+}
+
+/* 40px is the floor for anything a thumb has to hit, and the
+   three tabs share the width evenly so none of them is a small target. */
+.pm-manager-tab {
+    flex: 1 1 0;
+    box-sizing: border-box;
+    min-height: 40px;
+    border: var(--pm-rule);
+    background: color-mix(in srgb, currentColor 8%, transparent);
+    color: var(--SmartThemeBodyColor);
+    font: inherit;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+
+/* The selected tab is shown by weight and border color, never
+   by hover, because a touch screen has no hover to show it with. */
+/* Filled, not outlined. In the reference the current choice in a pill row is a
+   solid block and the rest are outlines, which survives a glance on a phone in a
+   way a coloured border does not. */
+.pm-manager-tab-active {
+    border-color: var(--pm-accent-edge);
+    background: var(--pm-accent-wash);
+    color: var(--SmartThemeBodyColor);
+    font-weight: 700;
+}
+
+@media (hover: hover) {
+    .pm-manager-tab:hover { background: color-mix(in srgb, currentColor 14%, transparent); }
+}
+
+/* The scrolling moved out to .pm-scroll, so this is now just the
+   content block under the sticky bar. */
+.pm-manager-body {
+    padding: 4px 0 16px;
+}
+
+.pm-manager-group {
+    padding-bottom: 8px;
+}
+
+/* One line under the tab name saying what the tab is for, drawn
+   at all times rather than hidden in a title attribute a phone cannot reach. */
+.pm-manager-tabdesc {
+    padding: 0 12px 8px;
+    font-size: 0.8em;
+    color: var(--pm-muted);
+    border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+}
+
+/* The rows of one tab. The last row is an add button, and without this it sits
+   flush against the bottom of the scroll area with nothing under the thumb. */
+.pm-manager-tabbody {
+    padding: 0 0 8px;
+}
+
+/* NOT cards. The first pass made these lifted rounded cards and the user rejected
+   it on sight as the AI default, with density named as the cost: 30 personas at
+   card scale is a scroll where a list was.
+
+   What separates items instead is rhythm. A hairline, generous left inset for the
+   name to start from, and nothing else. The character of this panel lives in its
+   chrome (the mass, the drip, the portrait), not in decorating every row. */
+.pm-manager-section,
+.pm-manager-version {
+    padding: 9px 14px 9px 16px;
+    border-bottom: 1px solid var(--pm-hairline);
+}
+
+.pm-manager-section:last-child,
+.pm-manager-version:last-child {
+    border-bottom: none;
+}
+
+/* Every row on this screen is now the same shape: the
+   identity on the left as one large tap target, one primary action, and the ⋯ that
+   opens the rest. */
+.pm-manager-rowhead {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 0;
+}
+
+/* The identity half, as a button so the tap that opens the drawer cannot be the
+   same event as the tap on the primary action beside it. The 40px
+   floor, and it takes the row's free width, which is the large target a thumb
+   actually wants. */
+.pm-manager-rowname {
+    display: block;
+    flex: 1 1 auto;
+    min-width: 0;
+    box-sizing: border-box;
+    min-height: 40px;
+    padding: 4px 6px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.pm-manager-rowname:active {
+    background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+@media (hover: hover) {
+    .pm-manager-rowname:hover { background: color-mix(in srgb, currentColor 8%, transparent); }
+}
+
+.pm-manager-rowtop {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    font-weight: 600;
+}
+
+/* The one line summary that replaced a block of detail on version rows. One line
+   whatever it holds, because a list of versions is a list, not a report. */
+.pm-manager-rowsummary {
+    font-size: 0.78em;
+    font-weight: 400;
+    /* Not --SmartThemeEmColor. That variable is whatever the theme author chose,
+       and measured across four themes it fell to 4.04:1 on the sepia one, under
+       the 4.5:1 floor for body text. Derived from the body colour instead, it
+       keeps a fixed fraction of a contrast the theme already guarantees, which
+       cannot be undercut by a theme that picked a washed out em colour. */
+    color: color-mix(in srgb, currentColor 78%, transparent);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Which row is open is drawn, never hovered. */
+.pm-manager-rowopen {
+    background: color-mix(in srgb, currentColor 8%, transparent);
+}
+
+.pm-manager-more {
+    flex: 0 0 auto;
+    min-width: 44px;
+}
+
+/* The drawer itself. Rule 1 puts its buttons one per line at 40px rather than
+   four across, which is what made the version row unreadable on the phone. */
+.pm-manager-expand {
+    padding: 4px 0 8px;
+    border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.pm-manager-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: stretch;
+}
+
+/* Rule 5: the destructive button is last and separated. 12px plus the rule above
+   it is more than the 8px asked for, and the line is what makes the
+   separation visible rather than merely present. */
+.pm-manager-danger {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+}
+
+.pm-manager-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pm-manager-count {
+    flex: 0 0 auto;
+    font-size: 0.8em;
+    font-weight: 400;
+    color: var(--pm-muted);
+}
+
+/* The 40px floor again: these buttons carry two hangul syllables each and sit
+   four to a row on a phone, so the box itself is the tap target. */
+.pm-manager-btn {
+    box-sizing: border-box;
+    min-height: 40px;
+    min-width: 40px;
+}
+
+.pm-manager-actions {
+    flex: 0 1 auto;
+    padding: 2px 0;
+}
+
+.pm-manager-pickrow {
+    display: flex;
+    align-items: center;
+    /* 12px, not 8. At 8 the caption and its control read as one crowded lump, which
+       is what came back from the device about 선택지 / 선택지 고르기. */
+    gap: 12px;
+    padding: 4px 0 8px;
+}
+
+/* A pick row inside a section already sits in that section's inset. One drawn
+   straight into a tab body does not, and the 이력 tab's 선택지 row was therefore
+   flush against the panel edge while every other line on the screen was indented.
+   Same gutter as the section rows. */
+.pm-manager-tabbody > .pm-manager-pickrow,
+.pm-manager-picker > .pm-manager-pickrow {
+    padding-left: 16px;
+    padding-right: 14px;
+}
+
+/* The label column. Fixed width so 위치 / 깊이 / 역할 / 월드인포 line up and their
+   controls all start at the same x, which is what makes a stack of them read as a
+   form rather than as four unrelated rows. */
+.pm-manager-pickrow > .pm-manager-picklabel,
+.pm-manager-valuerow > .pm-manager-picklabel {
+    min-width: 4.5em;
+}
+
+/* The control takes the rest of the line rather than hugging the label. */
+.pm-manager-pickrow > .pm-manager-select {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.pm-manager-picklabel {
+    flex: 0 0 auto;
+    font-size: 0.8em;
+    color: var(--pm-muted);
+}
+
+/* A block, not a flex row: the head is the row and the drawer sits under it. */
+.pm-manager-variantrow {
+    padding: 2px 0 2px 8px;
+    border-top: 1px solid color-mix(in srgb, currentColor 10%, transparent);
+}
+
+/* Opening a body hides the list and this fills the panel. */
+.pm-manager-editorscreen {
+    padding: 6px 12px 0;
+}
+
+.pm-manager-editorhead {
+    padding: 2px 0 8px;
+    font-weight: 600;
+    color: var(--SmartThemeQuoteColor);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Rule 3's other half: [저장] and [목록으로] stay at the bottom edge while the
+   body is scrolled. Sticky is relative to .pm-scroll, which is why the whole
+   editor is drawn inside it. The background is the panel's own theme tint, and
+   that tint is translucent by design, so one layer let the editor text show
+   through this strip on every scroll. Two gradient copies of the same variable
+   stack on the base coat: three layers of alpha a read as 1-(1-a)^3 without
+   inventing a colour the theme does not have. backdrop-filter was rejected for
+   this exact strip, because this device re-filters on every scrolled frame. */
+.pm-manager-editorfoot {
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
+    padding: 8px 0;
+    background-color: var(--SmartThemeBlurTintColor);
+    background-image:
+        linear-gradient(var(--SmartThemeBlurTintColor), var(--SmartThemeBlurTintColor)),
+        linear-gradient(var(--SmartThemeBlurTintColor), var(--SmartThemeBlurTintColor));
+    border-top: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+}
+
+/* The panel is unselectable everywhere else; the editor is the one place text
+   is typed, so selection and the caret come back here. */
+.pm-manager-editor-text {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 240px;
+    resize: vertical;
+    background: color-mix(in srgb, currentColor 8%, transparent);
+    color: var(--SmartThemeBodyColor);
+    border: var(--pm-rule);
+    padding: 8px;
+    font: inherit;
+    user-select: text;
+    -webkit-user-select: text;
+}
+
+.pm-manager-picks {
+    padding: 2px 0 0 8px;
+}
+
+.pm-manager-pick {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 3px 0;
+    font-size: 0.85em;
+    border-bottom: 1px solid color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.pm-manager-pick:last-child { border-bottom: none; }
+
+.pm-manager-pickname {
+    color: var(--pm-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pm-manager-pickvalue {
+    flex: 0 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* A pick naming a variant that is gone reads 없음 and has to
+   look different from a live one, since it is the state the user must repair. */
+.pm-manager-dead .pm-manager-pickvalue {
+    color: var(--SmartThemeQuoteColor);
+    font-weight: 600;
+}
+
+/* Five tabs instead of three. The 40px floor holds, so on a narrow
+   phone they wrap onto a second line rather than shrinking below the thumb. */
+.pm-manager-tabs {
+    flex-wrap: wrap;
+}
+
+.pm-manager-tab {
+    min-width: 44px;
+}
+
+/* The no-hover rule's sibling: a tooltip needs a hover to appear, so the reason a
+   button is disabled is drawn as text under the row as well as put in title. */
+.pm-manager-actionswrap {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+    flex: 0 1 auto;
+}
+
+.pm-manager-hint {
+    font-size: 0.75em;
+    color: var(--pm-muted);
+    text-align: right;
+}
+
+/* The same sentence inside a drawer, where the buttons are a full width column
+   and a right aligned reason would float away from the button it belongs to. */
+.pm-manager-hint-left {
+    text-align: left;
+    padding: 0 2px;
+}
+
+/* Persona picker in the header. The screen says which persona it
+   is pointed at, and the whole strip is the control that changes it. */
+.pm-manager-target {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1 1 auto;
+    min-width: 0;
+    box-sizing: border-box;
+    min-height: 40px;
+    padding: 4px 8px;
+    border: var(--pm-rule);
+    background: color-mix(in srgb, currentColor 8%, transparent);
+    color: var(--SmartThemeBodyColor);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+}
+
+@media (hover: hover) {
+    .pm-manager-target:hover { background: color-mix(in srgb, currentColor 14%, transparent); }
+}
+
+.pm-manager-targetimg {
+    width: 34px;
+    height: 34px;
+    object-fit: cover;
+    flex: none;
+    border: 2px solid var(--pm-accent-edge);
+    background: var(--pm-lift-1);
+}
+
+.pm-manager-caret {
+    flex: none;
+    font-size: 0.8em;
+    color: var(--pm-muted);
+}
+
+.pm-manager-picker {
+    padding: 4px 0;
+}
+
+.pm-manager-personarow {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    box-sizing: border-box;
+    min-height: 44px;
+}
+
+/* History tab. One column, three toggles, and a diff that never
+   relies on colour alone. */
+.pm-manager-historyrow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    box-sizing: border-box;
+    min-height: 44px;
+}
+
+.pm-manager-historytime {
+    flex: 0 0 auto;
+    font-size: 0.75em;
+    color: var(--pm-muted);
+}
+
+.pm-manager-historydetail {
+    padding: 6px 12px 10px;
+}
+
+/* Same as the panels: the shell keeps the border and clips, the
+   wrapper inside scrolls, so this box's own scrollbar stays inside its rounded
+   edge. The cap comes from sizeToViewport's measured px (the 40vh this used to be
+   does not shrink when the keyboard opens); the fallback only
+   exists for the frame before the first measurement. */
+.pm-manager-text {
+    margin: 6px 0;
+    border: var(--pm-rule);
+    background: color-mix(in srgb, currentColor 6%, transparent);
+    overflow: hidden;
+    font-size: 0.9em;
+    user-select: text;
+    -webkit-user-select: text;
+}
+
+.pm-manager-textscroll {
+    padding: 8px;
+    max-height: var(--pm-history-cap, 240px);
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.pm-diff-del {
+    text-decoration: line-through;
+    color: var(--pm-muted);
+}
+
+.pm-diff-add {
+    text-decoration: underline;
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor) 22%, transparent);
+    font-weight: 600;
+}
+
+.pm-manager-logbox {
+    padding: 8px 12px 4px;
+    border-top: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+}
+
+.pm-manager-logrow {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 3px 0;
+    font-size: 0.8em;
+    border-bottom: 1px solid color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.pm-manager-logrow:last-child { border-bottom: none; }
+
+.pm-manager-logkind {
+    flex: 0 0 auto;
+    /* Ink and weight, not colour. Same measurement as .pm-check. */
+    color: currentColor;
+}
+
+/* Asset tab. The picture is the row's identity, so it leads. The
+   row is a block now, like every other row on this screen: the head is the line
+   and the drawer with 삭제 in it sits underneath. */
+.pm-manager-assetrow,
+.pm-manager-grouprow {
+    padding: 6px 12px;
+    border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.pm-manager-assetrow .pm-asset {
+    width: 56px;
+    height: 56px;
+    object-fit: cover;
+    flex: none;
+    margin: 0;
+}
+
+.pm-manager-assetsel {
+    padding: 6px 0 0 8px;
+}
+
+.pm-manager-upload {
+    padding: 6px 12px;
+}
+
+/* Settings screen. Lives inside SillyTavern's own extensions
+   drawer, so it borrows that layout and only styles its own rows. */
+.pm-settings {
+    color: var(--SmartThemeBodyColor);
+    -webkit-tap-highlight-color: transparent;
+    /* Take the whole row, whatever kind of box the extension list turns out to be
+       (device report: 확장 목록에서 가로 길이가 축소).
+
+       A block always fills its parent, so this looks redundant - and it is, right
+       up until the parent is not a block. A flex or grid list whose items are not
+       stretched sizes every child to ITS OWN content, and then the rows in that
+       list are as wide as the extension names in them: ours is three syllables and
+       came out narrowest of the lot. Which of the two below does the work depends
+       on the build, so both are here; neither costs anything where the list
+       already stretched us. */
+    box-sizing: border-box;
+    width: 100%;
+    align-self: stretch;
+}
+
+.pm-settings .pm-hidden {
+    display: none;
+}
+
+/* Collapsed, this row is laid out by SillyTavern's own .inline-drawer-header
+   and by nothing of ours. The layout that used to live here (flex, gap, a 40px
+   floor) was a copy of theirs plus a little, and the little is what made our row
+   sit differently from every other extension in that list. What stays is the two
+   properties that are about behaviour rather than looks. */
+.pm-settings-header {
+    /* The three that describe what the row visibly IS in that list: a title on the
+       left, SillyTavern's chevron on the right, centred. Keeping them costs
+       nothing where SillyTavern says the same thing, and saves the row from
+       stacking on a build whose own rule turns out to say it differently.
+       What is NOT here is the gap and the 40px floor that used to sit alongside:
+       that was the little extra which made our row taller than its neighbours. */
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    user-select: none;
+}
+
+/* Open, the row becomes this extension's own header, and then it needs its own
+   geometry back. */
+.pm-settings-header.pm-mass {
+    gap: 8px;
+    box-sizing: border-box;
+    min-height: 40px;
+}
+
+/* The chevron is SillyTavern's icon now, so it needs nothing from us except
+   the one thing our own filled header would otherwise break: on the ink block it
+   has to invert with everything else standing on it. */
+.pm-mass .inline-drawer-icon {
+    color: var(--pm-on-mass);
+}
+
+.pm-settings-content {
+    padding: 4px 0 8px;
+}
+
+.pm-settings-row {
+    padding: 6px 0;
+    border-bottom: 1px solid color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.pm-settings-label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    box-sizing: border-box;
+    min-height: 40px;
+    cursor: pointer;
+}
+
+.pm-settings-labeltext {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.pm-settings-hint {
+    font-size: 0.75em;
+    color: var(--pm-muted);
+    padding-bottom: 2px;
+}
+
+/* A checkbox drawn at its default size is a 13px target, so the
+   hit area is widened without changing what is drawn. */
+/* Measured on the device (Android 10 / SamsungBrowser 30): the native checkbox
+   came out 14x14 CSS px against a 411px viewport, pinned to the right edge, and
+   width/height above lost to SillyTavern's own input rule. The ::before that used
+   to sit here tried to widen the target with inset: -10px, but a pseudo element
+   generates no box on an <input>, a replaced element, so the 34px target it
+   claimed never existed. The whole row was reachable through the wrapping label,
+   yet with the tap highlight suppressed and the only feedback a 14px tick under
+   the user's own thumb, a hit that worked was indistinguishable from a miss.
+   appearance: none takes the sizing back and lets ::after draw a mark big enough
+   to see. */
+.pm-settings-check,
+.pm-checkbox {
+    appearance: none;
+    -webkit-appearance: none;
+    position: relative;
+    flex: none;
+    box-sizing: border-box;
+    width: 24px;
+    height: 24px;
+    margin: 0;
+    border: var(--pm-rule);
+    background: color-mix(in srgb, currentColor 8%, transparent);
+    cursor: pointer;
+}
+
+.pm-settings-check:checked,
+.pm-checkbox:checked {
+    border-color: var(--SmartThemeQuoteColor);
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor) 40%, transparent);
+}
+
+/* The tick, from two borders, so it needs no font, no image and no icon set. */
+.pm-settings-check:checked::after,
+.pm-checkbox:checked::after {
+    content: "";
+    position: absolute;
+    left: 8px;
+    top: 3px;
+    width: 6px;
+    height: 12px;
+    border: solid currentColor;
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+}
+
+.pm-settings-check:disabled,
+.pm-checkbox:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+/* The row answers the tap even when the finger lands on the text, which is where
+   most of them land: the label is the hit target, so it is the thing that has to
+   look pressed. .pm-settings sets tap-highlight to transparent, which left every
+   press on this screen with no feedback at all. */
+.pm-settings-label:active {
+    background: color-mix(in srgb, currentColor 10%, transparent);
+    }
+
+/* One width for every control in this drawer, not one per label.
+
+   They were sized by their own content: max-width capped them but nothing set a
+   width, so 자동 came out 60px, 원형 91px and a number box 49px, all in a 373px
+   row. Next to a full width label a 60px dropdown reads as a control that shrank
+   (device report: 확장 목록에서 선택지 가로 길이가 축소), and a column of them at
+   five different widths reads as five unrelated rows.
+
+   The manager's own form column states this rule already: a fixed width is what
+   makes a stack of label-and-control rows read as a form. This is that rule,
+   applied to the drawer the same way. min-width keeps it usable when the drawer
+   itself is narrow; 44px is the touch floor, which a select must carry on its own
+   box because it generates no pseudo element to borrow one from. */
+.pm-settings-number,
+.pm-settings-select {
+    box-sizing: border-box;
+    min-height: 44px;
+    flex: 0 0 auto;
+    width: 45%;
+    min-width: 96px;
+    /* A ceiling as well as a floor. The extensions drawer on a desktop is as wide
+       as the sidebar, and 45% of that was a 624px dropdown holding the word 원형.
+       Past this width the control stops looking like a field and starts looking
+       like a mistake. */
+    max-width: min(45%, 280px);
+    background: color-mix(in srgb, currentColor 8%, transparent);
+    color: var(--SmartThemeBodyColor);
+    border: var(--pm-rule);
+    padding: 4px 6px;
+    font: inherit;
+}
+
+.pm-settings-textarea {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 90px;
+    resize: vertical;
+    background: color-mix(in srgb, currentColor 8%, transparent);
+    color: var(--SmartThemeBodyColor);
+    border: var(--pm-rule);
+    padding: 8px;
+    margin: 4px 0;
+    font: inherit;
+    user-select: text;
+    -webkit-user-select: text;
+}
+
+.pm-settings-usage {
+    padding: 8px 0 4px;
+    font-size: 0.9em;
+    color: var(--pm-muted);
+}
+
+/* The threshold warning. Weight as well as colour, because colour
+   alone is not a signal every reader gets. */
+.pm-settings-warn {
+    color: var(--SmartThemeQuoteColor);
+    font-weight: 700;
+}
+
+.pm-settings-actions {
+    padding: 6px 0 2px;
+}
+
+/* 고쳐서 새 버전. The wrapper is the [수정] popup's positioning
+   context, so the popup scrolls with the text it points at; the block bodies are
+   the one place besides the editors where selection comes back on (the rest of
+   the panel stays unselectable). */
+.pm-revise {
+    position: relative;
+    padding: 0 12px 8px;
+}
+
+.pm-revise-caption {
+    margin: 8px 0 2px;
+    font-size: 0.85em;
+    font-weight: 600;
+    color: var(--pm-muted);
+}
+
+.pm-revise-text {
+    margin: 6px 0;
+    padding: 8px;
+    border: var(--pm-rule);
+    background: color-mix(in srgb, currentColor 6%, transparent);
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 0.9em;
+    user-select: text;
+    -webkit-user-select: text;
+}
+
+.pm-revise-box {
+    margin: 6px 0;
+}
+
+.pm-revise-input {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 96px;
+    resize: vertical;
+    background: color-mix(in srgb, currentColor 8%, transparent);
+    color: var(--SmartThemeBodyColor);
+    border: var(--pm-rule);
+    padding: 8px;
+    font: inherit;
+    user-select: text;
+    -webkit-user-select: text;
+}
+
+/* The 40px floor even for a floating control, and the editor footer's
+   stacked tint trick for the same reason: text sits underneath it. */
+.pm-revise-popup {
+    position: absolute;
+    z-index: 3;
+    min-height: 40px;
+    padding: 8px 14px;
+    border: var(--pm-rule);
+    background-color: var(--SmartThemeBlurTintColor);
+    background-image:
+        linear-gradient(var(--SmartThemeBlurTintColor), var(--SmartThemeBlurTintColor)),
+        linear-gradient(var(--SmartThemeBlurTintColor), var(--SmartThemeBlurTintColor));
+    color: var(--SmartThemeBodyColor);
+    font-weight: 600;
+}
+
+.pm-revise-stepshead {
+    margin: 10px 0 4px;
+    font-weight: 600;
+    font-size: 0.9em;
+}
+
+.pm-revise-step {
+    padding: 4px 0;
+    font-size: 0.85em;
+    color: var(--pm-muted);
+    border-bottom: 1px solid color-mix(in srgb, currentColor 10%, transparent);
+    overflow-wrap: anywhere;
+}
+
+/* Persona tiles: images in a responsive grid, every tile at
+   or above the 40px floor. */
+.pm-quickbar-tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+    /* 줄 간격이 타일 안쪽 간격보다 넓어야 이름이 어느 사진의 것인지 읽힌다. 둘 다
+       6px과 8px이었을 때 이름은 위 사진과 아래 사진 사이 한가운데에 떠 있었고,
+       기기에서 구별이 안 된다는 보고가 그것이다. 근접이 곧 소속이다. */
+    column-gap: 8px;
+    row-gap: 16px;
+    padding: 8px 12px;
+}
+
+/* Circles, not rounded squares. In the reference the pet selector is a row of
+   portraits and the ring around the current one is the whole selection cue, which
+   is what makes it readable at this size. */
+.pm-quickbar-tile {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    /* 사진과 이름 사이. 위의 row-gap과 짝이다. */
+    gap: 3px;
+    min-height: 56px;
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--SmartThemeBodyColor);
+    /* A button does not inherit the page font on its own, and the name fallback
+       and the check glyph would come out in the UA default without this. */
+    font: inherit;
+    cursor: pointer;
+}
+
+/* The active tile changes colour AND carries the check overlay,
+   never colour alone. */
+/* The ring reads at a glance where a border colour alone does not: it is thicker
+   than the resting border and separated from the portrait by the panel's own
+   ground, exactly as the reference draws its current pet. */
+/* Layered over the always-present name span, so a thumbnail that fails to load
+   (empty alt draws nothing) leaves the name showing instead of a blank tile. */
+.pm-quickbar-tileimg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.pm-quickbar-tilename {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    padding: 4px;
+    box-sizing: border-box;
+    font-size: 0.75em;
+    overflow: hidden;
+    word-break: break-word;
+    text-align: center;
+}
+
+/* The tile's check plate used to sit in the corner of the photo. The ring around
+   the image is the only current-persona cue on a tile now, so nothing draws this
+   and the rule went with it. .pm-check still styles the list rows, where there is
+   no ring and the mark is the cue. */
+/* Two selects and the edit toggle share the head row since 24.2, which is more
+   than one line can hold on a narrow phone; the controls wrap instead of
+   pushing the row wider than the panel. flex and min-width undo the base
+   rule's shrink 0: an unshrinkable flex item keeps its one line
+   max-content width, wrapping inside it never engages, and the overflow was
+   simply clipped by .pm-scroll. */
+
+/* 컨트롤이 다섯 개로 늘면서 머리말이 밀려 페르소/나 로 접혔다(기기 보고). 접힐 것은
+   컨트롤 쪽이지 이름이 아니다. */
+.pm-quickbar-rosterhead > .pm-quickbar-headlabel {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
+/* 버전 접기 (user request). The head becomes the control, so the whole line is
+   the target rather than a mark at the end of it. It keeps the head's own type
+   (small, spaced, upper) because it is still the group's title; what is added is
+   the mark on the right and a hit area that clears 44px without making the line
+   taller than the heads beside it. */
+.pm-quickbar-foldhead {
+    position: relative;
+    /* Room for the mark, which is out of the flow at the right edge. */
+    padding-right: 30px;
+    cursor: pointer;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+/* The whole line is the target, and the head is only 30px tall, so it is grown
+   the way every other control here is grown rather than by making the line
+   taller than the head beside it. */
+.pm-quickbar-foldhead::before {
+    content: '';
+    position: absolute;
+    inset: -7px 0;
+}
+
+.pm-quickbar-foldmark {
+    position: absolute;
+    right: 12px;
+    /* Centred on the TITLE's line, not on the head: the head carries 10px above
+       the text and 4px below it, so centring on the box would sit the mark low. */
+    top: 10px;
+    font-size: 1.3em;
+    line-height: 1;
+    color: var(--pm-muted);
+}
+
+/* The empty block is a full page graphic in the manager, where there is a page
+   to put it on. In a 388px panel the same 34px of padding made 저장된 버전 없음
+   143px tall, which the user reported as the version block being too big. */
+.pm-quickbar-panel .pm-empty {
+    padding: 16px 12px;
+}
+
+/* The three distances inside the quick panel's ink block, made by one value.
+   The user asked for the gap under the name to match the two above it; it was
+   23px against 11 and 8, because it was the sum of the name's own bottom padding
+   and the block's, neither of which knew about the other. Now the head owns
+   nothing below it, every line under it owns exactly one rhythm above it, and the
+   block owns one rhythm of ground. */
+.pm-quickbar-panel .pm-mass > .pm-quickbar-head {
+    padding-top: var(--pm-rhythm);
+    padding-bottom: 0;
+}
+
+.pm-quickbar-panel .pm-mass > .pm-quickbar-current {
+    padding: var(--pm-pair) 12px 0;
+}
+
+.pm-quickbar-panel .pm-mass > .pm-quickbar-note {
+    padding: var(--pm-pair) 12px 0;
+}
+
+/* The same three distances around a tab's own caption: the rule above it, its
+   heading, its one line of description, the rule under it. They were 10, 4 and 8.
+   The heading and its description belong together, but "belong together" was
+   being said with a number nothing else used. */
+.pm-manager-group > .pm-manager-head + .pm-manager-tabdesc {
+    padding-top: var(--pm-pair);
+    padding-bottom: var(--pm-rhythm);
+}
+
+.pm-manager-group > .pm-manager-head:has(+ .pm-manager-tabdesc) {
+    padding-top: var(--pm-rhythm);
+    padding-bottom: 0;
+}
+
+/* 언어별 이름 줄. Two columns and a tick: the language on the left in the same
+   quiet type the captions use, the name it applies in the type a name deserves,
+   and the mark on the one the persona is wearing. The language column is fixed so
+   the names line up under each other - four rows that each start where the last
+   one did read as one list, and four that start wherever their label ended read
+   as four unrelated rows. */
+.pm-quickbar-namerow {
+    gap: 10px;
+}
+
+.pm-quickbar-lang {
+    flex: 0 0 auto;
+    min-width: 4.2em;
+    font-size: 0.78em;
+    letter-spacing: 0.04em;
+    color: var(--pm-muted);
+}
+
+.pm-quickbar-namerow > .pm-quickbar-name {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* 식별 진단 두 줄. The first is a status line and reads like the usage line above
+   it; the second is evidence for a screenshot, so it is small, selectable, and
+   allowed to wrap wherever it must - a class list has no good break points and
+   truncating it would lose the one fact it is there to carry. */
+.pm-settings-identify {
+    padding: 6px 0 0;
+    font-size: 0.82em;
+    color: var(--pm-muted);
+}
+
+.pm-settings-identify-why {
+    padding: 2px 0 6px;
+    font-size: 0.76em;
+    line-height: 1.5;
+    color: var(--pm-muted);
+    overflow-wrap: anywhere;
+    user-select: text;
+    -webkit-user-select: text;
+}
+
+/* Search, filters and paging */
+
+.pm-search-row {
+    padding: 4px 12px 6px;
+}
+
+.pm-search-input {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 40px;
+    padding: 8px 10px;
+    border: var(--pm-rule);
+    background: color-mix(in srgb, currentColor 8%, transparent);
+    color: var(--SmartThemeBodyColor);
+    font: inherit;
+    user-select: text;
+    -webkit-user-select: text;
+}
+
+/* The match highlight is defined with the other filled marks further down. mark's
+   UA default is a hardcoded yellow that ignores the theme, so both sides of it
+   are stated from theme variables there. */
+
+.pm-pager {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 8px 12px;
+}
+
+.pm-pager-count {
+    font-size: 0.85em;
+    color: var(--pm-muted);
+    min-width: 3em;
+    text-align: center;
+}
+
+/* Tag chips wrap (a tag row grows down, not sideways), and the filter chips
+   reuse the group chip look. */
+.pm-tag-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    padding: 4px 12px 6px;
+}
+
+.pm-filter-chips {
+    flex-wrap: wrap;
+}
+
+.pm-manager-tagshead {
+    padding: 6px 12px 0;
+    font-size: 0.75em;
+    letter-spacing: 0.06em;
+    color: var(--pm-muted-2);
+}
+
+/* The heading format row: the label and its select on one line, the
+   hint under them, both inside the tab body's 12px gutter. */
+.pm-manager-headingbox {
+    padding: 4px 12px 0;
+}
+
+.pm-manager-headingrow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    justify-content: space-between;
+}
+
+.pm-manager-headingrow .pm-manager-select {
+    flex: 0 1 auto;
+    max-width: 60%;
+}
+
+.pm-manager-headingbox .pm-manager-note {
+    padding-left: 0;
+    padding-right: 0;
+}
+
+/* 타일+이름: the image keeps its square in a box of its own and
+   the name gets a strip underneath. */
+.pm-quickbar-tileimgbox {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    overflow: hidden;
+    box-sizing: border-box;
+    border: var(--pm-rule);
+    background: var(--pm-lift-1);
+}
+
+
+
+.pm-quickbar-tilelabel {
+    display: block;
+    padding: 2px 4px 4px;
+    font-size: 0.7em;
+    line-height: 1.2;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: center;
+}
+
+/* Device feedback: every row pads itself, but the button rows and
+   the upload row appended straight into a tab body or the picker sat flush
+   against the panel edge, where a rounded button at x=0 reads as clipped. One
+   gutter for all of them, matching the 12px the rows already use. */
+.pm-manager-tabbody > .pm-manager-actions,
+.pm-manager-picker > .pm-manager-actions {
+    padding: 6px 12px;
+}
+
+.pm-manager-tabbody > .pm-quickbar-newlabel {
+    padding: 4px 12px 0;
+}
+
+/* The list wrappers the fill functions repaint are plain divs; the pager and
+   the note inside them pad themselves, but a bare actions row would not, so
+   the gutter reaches one level deeper too.
+
+   The exclusions are load bearing. .pm-manager-upload and
+   .pm-manager-historydetail already pad themselves 12px, so adding the gutter on
+   top put the upload button and the history mode toggles at 24px from the edge
+   while the notes directly beneath them stayed at 12px. .pm-manager-actionswrap
+   is excluded because it takes the gutter itself, below. */
+.pm-manager-tabbody > div:not(.pm-manager-upload):not(.pm-manager-historydetail):not(.pm-manager-actionswrap) > .pm-manager-actions {
+    padding: 6px 12px;
+}
+
+/* A button disabled with a reason turns the row into a wrap that carries the
+   reason line underneath it. Padding the WRAP rather than the row inside keeps
+   the right aligned reason on the same edge as the buttons it explains, and it
+   stops the gutter from flipping with state: before this, the same row sat at
+   12px on a read only root and 24px when writable. */
+.pm-manager-tabbody > .pm-manager-actionswrap,
+.pm-manager-tabbody > div:not(.pm-manager-upload):not(.pm-manager-historydetail) > .pm-manager-actionswrap {
+    padding: 6px 12px;
+}
+
+/* A hair of air under the tab description line before the first control. */
+.pm-manager-tabbody {
+    padding-top: 4px;
+}
+
+/* The reference gives every screen exactly one filled action and leaves the rest
+   as outlines, so the eye finds the next step without reading. .pm-manager-primary
+   is that action; it is a class the DOM half adds, not a position, because which
+   button is primary differs per tab.
+
+   Its filled look is defined once with the other filled controls further
+   down; the copy that used to sit here was overridden there property for
+   property. */
+
+/* The roster read as a wall of same-sized text. Giving the row real height and the
+   portrait real size is most of what separates the reference's list from a table. */
+.pm-quickbar-rowtop {
+    min-height: 52px;
+}
+
+/* 타일+이름: the name belongs UNDER the portrait once the portrait is a circle,
+   because a circle has no straight bottom edge to seat a label against. The grid
+   row grows to hold it and the circle keeps its aspect ratio. */
+.pm-quickbar-tile-named .pm-quickbar-tilelabel {
+    position: static;
+    display: block;
+    padding: 6px 2px 0;
+    font-size: 0.72em;
+    line-height: 1.2;
+    text-align: center;
+    background: none;
+    color: var(--pm-muted);
+}
+
+
+/* ── The inverted band ───────────────────────────────────────────────────────
+   The previous reference asked for a liquid edge and CSS gradients could only
+   fake it: the user read the result as ellipses pasted under a box, which is what
+   it was. This reference does the same job with a shape CSS actually owns, a
+   filled rectangle running the full width with the type knocked out of it.
+
+   Both colours come from SillyTavern's own text-on-background pair, so the band
+   is guaranteed to contrast and it inverts by itself: an ink block on a light
+   theme, a light block on a dark one. */
+.pm-mass {
+    position: relative;
+    background: var(--pm-mass);
+    color: var(--pm-on-mass);
+    border-top: var(--pm-rule-strong);
+    border-bottom: var(--pm-rule-strong);
+}
+
+/* The seam under the manager's header. The rule above draws a STRONG line top and
+   bottom, and strong means the ink colour, so on a dark theme the bottom one is a
+   white hairline - drawn between the black header and the black tab standing
+   directly under it (device report: 검은 부분 사이 흰 선). The header is the only
+   mass block with something attached below it, so it is the only one whose bottom
+   edge should be the block's own colour and let the two blacks meet.
+
+   Compound, and after .pm-mass on purpose: .pm-manager-header alone carries the
+   same specificity as .pm-mass and loses to its border shorthand on source order,
+   which is how the first attempt at this changed nothing at all. */
+.pm-manager-header.pm-mass {
+    border-bottom-color: var(--pm-mass);
+}
+
+/* Type ON the band. The ground colour is the only text colour guaranteed to
+   contrast with it, since that is the pair SillyTavern itself ships. */
+.pm-mass .pm-manager-name,
+.pm-mass strong,
+.pm-mass .pm-quickbar-current {
+    color: var(--pm-on-mass);
+}
+
+.pm-mass .pm-quickbar-head,
+.pm-mass .pm-manager-head,
+.pm-mass .pm-manager-note {
+    color: var(--pm-mass-muted);
+}
+
+/* The quick panel's mass is its top block, so the group under it clears the drip
+   and the panel's own rounded top corners clip the mass with it.
+   The ground under the last line is one rhythm, the same one that puts the head
+   under the top edge and the name under the head. */
+.pm-quickbar-panel > .pm-scroll > .pm-quickbar-group.pm-mass {
+    padding-bottom: var(--pm-rhythm);
+}
+
+/* Nothing. Every group heading in this panel now sits the same distance below
+   whatever is above it - the head's own 10px - whether that thing is the black
+   block or the rule under the previous group. The user asked for those two
+   distances to be one distance (페르소나와 구분선 간의 거리만큼 버전과 검은 부분의
+   거리도), and the way to have one distance is to have one rule making it rather
+   than a second rule adding to it here. The rule this replaces is kept as a name
+   so its absence is deliberate rather than lost. */
+.pm-quickbar-group.pm-mass + .pm-quickbar-group {
+    padding-top: 0;
+}
+
+/* Avatar shape (user request). The setting is a VARIABLE on the panel, not a class
+   on each tile: it was reaching the tile grid only, so 목록 kept its hardcoded
+   circle and the setting looked broken from every view but one. As a variable it
+   reaches every place this extension draws a persona's picture, and the fallback
+   covers a panel that somehow carries no shape class.
+
+   Only the IMAGE box is ever shaped, never a tile: the tile is a layout box and
+   타일+이름 makes it taller than it is wide, where a 50% radius renders as an
+   ellipse. 사각 is square; the 3px it had was a rounded corner pretending to be
+   one. */
+/* 둥근 사각은 비율이어야 한다. 10px 고정이었을 때 70px 타일에서는 14%로 제대로
+   읽혔지만 입력창 옆 22px 아이콘에서는 45%가 되어 원과 구별되지 않았다. 기기에서
+   보고된 그대로다: 사각은 사각으로 보이는데 둥근 사각만 원으로 보임. 퍼센트는 어느
+   크기에서도 같은 모양을 준다. 상자는 넷 다 정사각이므로 가로세로 비율이 어긋날
+   일이 없다. */
+.pm-tileshape-circle { --pm-avatar-radius: 50%; }
+.pm-tileshape-rounded { --pm-avatar-radius: 22%; }
+.pm-tileshape-square { --pm-avatar-radius: 0; }
+
+.pm-quickbar-tileimgbox,
+.pm-quickbar-rowimg,
+.pm-manager-targetimg,
+.pm-quickbar-img {
+    border-radius: var(--pm-avatar-radius, 50%);
+}
+
+/* The input bar icon is mounted in SillyTavern's own send row, outside both
+   panels, so it cannot inherit a panel variable. paintButton puts the shape class
+   on the button itself; a button without one falls back to the circle above. */
+
+
+/* ── Display type ────────────────────────────────────────────────────────────
+   The reference sets its section words huge, heavy and wide, in lowercase, and
+   repeats each one across a band with the outer copies reduced to an outline.
+   That repetition is the whole identity of the page and it costs nothing but
+   text-stroke, so it is the one piece worth taking literally.
+
+   The band is built by the DOM half (bandRow in manager.js): three spans, the
+   middle one filled, the outer two ghosted. aria-hidden on the ghosts, so a
+   screen reader hears the word once. */
+.pm-band {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 12px;
+    border-top: var(--pm-rule);
+    border-bottom: var(--pm-rule);
+    overflow: hidden;
+}
+
+.pm-band-word {
+    font-family: var(--pm-font-display);
+    font-size: 1.6em;
+    font-weight: 900;
+    letter-spacing: -0.03em;
+    line-height: 1;
+    white-space: nowrap;
+    flex: 0 0 auto;
+    /* The reference's wordmark is stretched, not just bold. transform is used
+       rather than font-stretch because a Hangul system face has no width axis to
+       vary, and scaleX works on any glyph the device happens to have. */
+    transform: scaleX(var(--pm-display-stretch));
+    transform-origin: left center;
+}
+
+.pm-band-word:last-child { transform-origin: right center; }
+
+/* The outline copies. -webkit-text-stroke is the only cross-browser way to draw
+   type as a hairline, and Samsung Browser is Chromium, so it is available on the
+   one device this ships to. A build without it simply shows the word filled at
+   low opacity, which is the same idea one step quieter. */
+.pm-band-ghost {
+    color: transparent;
+    -webkit-text-stroke: 1px color-mix(in srgb, currentColor 45%, transparent);
+    opacity: 0.9;
+}
+
+@supports not (-webkit-text-stroke: 1px red) {
+    .pm-band-ghost {
+        color: color-mix(in srgb, currentColor 22%, transparent);
+        -webkit-text-stroke: 0;
+    }
+}
+
+/* On a narrow phone only the solid word fits. The ghosts are decoration, so they
+   are what goes. */
+@media (max-width: 380px) {
+    .pm-band-ghost { display: none; }
+    .pm-band { justify-content: flex-start; }
+
+    /* Below this width five controls do not fit at any readable size, so the row
+       is allowed to wrap here and only here. The phone this is built for is
+       411px, where they stand in one line. */
+    .pm-quickbar-rosterhead-controls {
+        flex-wrap: wrap;
+    }
+}
+
+/* ── The grid ────────────────────────────────────────────────────────────────
+   Everything in the reference sits in a ruled grid with cells butting against
+   each other, so a row is separated by a line that runs the full width rather
+   than by air or by a rounded card. */
+.pm-manager-section,
+.pm-manager-version {
+    border-bottom: var(--pm-rule);
+}
+
+/* ── Grain ───────────────────────────────────────────────────────────────────
+   The reference's paper texture. Two hairline gratings crossed at 90 degrees are
+   cheap enough to paint on a phone and read as tooth rather than as a pattern.
+   Fixed to the panel and not to the scrolling content, so it is composited once
+   instead of on every scroll frame, and pointer-events off so it never eats a
+   tap. Off entirely when the user asks for less motion and contrast noise. */
+/* The overlay is absolutely positioned, so whatever carries the grain has to be
+   its containing block. A plain .pm-grain gets that from position:relative.
+
+   The two panels are NOT given position:fixed here, which is what this rule used
+   to do on the strength of a comment saying they already were. They are not: both
+   declare position:absolute inside their own top-layer <dialog>, and this rule
+   was more specific than both, so it silently turned them fixed.
+
+   That matters on this user's device. 아이콘 진단 measured a theme decorating an
+   ancestor with a transform, which makes that ancestor the containing block for
+   position:fixed and draws the panel off screen with no error. Riding a top-layer
+   dialog is the whole defence against it, and a fixed child inside the dialog
+   walks back up the same ancestor chain and gives it away again. Absolute keeps
+   the panel pinned to the host, which the top layer pins to the viewport. */
+.pm-grain {
+    position: relative;
+}
+
+.pm-quickbar-panel.pm-grain,
+.pm-manager-panel.pm-grain {
+    position: absolute;
+}
+
+.pm-grain::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    opacity: 0.5;
+    background-image:
+        repeating-linear-gradient(0deg, color-mix(in srgb, currentColor 5%, transparent) 0 1px, transparent 1px 3px),
+        repeating-linear-gradient(90deg, color-mix(in srgb, currentColor 4%, transparent) 0 1px, transparent 1px 4px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .pm-grain::before { display: none; }
+}
+
+/* The grain is z-index 0 on the panel, so the panel's own children need a layer
+   of their own or the texture paints over them. */
+.pm-grain > * {
+    position: relative;
+    z-index: 1;
+}
+
+/* The same display voice on the two other places that name something big: the
+   current persona in the quick panel, and the manager's target name. */
+.pm-mass .pm-quickbar-current,
+.pm-mass strong {
+    font-family: var(--pm-font-display);
+    font-weight: 900;
+    letter-spacing: -0.02em;
+}
+
+/* Labels are the opposite end of the same system: small, wide, upper. The
+   reference sets its captions this way and it is what keeps a dense grid legible
+   without adding another size to the scale. */
+.pm-quickbar-head,
+.pm-manager-head {
+    font-variant-numeric: tabular-nums;
+}
+
+/* Tabs read as cells of the nav strip, not as buttons floating in a row: the
+   reference's top navigation is a ruled band and each item is a compartment. */
+.pm-manager-tabs {
+    gap: 0;
+    padding: 0;
+    border-bottom: var(--pm-rule);
+}
+
+.pm-manager-tab {
+    border: none;
+    border-left: var(--pm-rule);
+    background: none;
+    min-height: 44px;
+    font-weight: 700;
+}
+
+.pm-manager-tab:first-child { border-left: none; }
+
+.pm-manager-tab-active {
+    background: var(--pm-mass);
+    color: var(--pm-on-mass);
+    border-color: var(--pm-mass);
+}
+
+/* Buttons and chips are compartments too: a ruled rectangle, filled when it is
+   the state you are in. The reference has no other button shape, and one shape
+   across the whole surface is what the product register asks for anyway. */
+.pm-quickbar-btn,
+.pm-manager-btn,
+.pm-quickbar-chip {
+    background: none;
+    border: var(--pm-rule);
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    /* A button label is two or three syllables and means one thing. Broken over
+       two lines it reads as two words, and the row that squeezed it was already
+       out of room, so the row is what should give way (see .pm-manager-valuerow
+       and .pm-manager-actions, both of which wrap). */
+    white-space: nowrap;
+}
+
+.pm-quickbar-chip-active,
+.pm-manager-primary {
+    background: var(--pm-mass);
+    color: var(--pm-on-mass);
+    border-color: var(--pm-mass);
+    font-weight: 800;
+}
+
+/* An accent that is not a fill. The theme's quote colour marks the current
+   persona and nothing else, so it stays a signal rather than decoration; on a
+   filled block it would fight the knocked-out type. */
+/* Inputs match: ruled box, square, full height for a thumb. */
+.pm-search-input,
+.pm-settings-select,
+.pm-settings-number,
+.pm-manager-select {
+    border: var(--pm-rule);
+    background: none;
+}
+
+/* The search row and the pager are bands of the grid, not floating strips. */
+.pm-search-row,
+.pm-pager {
+    border-bottom: var(--pm-rule);
+}
+
+/* Settings rows are grid rows: a full-width rule, no inset, no lift. */
+.pm-settings-row {
+    border-bottom: var(--pm-rule);
+}
+
+/* Section labels get the caption treatment the reference uses on its small
+   headings: wide, upper, and set against the rule above them. */
+.pm-manager-tabdesc {
+    border-bottom: var(--pm-rule);
+    letter-spacing: 0.01em;
+}
+
+
+/* ═══ The grid, applied to the rest of the surface ════════════════════════════
+   Everything below was styled before the reference changed. Each block here says
+   what the grid does to it, so the vocabulary is the same on every screen rather
+   than only on the two that got looked at first. */
+
+/* Banners are the loudest thing this panel says, so they take the fill the same
+   way the reference's black strips do, rather than a tinted box that has to be
+   read to be noticed. The warning variant keeps the accent as its rule so the two
+   are distinguishable without colour alone. */
+.pm-quickbar-banner,
+.pm-manager-banner {
+    background: var(--pm-mass);
+    color: var(--pm-on-mass);
+    border-top: var(--pm-rule-strong);
+    border-bottom: var(--pm-rule-strong);
+    padding: 10px 14px;
+}
+
+.pm-quickbar-banner .pm-quickbar-banner-text,
+.pm-manager-banner .pm-manager-banner-text {
+    color: var(--pm-on-mass);
+    font-weight: 600;
+}
+
+.pm-quickbar-warn,
+.pm-manager-warn {
+    box-shadow: inset 0 0 0 2px var(--pm-accent);
+}
+
+/* Anything sitting ON a filled block has to invert with it. This was written for
+   banners only and the manager header is a filled block too, so [닫기] and the
+   persona picker were drawing ink type on an ink ground: invisible. Reported from
+   the device as "관리탭 상단에 보였던 패널 요소가 안 보이는 경우". Scoped to
+   .pm-mass so every filled block gets it, present and future. */
+.pm-mass .pm-quickbar-btn,
+.pm-mass .pm-manager-btn,
+.pm-mass .pm-manager-select,
+.pm-mass .pm-manager-caret,
+.pm-mass .pm-check {
+    border-color: var(--pm-on-mass);
+    color: var(--pm-on-mass);
+}
+
+/* A filled control on a filled block would vanish the other way, so it flips to
+   the ground colour with the block's own ink knocked out of it. */
+.pm-mass .pm-manager-primary,
+.pm-mass .pm-quickbar-chip-active {
+    background: var(--pm-on-mass);
+    color: var(--pm-mass);
+    border-color: var(--pm-on-mass);
+}
+
+/* The editor is a full screen cell: its head and foot are rules, not shadows. */
+.pm-manager-editorhead {
+    border-bottom: var(--pm-rule-strong);
+    padding: 10px 14px;
+}
+
+.pm-manager-editorfoot {
+    border-top: var(--pm-rule-strong);
+    /* background-color, NOT the background shorthand. The rule further up stacks
+       two gradient copies of this same variable on top of the base coat, because
+       a SillyTavern blur tint is translucent by design and one layer let the
+       body text scroll through the [저장] strip. The shorthand here reset
+       background-image to none and gave that back, on every theme whose tint has
+       alpha, which is most of them. */
+    background-color: var(--SmartThemeBlurTintColor);
+}
+
+.pm-manager-editor-text,
+.pm-settings-textarea,
+.pm-revise-input {
+    border: var(--pm-rule);
+    background: none;
+}
+
+/* History: a log is a table in this language. Time is a fixed column, the kind is
+   a second, and the detail takes the rest, divided by rules like any other cells. */
+.pm-manager-historyrow,
+.pm-manager-logrow {
+    border-bottom: var(--pm-rule);
+}
+
+.pm-manager-historytime {
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+}
+
+.pm-manager-logkind {
+    font-weight: 700;
+    letter-spacing: 0.01em;
+}
+
+.pm-manager-logbox,
+.pm-manager-historydetail {
+    border-top: var(--pm-rule);
+}
+
+/* Assets, groups and the label rows are all list cells of the same grid. */
+.pm-manager-assetrow,
+.pm-manager-grouprow,
+.pm-quickbar-labelrow {
+    border-bottom: var(--pm-rule);
+}
+
+.pm-manager-upload,
+.pm-quickbar-newlabel {
+    border-bottom: var(--pm-rule);
+}
+
+/* The expanded drawer under a row is a nested compartment: it is inset from the
+   rule above it so the nesting is legible without a second background. */
+.pm-manager-expand {
+    border-top: var(--pm-rule);
+    padding-left: 14px;
+}
+
+/* Revise: the working text is the document, so it gets the page treatment and the
+   applied steps read as a numbered ledger beside it. */
+.pm-revise-text {
+    border: var(--pm-rule);
+}
+
+.pm-revise-step {
+    border-bottom: var(--pm-rule);
+    font-variant-numeric: tabular-nums;
+}
+
+.pm-revise-stepshead,
+.pm-revise-caption {
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    font-size: 0.72em;
+}
+
+/* The floating [수정] popup is the one element that has to read as ON TOP of the
+   text rather than in the grid with it, so it takes the fill. */
+.pm-revise-popup {
+    background: var(--pm-mass);
+    color: var(--pm-on-mass);
+    border: var(--pm-rule-strong);
+    font-weight: 800;
+}
+
+/* Settings: the drawer is a stack of grid rows with the label and its control on
+   one line, exactly like the manager's rows. */
+/* 닫혀 있는 동안 이 줄은 SillyTavern 확장 목록의 다른 행들과 같아야 한다. 확장이
+   스무 개 늘어선 목록에서 우리 것만 잉크 블록이면 그것은 정체성이 아니라 소음이고,
+   기기에서 통일성을 해친다는 말이 그 뜻이다. 채움과 굵은 규칙은 pm-mass가 붙는
+   동안, 즉 서랍이 열려 있는 동안만 적용한다(settings-ui.js의 toggleDrawer). */
+.pm-settings-header.pm-mass {
+    border-bottom: var(--pm-rule-strong);
+    padding: 10px 0;
+}
+
+.pm-settings-hint {
+    color: var(--pm-muted);
+}
+
+.pm-settings-actions {
+    border-top: var(--pm-rule);
+    padding-top: 10px;
+}
+
+.pm-settings-usage {
+    border-top: var(--pm-rule);
+    padding: 10px 0;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+/* A search hit. The reference marks with a block, not a highlighter wash. */
+.pm-mark {
+    background: var(--pm-mass);
+    color: var(--pm-on-mass);
+    padding: 0 2px;
+}
+
+/* Destructive actions keep the accent off them: the accent means "current" here,
+   and a delete is not a state you are in. A rule at full ink is loud enough. */
+.pm-manager-danger {
+    border-color: currentColor;
+    font-weight: 700;
+}
+
+/* A dead reference (a version pointing at a deleted choice) is struck rather than
+   greyed, because grey is already what muted text looks like. */
+.pm-manager-dead {
+    text-decoration: line-through;
+    opacity: 0.65;
+}
+
+/* ── Empty states ────────────────────────────────────────────────────────────
+   The reference gives an empty region a large graphic rather than a line of grey
+   text tucked in a corner. We have no illustration to spend, so the asterisk it
+   uses as a divider does the work: one big glyph, the negation under it, and
+   whatever button the screen already puts below stays the next action. */
+.pm-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    padding: 34px 16px;
+    border-bottom: var(--pm-rule);
+}
+
+.pm-empty-mark {
+    font-size: 2.6em;
+    line-height: 1;
+    font-weight: 400;
+    /* Decoration, so it is aria-hidden in the markup, but it still has to be
+       visible: at 32% it measured 1.82:1 on the sepia theme, which is a design
+       failure before it is an accessibility one. */
+    color: color-mix(in srgb, currentColor 64%, transparent);
+}
+
+.pm-empty-text {
+    font-family: var(--pm-font-display);
+    font-size: 1.05em;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    text-align: center;
+}
+
+/* The ring follows the shape, so it lives on the image square like the shape
+   does. Two duplicate .pm-quickbar-tile-active rules were left behind by earlier
+   rounds, both targeting the layout box; this is the only one now. */
+.pm-quickbar-tile-active .pm-quickbar-tileimgbox {
+    border-color: var(--pm-accent);
+    box-shadow: 0 0 0 2px var(--SmartThemeBlurTintColor), 0 0 0 3px var(--pm-accent);
+}
+
+.pm-quickbar-tile-active .pm-quickbar-tilelabel {
+    font-weight: 800;
+}
+
+/* ── Drag to reorder ─────────────────────────────────────────────────────────
+   The handle is the only thing that starts a drag. touch-action: none is what
+   actually stops the browser from claiming the gesture as a scroll: without it
+   the first pointermove is swallowed and the row never follows the finger.
+   Everything else in the list keeps its normal scrolling. */
+.pm-draghandle {
+    flex: none;
+    min-width: 44px;
+    padding: 8px 10px;
+    touch-action: none;
+    cursor: grab;
+    font-size: 1.1em;
+    line-height: 1;
+}
+
+.pm-draghandle:active { cursor: grabbing; }
+
+/* The row being carried. Dimmed rather than lifted: this design has no shadows,
+   so depth is not a language it speaks. */
+.pm-dragging {
+    opacity: 0.45;
+}
+
+/* Where it would land. A thick rule across the top edge, which is the same
+   vocabulary the rest of the grid uses, rather than an inserted gap that would
+   make every other row jump while the finger is still down. */
+.pm-dragover {
+    box-shadow: inset 0 3px 0 0 var(--pm-accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .pm-dragging { opacity: 0.7; }
+}
+
+/* The quick panel's foot now carries six shortcuts rather than two, so it wraps
+   into a grid of cells instead of a single row that would squeeze each button
+   below the thumb floor on a 411px screen. */
+.pm-quickbar-footer {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0;
+    border-top: var(--pm-rule-strong);
+}
+
+.pm-quickbar-footer .pm-quickbar-btn {
+    border: none;
+    border-left: var(--pm-rule);
+    border-top: var(--pm-rule);
+    min-height: 46px;
+}
+
+/* No reach at all here, because there is nowhere to reach into. This footer is a
+   grid with NO gap: the cells tile the row edge to edge, so every pixel of it
+   already belongs to a button, and three pixels of reach on each side only takes
+   pixels that belong to the neighbour. Six pixels wide, along the whole width of
+   the panel, between 편집 and 에셋 and between 버전 and 그룹 - which is to say the
+   band where a tap opens the wrong tab. The cells are 46px on their own. */
+.pm-quickbar-footer .pm-quickbar-btn::before {
+    content: none;
+}
+
+.pm-quickbar-footer .pm-quickbar-btn:nth-child(3n + 1) { border-left: none; }
+.pm-quickbar-footer .pm-quickbar-btn:nth-child(-n + 3) { border-top: none; }
+
+/* ── Multi select and bulk actions ───────────────────────────────────────────
+   A picked row is filled, the same fill every other "you are in this state"
+   control uses. Not a checkbox column: the whole row is already the target, and
+   a column would cost 44px of width on a 411px screen. */
+.pm-quickbar-bulk {
+    border-top: var(--pm-rule);
+    border-bottom: var(--pm-rule-strong);
+    padding: 8px 0 10px;
+}
+
+.pm-quickbar-bulkcount {
+    padding: 0 14px 8px;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+}
+
+.pm-quickbar-bulk .pm-manager-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 0 12px;
+}
+
+.pm-row.pm-picked {
+    background: var(--pm-mass);
+    color: var(--pm-on-mass);
+}
+
+.pm-row.pm-picked .pm-quickbar-versionline,
+.pm-row.pm-picked .pm-quickbar-versionbadge {
+    color: var(--pm-mass-muted);
+}
+
+/* A picked tile marks the image square, since that is where the ring lives too,
+   and keeps its name legible underneath. */
+/* An inset box-shadow, not an outline. A negative outline-offset draws a
+   RECTANGLE inside the box on this engine even when the box is a circle, so the
+   four corners of the square sat outside the circle and showed as pale nicks at
+   the tile's vertices , reported from the device as 꼭지점 흰색으로 살짝 남음.
+   An inset shadow follows border-radius, so it works for all three shapes. */
+.pm-quickbar-tile.pm-picked .pm-quickbar-tileimgbox {
+    box-shadow: inset 0 0 0 3px var(--pm-mass);
+}
+
+.pm-quickbar-tile.pm-picked .pm-quickbar-tilelabel {
+    background: var(--pm-mass);
+    color: var(--pm-on-mass);
+    font-weight: 800;
+}
+
+/* 타일+이름, redesigned. The old one crammed the name into the tile's own corner;
+   now the square is the picture and the name is a line under it, centred, in the
+   grid's caption voice. Two lines maximum so a long name does not make one tile
+   taller than its neighbours. */
+.pm-quickbar-tilelabel {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    white-space: normal;
+    overflow: hidden;
+    padding: 0 2px;
+    font-size: 0.72em;
+    line-height: 1.25;
+    text-align: center;
+    color: var(--pm-muted);
+}
+
+/* ── 편집 tab: the two folded blocks above the item list ─────────────────────
+   Same cell as a section row, because they are the same thing to the eye: a head
+   with a name, a one line summary and the mark that opens it. Principle 4 is why
+   they fold at all, with thirty personas the list underneath is what the tab is
+   for and four open rows above it would push that list off the first screen. */
+.pm-manager-fold {
+    padding: 9px 14px 9px 16px;
+    border-bottom: var(--pm-rule);
+}
+
+/* 프롬프트 배치 sits at the very bottom of the 편집 tab, under the item list and
+   its [+ 항목 추가]. Without a rule above it the fold reads as one more thing
+   inside the last item, which is what the device screenshot showed. The strong
+   rule is the one this grid uses to separate regions rather than rows. */
+.pm-manager-tabbody > .pm-manager-fold:last-child {
+    border-top: var(--pm-rule-strong);
+    margin-top: 4px;
+}
+
+/* Label, value and the control that changes it, on one line. The value takes the
+   slack so the button keeps its own width and the label never wraps under it. */
+.pm-manager-valuerow {
+    display: flex;
+    align-items: center;
+    /* Wraps, because a row with two buttons in it (언어별 이름's 수정 and 적용)
+       adds up to exactly the panel width at 320px, and a flex line at its limit
+       squeezes the buttons until their two syllables break across two lines.
+       Dropping the second button to its own line reads; a broken label does not. */
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 6px 0;
+    cursor: default;
+    border-bottom: 1px solid var(--pm-hairline);
+}
+
+.pm-manager-valuerow:last-child { border-bottom: none; }
+
+/* The row is not a target itself: its button is. Without this the whole line
+   reacts to a tap that does nothing, which reads as a control that failed. */
+.pm-manager-valuerow:active { background: none; }
+
+/* The 언어별 이름 rows put their identity in a button of their own, the way the
+   list rows do: the language and the name together, opening the name editor. It
+   takes the slack so the two apply buttons keep their width, and it is a bigger
+   target than the 수정 button it replaced. */
+.pm-manager-nameedit {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 4px 0;
+}
+
+.pm-manager-nameedit .pm-manager-rowtop {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+}
+
+.pm-manager-nameedit .pm-manager-value {
+    text-align: left;
+}
+
+.pm-manager-value {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+}
+
+.pm-manager-valuerow .pm-manager-select {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* A value row plus the sentence explaining why its control is not there. */
+.pm-manager-fieldbox {
+    border-bottom: 1px solid var(--pm-hairline);
+}
+
+.pm-manager-fieldbox:last-child { border-bottom: none; }
+
+.pm-manager-fieldbox .pm-manager-valuerow { border-bottom: none; }
+
+/* ── Size lines (user request) ───────────────────────────────────────────────
+   A caption under the box it measures. Tabular figures so the number does not
+   jump sideways while the trailing timer rewrites it every quarter second. */
+.pm-manager-size {
+    padding: 4px 0 8px;
+    font-size: 0.78em;
+    letter-spacing: 0.02em;
+    font-variant-numeric: tabular-nums;
+    color: var(--pm-muted);
+}
+
+/* ── 설명문 전문 (user request) ──────────────────────────────────────────────
+   The composed description, in prompt order, one body per box. The captions are
+   the revise screen's, because they name the same thing there. */
+.pm-full {
+    padding: 6px 12px 0;
+}
+
+.pm-full .pm-manager-note,
+.pm-full .pm-manager-size {
+    padding-left: 0;
+    padding-right: 0;
+}
+
+/* A heading that will really be sent reads as text rather than as a caption, so
+   it takes the body's own case and weight instead of the caption's tracking. */
+.pm-full-heading {
+    text-transform: none;
+    letter-spacing: 0;
+    font-size: 0.85em;
+    color: var(--pm-muted-2);
+}
+
+.pm-full-text {
+    box-sizing: border-box;
+    width: 100%;
+    margin: 0 0 4px;
+    resize: vertical;
+    border: var(--pm-rule);
+    background: none;
+    color: var(--SmartThemeBodyColor);
+    padding: 8px;
+    font: inherit;
+    line-height: 1.45;
+    user-select: text;
+    -webkit-user-select: text;
+}
+
+.pm-full-text:disabled {
+    opacity: 0.6;
+}
+
+/* ── The pointer that is not a thumb, and the keyboard ───────────────────────
+   Everything above this line was designed for a 411px screen and a finger,
+   which is where this tool is used. It also runs on a desktop, where three
+   things it assumed are false: there is a keyboard that moves focus, there is a
+   mouse that expects to be able to select text, and there is room.
+
+   Nothing here changes the phone. Each block is behind a query that a phone
+   does not match, or fixes something that was wrong on both. */
+
+/* A modal that scrolls the page behind it once its own list ends is the oldest
+   annoyance in this shape, and on a phone it means the chat scrolls away under
+   the panel the user is reading. One property, both platforms. */
+.pm-scroll {
+    overscroll-behavior: contain;
+}
+
+/* Focus was drawn by the browser's default ring alone, which lands on our filled
+   ink blocks and vanishes. Inset rather than outside: these rows run the full
+   width of a panel that clips, so an outward ring would be cut off at both ends.
+   :focus-visible, not :focus, so a tap does not leave a ring behind it. */
+.pm-panel :focus-visible,
+.pm-settings :focus-visible,
+.pm-quickbar:focus-visible {
+    outline: 2px solid var(--pm-accent);
+    outline-offset: -2px;
+}
+
+/* On a filled block the accent is the one colour that can disappear, because the
+   block is already ink. The ground colour is what reads there.
+
+   The list is every control that fills itself with --pm-mass, not only the blocks
+   that carry the class. The active tab, the active chip, a primary button and a
+   picked row are all ink without being inside a .pm-mass, so the descendant rule
+   above missed them - and those four are exactly the controls that say WHICH ONE
+   YOU ARE ON. A keyboard user tabbing through the tab strip could not see where
+   they were. .pm-mass:focus-visible (no space) is the settings drawer's own
+   header, which is a mass block AND the focusable element at once. */
+.pm-mass :focus-visible,
+.pm-mass:focus-visible,
+.pm-manager-tab-active:focus-visible,
+.pm-quickbar-chip-active:focus-visible,
+.pm-manager-primary:focus-visible,
+.pm-row.pm-picked:focus-visible {
+    outline-color: var(--pm-on-mass);
+}
+
+@media (hover: hover) and (pointer: fine) {
+    /* user-select: none exists so a long press on a row does not start a
+       selection on Android. A mouse has no long press, and on a
+       desktop the same rule means a persona name, a log line or a diff cannot be
+       copied at all. The drag handle calls preventDefault on pointerdown, so
+       reordering still cannot start a selection. */
+    .pm-panel,
+    .pm-quickbar-panel,
+    .pm-manager-panel {
+        user-select: text;
+    }
+
+    /* The row itself stays a button, not a paragraph: selecting inside it would
+       fight the tap that opens it. Its text children are what becomes copyable. */
+    .pm-row,
+    .pm-manager-rowname,
+    .pm-quickbar-btn,
+    .pm-manager-btn,
+    .pm-manager-tab {
+        user-select: none;
+    }
+}
+
+/* Room. A phone never matches this; a desktop always does. The panel keeps its
+   shape and stops being a phone-width column on a 1440px screen, which is where
+   the 전문 화면 and the diff spend their width. Not wider than this: a line of
+   Korean past about 45 characters is harder to come back to, not easier. */
+@media (min-width: 900px) {
+    .pm-manager-panel {
+        width: min(720px, 100%);
+    }
+
+    .pm-quickbar-panel {
+        width: min(480px, 94vw);
+    }
+}
+
+/* 변경 기록 머리와 그 옆의 [기록 전체 삭제]. The head keeps its own type; the row
+   is what puts the button on the same line instead of under the fifty rows it
+   exists to clear. */
+.pm-manager-logbox > .pm-manager-rowhead {
+    justify-content: space-between;
+}
+
+.pm-manager-loghead {
+    flex: 1 1 auto;
+    min-width: 0;
+}
