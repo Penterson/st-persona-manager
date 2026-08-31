@@ -846,28 +846,56 @@ async function applyVersion(versionId) {
     void runBoundImageFromPanel(startAvatar, versionId);
 }
 
-/* The panel's half of 버전별 페르소나 이미지. Quieter than the manager's: this
-   screen closes on apply, so only a failure is worth a sentence. Success is the
-   picture itself changing. */
-async function runBoundImageFromPanel(avatarId, versionId) {
-    const root = getRoot();
-    if (!root || root.readOnly) return;
-    const persona = getPersona(root, avatarId);
-    const version = (persona?.versions ?? []).find(entry => entry.id === versionId);
+/* The one write behind 버전별 페르소나 이미지, shared by both screens.
+
+   Only the SENTENCES differ between the manager and this panel, so only the
+   sentences live in the callers. The write itself is here once: it was a copy
+   in each file for one round, which in this codebase is how a block starts
+   drifting - manager-pure.js still carries a comment about the last time.
+
+   Everything the write touches is re-read AFTER the await, not carried across
+   it. applyBoundImage makes three network round trips, and a settings import
+   during them installs a whole new root: writing avatarWritten onto the object
+   read beforehand would file it under data nothing reads any more. */
+export async function runBoundImageWrite(avatarId, versionId, force, known) {
+    const before = getRoot();
+    if (!before || before.readOnly) return null;
+    const first = getPersona(before, avatarId);
+    const version = (first?.versions ?? []).find(entry => entry.id === versionId);
     const label = boundAsset(version);
-    if (!label) return;
+    if (!label) return null;
     const ctx = freshContext();
-    if (!ctx) return;
-    const result = await applyBoundImage({ ctx, root, persona, avatarId, label, force: false });
-    if (result.skipped) return;
-    if (result.ok) {
-        persona.avatarWritten = label;
-        addLog(persona, 'image-apply', label, Date.now());
-        freshContext()?.saveSettingsDebounced?.();
-        bumpThumbnails(avatarId);
-        scheduleDraw();
-        return;
-    }
+    if (!ctx) return null;
+    const now = Date.now();
+    const result = await applyBoundImage({
+        ctx, root: before, persona: first, avatarId, label, force, known, now,
+    });
+    if (!result.ok) return result;
+    // Read again, because the three round trips above are long enough for the
+    // root to have been replaced under us.
+    const root = getRoot();
+    if (!root || root.readOnly) return result;
+    const persona = getPersona(root, avatarId);
+    if (!persona) return result;
+    // The backup record closes the guard that decides whether to take one. Without
+    // it every apply takes another, and the second holds the first one's
+    // replacement rather than the picture that was there to begin with.
+    if (result.backup && !persona.avatarBackup) persona.avatarBackup = result.backup;
+    persona.avatarWritten = label;
+    addLog(persona, 'image-apply', label, now);
+    freshContext()?.saveSettingsDebounced?.();
+    // The address holds a different picture now, so every image pointed at it
+    // needs a new query.
+    bumpThumbnails(avatarId);
+    scheduleDraw();
+    return { ...result, backedUp: !!result.backup };
+}
+
+/* The panel's half. Quieter than the manager's: this screen closes on apply, so
+   only a failure is worth a sentence. Success is the picture itself changing. */
+async function runBoundImageFromPanel(avatarId, versionId) {
+    const result = await runBoundImageWrite(avatarId, versionId, false, null);
+    if (!result || result.skipped || result.ok) return;
     if (result.error === 'missing') { notify('warning', STRINGS.manager.imageAssetMissing(result.detail)); return; }
     if (result.error === 'backup') { notify('error', STRINGS.manager.imageBackupFailed(result.detail)); return; }
     notify('error', STRINGS.manager.imageApplyFailed(result.detail ?? result.error));

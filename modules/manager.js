@@ -36,12 +36,12 @@ import {
 import {
     closePanel, openPanel, isPanelOpen, notify, askConfirm, askChoice, askText, blockDrawerClose,
     isComposingKey, el, thumbnailUrl, markedText, pagerRow, applyShapeClass,
-    applyPersonaName, bumpThumbnails } from './quickbar.js';
+    applyPersonaName, bumpThumbnails, runBoundImageWrite } from './quickbar.js';
 // Matching, language detection and paging.
 import { rankOf, textContains, detectLanguage, chatLanguage, pageOf } from './search-pure.js';
 import {
     resolveFolderKey, claimFolderKey, listAssets, uploadAsset, deleteAsset,
-    uploadPersonaAvatar, feedPersonaImage, applyBoundImage,
+    uploadPersonaAvatar, feedPersonaImage,
 } from './assets.js';
 import {
     canDeleteSection, removeSection, moveSection, reorderSection, deleteVariant,
@@ -2670,26 +2670,13 @@ async function changeTargetImage(file) {
    about each way it can end. A picture that failed to move never rolls back the
    version that was already applied, so every branch below reports and stops. */
 async function runBoundImage(avatarId, versionId, force) {
-    const root = getRoot();
-    if (!root || root.readOnly) return;
-    const persona = getPersona(root, avatarId);
-    const version = (persona?.versions ?? []).find(entry => entry.id === versionId);
-    const label = boundAsset(version);
-    if (!label) return;
-    const ctx = freshContext();
-    if (!ctx) return;
-    const result = await applyBoundImage({ ctx, root, persona, avatarId, label, force });
-    if (result.skipped) return;
+    // The listing this screen already holds, when it is the right persona's.
+    // Saves one of the three round trips a version tap would otherwise make.
+    const known = (assetState.avatar === avatarId && !assetState.error) ? assetState.list : null;
+    const result = await runBoundImageWrite(avatarId, versionId, force, known);
+    if (!result || result.skipped) return;
     if (result.ok) {
-        // Written to the avatar file, so the address holds a different picture and
-        // every image pointed at it needs a new query. Recorded too, so the next
-        // apply of the same version costs nothing.
-        persona.avatarWritten = label;
-        addLog(persona, 'image-apply', label, Date.now());
-        freshContext()?.saveSettingsDebounced?.();
-        bumpThumbnails(avatarId);
         if (result.backedUp) notify('info', STRINGS.manager.imageBackupMade);
-        scheduleDraw();
         return;
     }
     if (result.error === 'listing') { notify('warning', STRINGS.manager.imageListingFailed(result.detail)); return; }

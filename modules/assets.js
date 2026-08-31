@@ -291,8 +291,13 @@ export async function fetchAssetFile(path, label) {
    overwrite. The full size original is served from a path this project has
    never measured, so the thumbnail is what gets kept and the caller says so:
    a backup quietly smaller than the thing it replaces would be worse than
-   none, because nobody would know to look. */
-export async function captureAvatarFile(ctx, avatarId) {
+   none, because nobody would know to look.
+
+   The name carries a stamp because uploadAsset derives the sprite label from
+   it. A fixed name meant every backup landed on the same label, so a second
+   backup would replace the first - and the first is the only one holding the
+   picture that existed before this extension touched it. */
+export async function captureAvatarFile(ctx, avatarId, stamp) {
     if (typeof ctx?.getThumbnailUrl !== 'function') return null;
     let url;
     try { url = ctx.getThumbnailUrl('persona', avatarId); } catch { return null; }
@@ -301,7 +306,8 @@ export async function captureAvatarFile(ctx, avatarId) {
         const res = await fetch(url, { cache: 'no-store' });
         if (!res.ok) return null;
         const blob = await res.blob();
-        return new File([blob], 'pm-backup.png', { type: blob.type || 'image/png' });
+        const label = `pm-원본-${stamp}`;
+        return { file: new File([blob], `${label}.png`, { type: blob.type || 'image/png' }), label };
     } catch { return null; }
 }
 
@@ -334,41 +340,63 @@ function queueImageWrite(job) {
      { error: 'upload' }      the avatar endpoint refused
      { ok: true, backedUp }   written; backedUp says a backup was made just now
 */
-export async function applyBoundImage({ ctx, root, persona, avatarId, label, force }) {
+export async function applyBoundImage({ ctx, root, persona, avatarId, label, force, known, now }) {
     if (!label) return { skipped: 'none' };
     if (!force && persona?.avatarWritten === label) return { skipped: 'same' };
     return queueImageWrite(async () => {
-        const key = resolveFolderKey(root, avatarId);
-        let list;
-        try { list = await listAssets(ctx, key); } catch (e) {
-            return { error: 'listing', detail: String(e?.message ?? e) };
-        }
-        // listAssets hands back the server's own entries, and .label is the name
-        // every other screen here shows, so a binding stored from one of those
-        // screens matches on the same field it was taken from.
-        const hit = list.find(asset => asset?.label === label);
-        if (!hit) return { error: 'missing', detail: label };
-
-        /* The avatar file is overwritten, so the picture that is there now is
-           about to stop existing. Kept once, before the first write, and the
-           write is refused outright when keeping it fails. */
-        let backedUp = false;
-        if (!persona?.avatarBackup) {
-            const original = await captureAvatarFile(ctx, avatarId);
-            if (!original) return { error: 'backup', detail: 'capture' };
-            try {
-                await uploadAsset(ctx, claimFolderKey(root, avatarId) ?? key, original);
-            } catch (e) {
-                return { error: 'backup', detail: String(e?.message ?? e) };
+        try {
+            const key = resolveFolderKey(root, avatarId);
+            /* The manager already holds a listing for the persona it is showing,
+               and re-fetching it per version tap was one of three round trips on
+               a phone. Passed in when it is known to be current; fetched when it
+               is not, which is every call from the quick panel. */
+            let list = Array.isArray(known) ? known : null;
+            if (!list) {
+                try { list = await listAssets(ctx, key); } catch (e) {
+                    return { error: 'listing', detail: String(e?.message ?? e) };
+                }
             }
-            backedUp = true;
-        }
+            // listAssets hands back the server's own entries, and .label is the name
+            // every other screen here shows, so a binding stored from one of those
+            // screens matches on the same field it was taken from.
+            const hit = list.find(asset => asset?.label === label);
+            if (!hit) return { error: 'missing', detail: label };
 
-        const file = await fetchAssetFile(hit.path, label);
-        if (!file) return { error: 'fetch', detail: label };
-        const wrote = await uploadPersonaAvatar(ctx, avatarId, file);
-        if (!wrote.ok) return { error: 'upload', detail: wrote.detail ?? wrote.reason };
-        return { ok: true, backedUp };
+            /* The avatar file is overwritten, so the picture that is there now is
+               about to stop existing. Kept once, before the FIRST write, and the
+               write is refused outright when keeping it fails.
+
+               The record of that backup is returned rather than written here: the
+               caller owns the root, and it is the caller that re-reads the persona
+               after this await. Without the record the guard below never closes,
+               every apply would take another backup, and the second one would hold
+               the first one's replacement instead of the original. */
+            let backup = null;
+            if (!persona?.avatarBackup) {
+                const captured = await captureAvatarFile(ctx, avatarId, now);
+                if (!captured) return { error: 'backup', detail: 'capture' };
+                try {
+                    // saveSettingsDebounced is handed over so a key claimed here
+                    // survives a later failure on this same path.
+                    const folder = claimFolderKey(root, avatarId, ctx?.saveSettingsDebounced);
+                    await uploadAsset(ctx, folder ?? key, captured.file);
+                } catch (e) {
+                    return { error: 'backup', detail: String(e?.message ?? e) };
+                }
+                backup = { label: captured.label, at: now, source: 'thumbnail' };
+            }
+
+            const file = await fetchAssetFile(hit.path, label);
+            if (!file) return { error: 'fetch', detail: label };
+            const wrote = await uploadPersonaAvatar(ctx, avatarId, file);
+            if (!wrote.ok) return { error: 'upload', detail: wrote.detail ?? wrote.reason };
+            return { ok: true, backup };
+        } catch (e) {
+            // The contract above says this never throws, and the callers run it
+            // with void: a rejection here would surface as an unhandled one with
+            // nothing on screen, which is the failure mode this project forbids.
+            return { error: 'upload', detail: String(e?.message ?? e) };
+        }
     });
 }
 
@@ -432,18 +460,18 @@ export function unregisterAssetMacros(ctx) {
    the diagnostic read off the persona list's own img. The bytes before and after
    are compared, so the answer is what the server now serves rather than what we
    hoped the upload did. */
-/* Drops the browser's copy of a persona picture, the way SillyTavern drops its
-   own after an upload: cache 'reload' asks the network even when a fresh copy is
-   sitting in the cache. The server has already deleted its cached thumbnail (the
-   upload endpoint does that whenever overwrite_name is present), so this is the
-   only copy left that could still be stale. Best effort: a failed bust shows an
-   old picture, which the pmv token on our own <img> elements covers anyway. */
-async function bustPersonaImage(ctx, avatarId) {
+/* Drops the browser's copy of a persona picture, the way SillyTavern does after
+   its own upload. This is for SillyTavern's screens, not ours: every picture
+   this extension draws goes through thumbnailUrl, which appends its own pmv
+   token, so our images are already refreshed by that bump and never read the
+   bare address reloaded here. Fired without being awaited for the same reason -
+   nothing downstream depends on it. */
+function bustPersonaImage(ctx, avatarId) {
     if (typeof ctx?.getThumbnailUrl !== 'function') return;
     let url;
     try { url = ctx.getThumbnailUrl('persona', avatarId); } catch { return; }
     if (!url) return;
-    try { await fetch(url, { cache: 'reload' }); } catch { /* the token still covers us */ }
+    try { void fetch(url, { cache: 'reload' }).catch(() => undefined); } catch { /* the token still covers us */ }
 }
 
 /* Replaces a persona's picture through the endpoint SillyTavern's own persona
@@ -480,7 +508,7 @@ export async function uploadPersonaAvatar(ctx, avatarId, file) {
         return { ok: false, reason: 'network', detail: String(e?.message ?? e) };
     }
     if (!res.ok) return { ok: false, reason: 'http', status: res.status, detail: `HTTP ${res.status}` };
-    await bustPersonaImage(ctx, avatarId);
+    bustPersonaImage(ctx, avatarId);
     return { ok: true };
 }
 
