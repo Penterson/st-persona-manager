@@ -4338,6 +4338,11 @@ function dragHandle(sectionId, writable, reason) {
         return handle;
     }
     let lastY = 0;
+    // Whether any pointermove fired this drag. The frame loop computes a target
+    // even under a stationary finger (the row the handle itself is in), so
+    // without this a plain press-and-release would reach dropSectionAt, fail the
+    // same-index check and redraw the whole panel for a tap that moved nothing.
+    let moved = false;
     handle.addEventListener('pointerdown', e => {
         // Left button or touch only, and the capture keeps every later move on
         // this element even as the rows move under the finger.
@@ -4347,6 +4352,7 @@ function dragHandle(sectionId, writable, reason) {
         // leftover target from an interrupted drag would be used as this one's.
         dragOverSection = null;
         dragSectionId = sectionId;
+        moved = false;
         lastY = e.clientY;
         handle.setPointerCapture?.(e.pointerId);
         handle.closest('[data-pm-section]')?.classList.add('pm-dragging');
@@ -4358,13 +4364,18 @@ function dragHandle(sectionId, writable, reason) {
         // Only the finger position. pointermove outruns frames on the device, and
         // the row rects it used to read here forced a layout per event against
         // the classes and scrollTop being written around it; startAutoScroll's
-        // frame owns all of that now, in read-then-write order.
+        // frame owns the per-frame work now, in read-then-write order.
+        moved = true;
         lastY = e.clientY;
     });
     const finish = () => {
         if (dragSectionId === null) return;
         const id = dragSectionId;
-        const onto = dragOverSection;
+        // Measured at release, from the finger's final position: the frame loop's
+        // copy exists for the highlight and can be a frame behind, or not exist
+        // at all when the release beats the first frame. A drag that never moved
+        // stays a tap and drops nothing.
+        const onto = moved ? dropTargetAt(lastY) : null;
         clearDragState();
         if (onto) dropSectionAt(id, onto);
     };
