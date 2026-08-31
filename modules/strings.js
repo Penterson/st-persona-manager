@@ -205,7 +205,7 @@ export const STRINGS = deepFreeze({
         bulkTagRemovePrompt: '삭제할 태그',
         bulkTagAdded: n => `페르소나 ${n}개에 태그 추가`,
         bulkTagRemoved: n => `페르소나 ${n}개에서 태그 삭제`,
-        bulkGrouped: (name, n) => `${name}에 ${n}개 넣었다`,
+        bulkGrouped: (name, n) => `${name}에 페르소나 ${n}개 추가`,
         bulkTagNoChange: '바뀐 페르소나 없음',
         confirmBulkDelete: n => `페르소나 ${n}개의 관리 데이터 삭제 (복구 불가, SillyTavern 페르소나는 유지)`,
         bulkDeleted: n => `페르소나 ${n}개 관리 데이터 삭제 완료`,
