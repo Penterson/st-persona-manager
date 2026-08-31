@@ -41,7 +41,7 @@ import {
 import { rankOf, textContains, detectLanguage, chatLanguage, pageOf } from './search-pure.js';
 import {
     resolveFolderKey, claimFolderKey, listAssets, uploadAsset, deleteAsset, withoutBackups,
-    uploadPersonaAvatar, feedPersonaImage,
+    uploadPersonaAvatar, feedPersonaImage, restoreAvatarBackup,
 } from './assets.js';
 import {
     canDeleteSection, removeSection, moveSection, reorderSection, deleteVariant,
@@ -985,6 +985,10 @@ async function dropAsset(label) {
         const ctx = freshContext();
         if (!ctx) throw new Error(STRINGS.manager.noContext);
         await deleteAsset(ctx, key, label);
+        // A record pointing at a file that is gone would keep the backup guard
+        // closed, and every later overwrite would then keep nothing.
+        const persona = getPersona(root, startAvatar);
+        if (persona?.avatarBackup?.label === label) persona.avatarBackup = null;
     } catch (e) {
         notify('error', STRINGS.manager.assetDeleteFailed(String(e?.message ?? e)));
         return;
@@ -2521,6 +2525,12 @@ function personaBox(ctx, s, writable, reason) {
     imageRow.append(el('span', 'pm-manager-value', ''));
     imageRow.append(actionButton(STRINGS.manager.imageButton, () => input.click(), writable,
         STRINGS.manager.changeImage, reason));
+    /* The other half of the backup a bound version takes. Enabled only when a
+       record exists, and its own sentence when it does not, so the button never
+       stands there meaning nothing. */
+    const kept = s.persona?.avatarBackup?.label ?? null;
+    imageRow.append(actionButton(STRINGS.manager.imageRestore, () => restoreTargetImage(), writable && !!kept,
+        '', kept ? reason : STRINGS.manager.imageNoBackup));
     box.append(imageRow, input);
 
     box.append(actionsRow([
@@ -2631,6 +2641,42 @@ function localNamesBox(ctx, s, writable, reason) {
    three things proven before anything is written: the API is there, it speaks
    the shape we expect, and the id we hold is the one it knows. A build where any
    of that is false gets a sentence naming what failed, not a silent no-op. */
+/* [원본 되돌리기]. The picture kept before the first bound version overwrote the
+   avatar, put back where it came from. The record is left in place: restoring
+   does not consume the backup, and a user who restores and then applies a
+   version again must not have a second backup taken of the restored original. */
+async function restoreTargetImage() {
+    const s = guardTarget();
+    if (!s) return;
+    if (s.readOnly || s.ambiguous) { notify('error', writeReason(s)); return; }
+    const startAvatar = targetAvatar;
+    const label = s.persona?.avatarBackup?.label;
+    if (!label) { notify('info', STRINGS.manager.imageNoBackup); return; }
+    if (!(await askConfirm(STRINGS.manager.confirmRestoreImage))) return;
+    const after = guardTarget(startAvatar);
+    if (!after) return;
+    const root = getRoot();
+    const ctx = freshContext();
+    if (!root || !ctx) { notify('error', STRINGS.manager.noContext); return; }
+    const result = await restoreAvatarBackup({ ctx, root, avatarId: startAvatar, label });
+    bumpThumbnails(startAvatar);
+    scheduleDraw();
+    if (!result.ok) {
+        if (result.error === 'missing') { notify('error', STRINGS.manager.imageAssetMissing(result.detail)); return; }
+        notify('error', STRINGS.manager.imageApplyFailed(result.detail ?? result.error));
+        return;
+    }
+    // The avatar is no longer any bound label's picture, so the cache that skips
+    // a rewrite must forget what it thought was up there.
+    const live = getPersona(getRoot(), startAvatar);
+    if (live) {
+        live.avatarWritten = null;
+        addLog(live, 'image-restore', label, Date.now());
+        freshContext()?.saveSettingsDebounced?.();
+    }
+    notify('info', STRINGS.manager.imageRestored);
+}
+
 async function changeTargetImage(file) {
     const s = guardTarget();
     if (!s) return;
@@ -3804,10 +3850,20 @@ function historyTab(s, writable, reason) {
 
 /* Assets tab */
 
+/* The folder as the user owns it.
+
+   The backups this feature writes sit in the same folder because it is the only
+   one we have, but they are our bookkeeping, not the user's pictures. Every
+   screen reads the folder through here or through assetLabels, so the backup
+   cannot be inserted into a chat, bound to a version, ticked into an asset
+   selection, or deleted by somebody who has no idea what it is. It is reached
+   only by [원본 되돌리기] on the 편집 tab, which is the one thing it is for. */
+function visibleAssets() {
+    return withoutBackups(assetState.list);
+}
+
 function assetLabels() {
-    // The backups this feature writes sit in the same folder. They are ours, not
-    // the user's, so no screen that offers a choice offers them.
-    return withoutBackups(assetState.list).map(item => item.label);
+    return visibleAssets().map(item => item.label);
 }
 
 function assetStyleClass() {
@@ -3971,9 +4027,9 @@ function assetsTab(s, writable, reason) {
     box.append(noteOf(STRINGS.manager.assetFolder(key)));
     // The sentence says what to do and the upload button
     // is the next thing under it.
-    if (!assetState.list.length) box.append(emptyOf(STRINGS.manager.assetNone));
+    if (!visibleAssets().length) box.append(emptyOf(STRINGS.manager.assetNone));
     box.append(uploadRow(writable, reason));
-    if (assetState.list.length) {
+    if (visibleAssets().length) {
         box.append(actionsRow([listSearchButton('assets')]));
         if (listUi.assets.open) box.append(listSearchRow('assets'));
     }
@@ -3988,15 +4044,15 @@ function assetsTab(s, writable, reason) {
 
 function fillAssetList(container, s, writable, reason) {
     container.replaceChildren();
-    const live = new Set(assetState.list.map(item => rowKey('asset', item.label)));
+    const live = new Set(visibleAssets().map(item => rowKey('asset', item.label)));
     if (expandedRow !== null && !live.has(expandedRow)) expandedRow = null;
     const folderKey = resolveFolderKey(s.root, targetAvatar);
     const ui = listUi.assets;
     // Deleting the last asset hides the search controls but used to leave the
     // query behind, showing "맞는 것이 없다" under "에셋 없음" with nothing on
     // screen to clear it. An empty listing resets the search.
-    if (!assetState.list.length) { Object.assign(ui, emptyListUi()); return; }
-    let list = assetState.list;
+    if (!visibleAssets().length) { Object.assign(ui, emptyListUi()); return; }
+    let list = visibleAssets();
     const query = ui.open ? ui.query.trim() : '';
     if (query) {
         const ranked = list

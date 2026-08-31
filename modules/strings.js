@@ -261,6 +261,7 @@ export const STRINGS = deepFreeze({
             'persona-create': '페르소나 생성',
             'image-bind': '이미지 바인딩',
             'image-apply': '이미지 교체',
+            'image-restore': '원본 되돌리기',
             'section-add': '항목 추가',
             'section-rename': '항목 이름 변경',
             'section-move': '항목 이동',
@@ -578,6 +579,13 @@ export const STRINGS = deepFreeze({
         // will do the work again. Reported rather than passed off as a clean
         // success, which is what the caller cannot see from the outside.
         imageAppliedUnrecorded: '이미지 교체 완료. 기록 저장 실패',
+        // The backup is taken automatically the first time a bound version
+        // overwrites the avatar, so the way back has to be somewhere the user
+        // can find without knowing that happened.
+        imageRestore: '원본 되돌리기',
+        imageNoBackup: '보관된 원본 없음',
+        confirmRestoreImage: '보관된 원본 이미지로 되돌리기',
+        imageRestored: '원본 이미지로 되돌림',
         confirmOverwriteVersion: name => `버전 "${name}" 덮어쓰기 (이전 내용 복구 불가)`,
         confirmDropVersion: name => `버전 "${name}" 삭제`,
         overwrite: '덮어쓰기',

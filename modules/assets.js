@@ -88,10 +88,23 @@ export function labelOf(filename) {
    {{persona_assets}} and the model could draw the user's old avatar into the
    chat with {{pimg::}}. One prefix, one predicate, checked everywhere the list
    is read for the user or for the model. */
-export const BACKUP_PREFIX = 'pm-원본-';
+/* ASCII, deliberately.
+
+   The sprites server runs every label through its own sanitize-filename, which
+   is why sanitizeKey exists a few lines up. A Hangul prefix would mean the
+   label we read back might not start with the prefix we test for, and a backup
+   the filter stops recognising goes straight back into the prompt and the
+   picker. The user never types this name, so there is nothing to gain by
+   making it Korean and a leak to lose. */
+export const BACKUP_PREFIX = 'pm-backup-';
+// What 0.1.12 through 0.1.14 wrote. Still recognised, so a folder made by those
+// builds keeps its backup hidden and restorable instead of surfacing as an
+// ordinary picture.
+const LEGACY_BACKUP_PREFIX = 'pm-원본-';
 
 function isBackupLabel(label) {
-    return String(label ?? '').startsWith(BACKUP_PREFIX);
+    const name = String(label ?? '');
+    return name.startsWith(BACKUP_PREFIX) || name.startsWith(LEGACY_BACKUP_PREFIX);
 }
 
 // The folder as the user and the model should see it.
@@ -188,6 +201,9 @@ export async function uploadAsset(ctx, folderKey, file) {
 
 // Teardown leaves nothing behind, including what was learned about the server.
 export function resetAssetProbes() {
+    // Same reason as the probes below: a mark left behind would tell the next
+    // load that a picture was kept when nothing was written down.
+    backedUpThisSession.clear();
     spriteFileField = null;
 }
 
@@ -367,6 +383,34 @@ function queueImageWrite(job) {
      { error: 'upload' }      the avatar endpoint refused
      { ok: true, backedUp }   written; backedUp says a backup was made just now
 */
+/* Puts a kept picture back onto the avatar.
+
+   The other half of taking a backup. Without it the extension copies a picture
+   out of the way, says so, and offers no way to ever get it back, which is a
+   promise it does not keep. Shares the write queue with applyBoundImage so a
+   restore cannot interleave with a version apply. */
+export async function restoreAvatarBackup({ ctx, root, avatarId, label }) {
+    if (!label) return { error: 'missing', detail: '' };
+    return queueImageWrite(async () => {
+        try {
+            const key = resolveFolderKey(root, avatarId);
+            let list;
+            try { list = await listAssets(ctx, key); } catch (e) {
+                return { error: 'listing', detail: String(e?.message ?? e) };
+            }
+            const hit = list.find(asset => asset?.label === label);
+            if (!hit) return { error: 'missing', detail: label };
+            const file = await fetchAssetFile(hit.path, label);
+            if (!file) return { error: 'fetch', detail: label };
+            const wrote = await uploadPersonaAvatar(ctx, avatarId, file);
+            if (!wrote.ok) return { error: 'upload', detail: wrote.detail ?? wrote.reason };
+            return { ok: true };
+        } catch (e) {
+            return { error: 'upload', detail: String(e?.message ?? e) };
+        }
+    });
+}
+
 export async function applyBoundImage({ ctx, root, persona, avatarId, label, force, known, now }) {
     if (!label) return { skipped: 'none' };
     if (!force && persona?.avatarWritten === label) return { skipped: 'same' };
