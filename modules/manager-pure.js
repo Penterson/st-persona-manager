@@ -409,14 +409,24 @@ export function parseImportedRoot(text) {
 // needed it, because it only ever ADDS choices; the 전문 screen writes back into
 // the body itself, and without the id a save would land on whatever is picked at
 // save time rather than on the body the user was looking at.
-export function buildReplaceBlocks(persona) {
+/* includeEmpty separates the two screens that read this.
+
+   The 고쳐서 새 버전 screen works by dragging a range out of a body, so a body
+   with nothing in it has nothing to offer and is left out. The 전문 screen is
+   the opposite case: it is where a description gets written in the first place,
+   and leaving empty items out of it meant a persona whose items were ALL empty
+   (every new one: makeDefaultPersona seeds thirteen items with '') produced an
+   empty list, which the caller read as "nothing to show" and refused to open.
+   The screen that exists to fill items in was reachable only after the items had
+   already been filled in somewhere else. */
+export function buildReplaceBlocks(persona, includeEmpty) {
     const blocks = [];
     for (const section of persona?.sections ?? []) {
         const pick = persona.activePicks?.[section.id];
         const variant = (persona.variants?.[section.id] ?? []).find(entry => entry.id === pick);
         if (!variant) continue;
         const text = (variant.text ?? '').trim();
-        if (!text) continue;
+        if (!text && !includeEmpty) continue;
         blocks.push({ sectionId: section.id, sectionName: section.name ?? '', variantId: variant.id, text });
     }
     return blocks;
@@ -614,12 +624,57 @@ export function makeReplaceVersion(persona, blocks, workingTexts, name, makeIdFn
         // Null is 전체, and a version made today should keep
         // using every file including ones uploaded tomorrow.
         assetSelection: null,
+        // One asset label, or null. null means "leave the picture alone", which is
+        // the opposite of assetSelection's null (= every asset).
+        avatarAsset: null,
         updatedAt: now,
     };
     if (!Array.isArray(persona.versions)) persona.versions = [];
     persona.versions.push(version);
     persona.activeVersionId = version.id;
     return { version, changed, skipped };
+}
+
+/* ── 버전별 페르소나 이미지 (user request) ───────────────────────────────────
+   A version can name one asset to become the persona's picture when it is
+   applied. Reads go through boundAsset rather than touching the field, for the
+   same reason every other read here does: a settings.json somebody edited by
+   hand can hold anything, and no reader may meet undefined. */
+export function boundAsset(version) {
+    const label = version?.avatarAsset;
+    return typeof label === 'string' && label ? label : null;
+}
+
+// Returns whether anything changed, so the caller only logs and saves on a real
+// edit. An empty label clears the binding rather than storing an empty string.
+export function bindAsset(version, label, now) {
+    if (!version || typeof version !== 'object') return false;
+    const next = typeof label === 'string' && label.trim() ? label.trim() : null;
+    if (boundAsset(version) === next) return false;
+    version.avatarAsset = next;
+    version.updatedAt = now;
+    return true;
+}
+
+/* What the screen may say about a binding, kept apart from what it may not.
+
+   'unknown' exists because a listing we could not read is not the same fact as
+   an asset that is gone, and calling one the other would put a sentence on
+   screen that nobody measured. The version tab does not fetch the asset list on
+   its own, so 'unknown' is the honest answer whenever that list is not loaded
+   for this persona. */
+export function versionImageState(version, assetLabels, listingOk) {
+    const label = boundAsset(version);
+    if (!label) return { label: null, state: 'none' };
+    if (!listingOk) return { label, state: 'unknown' };
+    return { label, state: (assetLabels ?? []).includes(label) ? 'ok' : 'missing' };
+}
+
+// Which versions point at one asset. The delete confirmation counts them, so a
+// user is told what a removal costs before it happens rather than after.
+export function versionsBindingAsset(persona, label) {
+    if (!label) return [];
+    return (persona?.versions ?? []).filter(version => boundAsset(version) === label);
 }
 
 /* Tags */

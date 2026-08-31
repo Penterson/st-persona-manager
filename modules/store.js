@@ -114,6 +114,20 @@ export function migrate(root) {
     }
     // A newer build wrote this. Do not rewrite what we cannot understand.
     if (root.schemaVersion > SCHEMA_VERSION) { root.readOnly = true; return root; }
+    /* Past the read-only return, because this DROPS values rather than filling
+       them in: a shape we do not recognise under a key we own is worth clearing,
+       but only on a root this build is allowed to write. Readers still go through
+       boundAsset, so a hand edited file cannot reach them either way. */
+    for (const persona of Object.values(root.personas)) {
+        if (!persona || typeof persona !== 'object') continue;
+        if (persona.avatarWritten !== null && typeof persona.avatarWritten !== 'string') persona.avatarWritten = null;
+        const backup = persona.avatarBackup;
+        if (backup !== null && (typeof backup !== 'object' || typeof backup?.label !== 'string')) persona.avatarBackup = null;
+        for (const version of persona.versions ?? []) {
+            if (!version || typeof version !== 'object') continue;
+            if (version.avatarAsset !== null && typeof version.avatarAsset !== 'string') version.avatarAsset = null;
+        }
+    }
     // This flag lives on the object we persist, so a single run against a newer
     // build leaves it in settings.json. Nothing else ever clears it, and a stale
     // one silently blocks every write from then on.
@@ -164,6 +178,15 @@ export function makeDefaultPersona(makeIdFn, headingFormat) {
         assetFolderKey: null,
         lastComposed: '',
         tags: [],
+        /* Replacing a persona picture OVERWRITES SillyTavern's avatar file, so
+           the first time a bound image is written the picture that was there is
+           gone. avatarBackup names the asset it was copied into before that
+           happened, and it is written once and never again: a second backup
+           would be a backup of our own replacement. */
+        avatarBackup: null,
+        // The label we last wrote to the avatar file. A cache of a server fact,
+        // read only to skip a write that would change nothing.
+        avatarWritten: null,
     };
     for (const name of DEFAULT_SECTION_NAMES) {
         const sid = makeId(makeIdFn);

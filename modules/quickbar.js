@@ -18,7 +18,9 @@ import { STRINGS } from './strings.js';
 // One helper, not the screen: manager-pure.js holds no DOM and importing it here
 // keeps both screens comparing the empty section set the same way. A second copy
 // of the rule would be a second chance to get it wrong.
-import { missingSignature, addTagToAll, removeTagFromAll, tagsAcross } from './manager-pure.js';
+import { missingSignature, addTagToAll, removeTagFromAll, tagsAcross, boundAsset } from './manager-pure.js';
+// assets.js imports nothing at all, so reaching it from here adds no cycle.
+import { applyBoundImage } from './assets.js';
 // Matching, language detection and paging.
 import { rankOf, matchRanges, srcOf, detectLanguage, chatLanguage, pageOf } from './search-pure.js';
 
@@ -839,6 +841,36 @@ async function applyVersion(versionId) {
     after.persona.activeVersionId = version.id;
     after.persona.activePicks = { ...(version.picks ?? {}) };
     commit('version-apply', version.name ?? '');
+    // Same rule as the manager's copy: the prompt is committed, the picture
+    // follows on its own, and a picture that fails never undoes the version.
+    void runBoundImageFromPanel(startAvatar, versionId);
+}
+
+/* The panel's half of 버전별 페르소나 이미지. Quieter than the manager's: this
+   screen closes on apply, so only a failure is worth a sentence. Success is the
+   picture itself changing. */
+async function runBoundImageFromPanel(avatarId, versionId) {
+    const root = getRoot();
+    if (!root || root.readOnly) return;
+    const persona = getPersona(root, avatarId);
+    const version = (persona?.versions ?? []).find(entry => entry.id === versionId);
+    const label = boundAsset(version);
+    if (!label) return;
+    const ctx = freshContext();
+    if (!ctx) return;
+    const result = await applyBoundImage({ ctx, root, persona, avatarId, label, force: false });
+    if (result.skipped) return;
+    if (result.ok) {
+        persona.avatarWritten = label;
+        addLog(persona, 'image-apply', label, Date.now());
+        freshContext()?.saveSettingsDebounced?.();
+        bumpThumbnails(avatarId);
+        scheduleDraw();
+        return;
+    }
+    if (result.error === 'missing') { notify('warning', STRINGS.manager.imageAssetMissing(result.detail)); return; }
+    if (result.error === 'backup') { notify('error', STRINGS.manager.imageBackupFailed(result.detail)); return; }
+    notify('error', STRINGS.manager.imageApplyFailed(result.detail ?? result.error));
 }
 
 async function saveAsVersion() {
@@ -861,6 +893,7 @@ async function saveAsVersion() {
         // asset macros now read it to decide which files a version sends. Leaving
         // it undefined works only for as long as nothing distinguishes the two.
         assetSelection: null,
+        avatarAsset: null,
         updatedAt: Date.now(),
     };
     after.persona.versions = [...(after.persona.versions ?? []), version];

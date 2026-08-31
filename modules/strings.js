@@ -259,6 +259,8 @@ export const STRINGS = deepFreeze({
         logKinds: {
             import: '가져오기',
             'persona-create': '페르소나 생성',
+            'image-bind': '이미지 바인딩',
+            'image-apply': '이미지 교체',
             'section-add': '항목 추가',
             'section-rename': '항목 이름 변경',
             'section-move': '항목 이동',
@@ -403,7 +405,10 @@ export const STRINGS = deepFreeze({
         fullTextOpen: '전문',
         fullTextGuide: 'SillyTavern에 들어가는 설명문 전체. 칸 하나가 항목 하나의 활성 선택지 본문',
         fullTextHeadingNote: '항목 이름 줄은 제목 형식 설정에 따라 프롬프트에 함께 전송',
-        fullTextNothing: '설명문 내용 없음. 항목 본문 먼저 쓰기',
+        // Reachable only from a persona with no items at all. A persona that has
+        // items but no text in them opens the screen: filling them in is what the
+        // screen is for.
+        fullTextNoSections: '항목 없음',
         fullTextAria: name => `${name} 본문`,
         fullTextSave: '전체 저장',
         fullTextSaved: n => `항목 ${n}개 저장 완료`,
@@ -502,9 +507,13 @@ export const STRINGS = deepFreeze({
         // is the fact the next round would need.
         changeImageNoControl: id => `SillyTavern 업로드 칸 없음: ${id}`,
         changeImageDone: '이미지 교체 완료. SillyTavern 화면 일부는 새로고침 후 반영',
-        // Verified by re-reading the thumbnail the server serves, not by assuming
-        // the upload worked. Unchanged bytes mean nothing was replaced.
-        changeImageUnverified: '이미지 변경 확인 불가. SillyTavern 페르소나 화면에서 직접 확인 필요',
+        // The server answers the upload directly, so a failure carries its status
+        // rather than a guess about what the picture looks like now.
+        changeImageFailed: detail => `이미지 교체 실패: ${detail}`,
+        // The fallback path ends inside SillyTavern's own crop dialog, so the rest
+        // of the job is on that screen and this says so instead of claiming an
+        // outcome nothing here can see.
+        changeImageHandedOver: 'SillyTavern 자르기 창에서 계속 진행',
         confirmChangeImage: name => `"${name}" 이미지 교체 (기존 파일 덮어쓰기)`,
         duplicatePersona: '새 페르소나로 복제',
         confirmDuplicatePersona: name => `"${name}" 복제 (새 페르소나 생성, 관리자 구성 포함)`,
@@ -541,6 +550,30 @@ export const STRINGS = deepFreeze({
         /* 버전 tab */
         versionName: '버전 이름',
         versionGone: '삭제된 버전',
+
+        /* 버전별 페르소나 이미지 (user request). A version can carry one asset
+           that becomes the persona's picture when it is applied. The four states
+           are separate sentences because they are separate facts: nothing bound,
+           bound and present, bound but gone from the folder, and bound with the
+           folder unread. The last one is not the third one. */
+        versionImageHead: '페르소나 이미지',
+        versionImageMark: '이미지 지정',
+        versionImageNone: '지정 없음',
+        versionImageMissing: label => `에셋 없음: ${label}`,
+        versionImageUnknown: label => `${label} (에셋 목록 미확인)`,
+        versionImagePick: '버전에 지정할 이미지',
+        versionImagePickButton: '이미지 지정',
+        versionImageNow: '지금 적용',
+        versionImageClear: '지정 해제',
+        versionImageNoBinding: '지정된 이미지 없음',
+        // Replacing the picture overwrites SillyTavern's avatar file, so the one
+        // that was there is copied into the asset folder first. Said out loud
+        // because it happens once and silently changes what the folder holds.
+        imageBackupMade: '기존 이미지를 에셋으로 보관 완료',
+        imageBackupFailed: detail => `기존 이미지 보관 실패로 교체 취소: ${detail}`,
+        imageListingFailed: detail => `에셋 목록 읽기 실패: ${detail}`,
+        imageAssetMissing: label => `지정된 에셋 없음: ${label}`,
+        imageApplyFailed: detail => `이미지 교체 실패: ${detail}`,
         confirmOverwriteVersion: name => `버전 "${name}" 덮어쓰기 (이전 내용 복구 불가)`,
         confirmDropVersion: name => `버전 "${name}" 삭제`,
         overwrite: '덮어쓰기',

@@ -41,7 +41,7 @@ import {
 import { rankOf, textContains, detectLanguage, chatLanguage, pageOf } from './search-pure.js';
 import {
     resolveFolderKey, claimFolderKey, listAssets, uploadAsset, deleteAsset,
-    personaThumbBytes, feedPersonaImage,
+    uploadPersonaAvatar, feedPersonaImage, applyBoundImage,
 } from './assets.js';
 import {
     canDeleteSection, removeSection, moveSection, reorderSection, deleteVariant,
@@ -53,6 +53,7 @@ import {
     addTag, removeTag, missingDefaultSections, fillDefaultSections,
     planFullTextSave, readSelectOptions, parseDepth, copyPersonaOnto,
     setLocalName, localName, countSize,
+    boundAsset, bindAsset, versionImageState,
 } from './manager-pure.js';
 // Every sentence the user reads on this screen comes from there,
 // including the tab names and the line under each of them. The stored log kinds,
@@ -757,6 +758,10 @@ async function applyVersion(versionId) {
     after.persona.activeVersionId = version.id;
     after.persona.activePicks = { ...(version.picks ?? {}) };
     commit('version-apply', version.name ?? '', startAvatar);
+    // The prompt is applied and saved above; the picture follows on its own. A
+    // version that cannot move its picture is still an applied version, so this
+    // is never awaited into the tap and never undoes what commit just wrote.
+    void runBoundImage(startAvatar, versionId, false);
 }
 
 async function saveAsVersion() {
@@ -775,6 +780,7 @@ async function saveAsVersion() {
         // Null is 전체, and a version made today should keep using
         // every file including ones uploaded tomorrow.
         assetSelection: null,
+        avatarAsset: null,
         updatedAt: Date.now(),
     };
     persona.versions.push(version);
@@ -1913,10 +1919,12 @@ function fullDirtyCount() {
 function openFullText() {
     const s = guardTarget();
     if (!s) return;
-    const blocks = buildReplaceBlocks(s.persona);
-    // An empty state is a sentence, and this one names the next
-    // action rather than opening a screen with nothing on it.
-    if (!blocks.length) { notify('info', STRINGS.manager.fullTextNothing); return; }
+    // Every item, including the empty ones: this screen is where a description
+    // is written, so the items waiting to be filled are exactly what it must show.
+    const blocks = buildReplaceBlocks(s.persona, true);
+    // Now reachable only when the persona has no items at all, which is a
+    // different sentence from the one that used to stand here.
+    if (!blocks.length) { notify('info', STRINGS.manager.fullTextNoSections); return; }
     resetFullText();
     fullActive = true;
     fullBlocks = blocks;
@@ -1977,7 +1985,7 @@ function saveFullText() {
     // was emptied would keep a textarea that the prompt no longer carries.
     const after = getPersona(getRoot(), startAvatar);
     if (after) {
-        fullBlocks = buildReplaceBlocks(after);
+        fullBlocks = buildReplaceBlocks(after, true);
         fullTexts = fullBlocks.map(block => block.text);
     }
 }
@@ -2634,49 +2642,117 @@ async function changeTargetImage(file) {
     const label = personas[startAvatar] ?? startAvatar;
     if (!(await askConfirm(STRINGS.manager.confirmChangeImage(label)))) return;
     if (!guardTarget(startAvatar)) return;
-    // What the server serves right now, so the check afterwards is against a fact
-    // rather than against an expectation.
-    const before = await personaThumbBytes(freshContext(), startAvatar);
-    const missing = feedPersonaImage(document, startAvatar, file);
-    if (missing) { notify('error', STRINGS.manager.changeImageNoControl(missing)); return; }
-    // SillyTavern uploads on its own clock. Watched rather than waited out: the
-    // answer is the picture changing, and there is no event of ours to listen to.
-    /* Backing off rather than hammering. This used to check twelve times at a
-       flat 250ms, and each check is a full download of the picture with caching
-       switched off - twelve of them, on a phone, at the same moment SillyTavern
-       is uploading the replacement. The answer almost always arrives in the first
-       second, so the checks are dense there and sparse afterwards: six requests
-       instead of twelve, over the same three seconds. */
-    const WAITS = Object.freeze([250, 350, 500, 600, 600, 700]);
-    let after = before;
-    for (const wait of WAITS) {
-        if (after !== before) break;
-        await new Promise(resolve => setTimeout(resolve, wait));
-        // Asked again inside the loop rather than held across it, which is the
-        // rule at the top of this file: this waits three seconds and a context is
-        // only true for the instant it was read.
-        const live = freshContext();
-        after = await personaThumbBytes(live, startAvatar);
+    const result = await uploadPersonaAvatar(freshContext(), startAvatar, file);
+    /* The token is a cache buster, not a claim, so it is bumped whatever
+       happened: the address holds a different picture on success, and on failure
+       the redraw is what stops the screen from showing a stale one and inviting
+       the retry that used to make this popup repeat. */
+    bumpThumbnails(startAvatar);
+    scheduleDraw();
+    if (result.ok) { notify('info', STRINGS.manager.changeImageDone); return; }
+    /* A build without that endpoint falls back to the path this used to take:
+       SillyTavern's own file input, which finishes inside SillyTavern's crop
+       dialog. Nothing is measured afterwards, because there is nothing of ours
+       left to measure - the user is answering a dialog. Saying so is the honest
+       report; the old code guessed here and guessed wrong. */
+    if (result.status === 404) {
+        const missing = feedPersonaImage(document, startAvatar, file);
+        if (missing) { notify('error', STRINGS.manager.changeImageNoControl(missing)); return; }
+        notify('info', STRINGS.manager.changeImageHandedOver);
+        return;
     }
-    // Unchanged means unverified, and that includes the case where the thumbnail
-    // could not be read at all (both null). The null guard that used to stand here
-    // turned exactly that case - no measurement whatsoever - into a reported
-    // success, which is the one thing this file is not allowed to do.
-    if (after === before) {
-        notify('warning', STRINGS.manager.changeImageUnverified);
+    notify('error', STRINGS.manager.changeImageFailed(result.detail ?? result.reason));
+}
+
+/* ── 버전별 페르소나 이미지 (user request) ───────────────────────────────────
+   The write itself lives in assets.js. What is here is the part that belongs to
+   a screen: which persona and version were tapped, and what the user is told
+   about each way it can end. A picture that failed to move never rolls back the
+   version that was already applied, so every branch below reports and stops. */
+async function runBoundImage(avatarId, versionId, force) {
+    const root = getRoot();
+    if (!root || root.readOnly) return;
+    const persona = getPersona(root, avatarId);
+    const version = (persona?.versions ?? []).find(entry => entry.id === versionId);
+    const label = boundAsset(version);
+    if (!label) return;
+    const ctx = freshContext();
+    if (!ctx) return;
+    const result = await applyBoundImage({ ctx, root, persona, avatarId, label, force });
+    if (result.skipped) return;
+    if (result.ok) {
+        // Written to the avatar file, so the address holds a different picture and
+        // every image pointed at it needs a new query. Recorded too, so the next
+        // apply of the same version costs nothing.
+        persona.avatarWritten = label;
+        addLog(persona, 'image-apply', label, Date.now());
+        freshContext()?.saveSettingsDebounced?.();
+        bumpThumbnails(avatarId);
+        if (result.backedUp) notify('info', STRINGS.manager.imageBackupMade);
         scheduleDraw();
         return;
     }
-    notify('info', STRINGS.manager.changeImageDone);
-    // The picture at that address is a different picture now, and every <img> in
-    // this extension is pointed at that address. Bumped once, here, where the
-    // change was actually observed: the next draw asks for the new one, and every
-    // draw after it is back to costing nothing. Without this the icon beside the
-    // send box kept the old picture until the persona was switched away and back,
-    // because that node is never rebuilt and its src never changed (device
-    // report). SillyTavern's own screens are its business.
-    bumpThumbnails(startAvatar);
-    scheduleDraw();
+    if (result.error === 'listing') { notify('warning', STRINGS.manager.imageListingFailed(result.detail)); return; }
+    if (result.error === 'missing') { notify('warning', STRINGS.manager.imageAssetMissing(result.detail)); return; }
+    if (result.error === 'backup') { notify('error', STRINGS.manager.imageBackupFailed(result.detail)); return; }
+    notify('error', STRINGS.manager.imageApplyFailed(result.detail ?? result.error));
+}
+
+async function pickBoundAsset(versionId) {
+    const s = guardTarget();
+    if (!s) return;
+    const startAvatar = targetAvatar;
+    if (assetState.avatar !== targetAvatar || assetState.error) { notify('warning', STRINGS.manager.assetOpenTabFirst); return; }
+    const labels = assetLabels();
+    if (!labels.length) { notify('info', STRINGS.manager.assetNoneForPersona); return; }
+    const choice = await askChoice(STRINGS.manager.versionImagePick, labels);
+    if (!choice) return;
+    const after = guardTarget(startAvatar);
+    if (!after) return;
+    const version = (after.persona?.versions ?? []).find(entry => entry.id === versionId);
+    if (!version) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
+    if (bindAsset(version, choice, Date.now())) commit('image-bind', `${version.name ?? ''} / ${choice}`, startAvatar);
+}
+
+function clearBoundAsset(versionId) {
+    const s = guardTarget();
+    if (!s) return;
+    const version = (s.persona?.versions ?? []).find(entry => entry.id === versionId);
+    if (!version) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
+    if (bindAsset(version, null, Date.now())) commit('image-bind', version.name ?? '', targetAvatar);
+}
+
+/* The picture block on an open version row. One thumbnail at a time: expandedRow
+   holds a single key, so however many versions a persona has, this draws at most
+   one image. */
+function versionImageBlock(version, writable, reason) {
+    const box = el('div', 'pm-manager-assetsel');
+    const listingOk = assetState.avatar === targetAvatar && !assetState.error;
+    const view = versionImageState(version, assetLabels(), listingOk);
+    const head = view.state === 'none' ? STRINGS.manager.versionImageNone
+        : view.state === 'ok' ? view.label
+        : view.state === 'missing' ? STRINGS.manager.versionImageMissing(view.label)
+        : STRINGS.manager.versionImageUnknown(view.label);
+    box.append(el('div', 'pm-manager-picklabel', STRINGS.manager.versionImageHead));
+    box.append(el('div', 'pm-manager-value', head));
+    if (view.state === 'ok') {
+        const path = assetState.list.find(asset => asset?.label === view.label)?.path;
+        if (path) {
+            const img = el('img', 'pm-manager-targetimg');
+            img.src = path;
+            img.alt = '';
+            img.loading = 'lazy';
+            box.append(img);
+        }
+    }
+    box.append(actionsRow([
+        actionButton(STRINGS.manager.versionImagePickButton, () => pickBoundAsset(version.id), writable, '', reason),
+        actionButton(STRINGS.manager.versionImageNow, () => runBoundImage(targetAvatar, version.id, true),
+            writable && view.state === 'ok', '', view.state === 'ok' ? reason : STRINGS.manager.versionImageNoBinding),
+        actionButton(STRINGS.manager.versionImageClear, () => clearBoundAsset(version.id),
+            writable && view.state !== 'none', '', reason),
+    ]));
+    return box;
 }
 
 /* ── 새 페르소나로 복제 (user request) ───────────────────────────────────────
@@ -3045,6 +3121,9 @@ function versionRow(persona, version, writable, reason) {
     // button goes disabled with a reason instead of failing after the tap, and the
     // reason says where the repair is.
     const applicable = versionApplicable(persona, version.id);
+    // A word, never an image: a page of twenty rows would otherwise fetch twenty
+    // pictures to say one thing each. The picture itself is in the open row.
+    if (boundAsset(version)) head.append(el('span', 'pm-manager-value', STRINGS.manager.versionImageMark));
     head.append(actionsRow([
         actionButton(STRINGS.common.apply, () => applyVersion(version.id), writable && applicable,
             '', applicable ? reason : STRINGS.manager.versionNotApplicableReason),
@@ -3063,6 +3142,7 @@ function versionRow(persona, version, writable, reason) {
     }
     if (!picks.childElementCount) picks.append(noteOf(STRINGS.manager.noItemsInVersion));
     box.append(picks);
+    box.append(versionImageBlock(version, writable, reason));
     box.append(versionAssetBlock(version, writable));
     // Version tags. getOwner re-resolves the version from a
     // fresh persona at tap time by reading version.id when it runs, the same
@@ -3445,6 +3525,15 @@ function fillVersionList(container, s, writable, reason) {
 
     const paged = pageOf(list, ui.page, s.root?.settings?.pageSizeVersions ?? 20);
     ui.page = paged.page;
+    /* A binding can only be described honestly once the asset list is loaded, and
+       this tab never loaded it. Asked for once per persona, and only when a
+       binding actually exists to describe, so a persona with none pays nothing.
+       loadAssets sets assetState.avatar synchronously before its await, so this
+       cannot fan out into one request per frame. */
+    if (assetState.avatar !== targetAvatar && !assetState.loading
+        && (persona.versions ?? []).some(version => boundAsset(version))) {
+        void loadAssets(targetAvatar);
+    }
     for (const version of paged.slice) container.append(versionRow(persona, version, writable, reason));
     const pager = pagerRow(paged.page, paged.pages,
         () => { ui.page = Math.max(1, ui.page - 1); redrawManagerList('versions'); },

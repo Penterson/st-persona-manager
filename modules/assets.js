@@ -267,6 +267,111 @@ export function renderInElement(el, resolvePath, style) {
     return replaced;
 }
 
+/* ── 버전별 페르소나 이미지 (user request) ───────────────────────────────────
+
+   Everything below moves bytes between two places that already exist: the
+   sprite folder this extension owns, and the avatar file SillyTavern owns.
+   Nothing here talks to the user; the callers decide what to say, because the
+   quick panel and the manager say it differently. */
+
+// A sprite the server is already serving, turned back into a File so it can be
+// posted as an avatar. The path is the server's own, used verbatim.
+export async function fetchAssetFile(path, label) {
+    if (!path) return null;
+    try {
+        const res = await fetch(path, { cache: 'no-store' });
+        if (!res.ok) return null;
+        const blob = await res.blob();
+        const name = /\.[a-z0-9]+$/i.test(label ?? '') ? label : `${label || 'image'}.png`;
+        return new File([blob], name, { type: blob.type || 'image/png' });
+    } catch { return null; }
+}
+
+/* The persona's CURRENT picture, for the one backup taken before the first
+   overwrite. The full size original is served from a path this project has
+   never measured, so the thumbnail is what gets kept and the caller says so:
+   a backup quietly smaller than the thing it replaces would be worse than
+   none, because nobody would know to look. */
+export async function captureAvatarFile(ctx, avatarId) {
+    if (typeof ctx?.getThumbnailUrl !== 'function') return null;
+    let url;
+    try { url = ctx.getThumbnailUrl('persona', avatarId); } catch { return null; }
+    if (!url) return null;
+    try {
+        const res = await fetch(url, { cache: 'no-store' });
+        if (!res.ok) return null;
+        const blob = await res.blob();
+        return new File([blob], 'pm-backup.png', { type: blob.type || 'image/png' });
+    } catch { return null; }
+}
+
+/* One picture write at a time.
+
+   SillyTavern has exactly one avatar upload form in the document and the
+   endpoint writes one file per request. Two applies racing each other would
+   interleave, and the second answer would describe the first one's upload. The
+   chain also means a burst of version taps ends with the last one winning,
+   which is what the taps meant. */
+let imageChain = Promise.resolve();
+function queueImageWrite(job) {
+    const run = imageChain.then(job, job);
+    // Never rejects, so one failure cannot poison every later write.
+    imageChain = run.then(() => undefined, () => undefined);
+    return run;
+}
+
+/* Puts a version's bound asset onto the persona's avatar file.
+
+   Answers with a code rather than a sentence, and never throws: the callers are
+   a version tap in two different screens, and a version apply must not be
+   undone by a picture that failed to move. Codes:
+     { skipped: 'none' }      the version binds nothing
+     { skipped: 'same' }      we already wrote this label to this avatar
+     { error: 'listing' }     the asset folder could not be read
+     { error: 'missing' }     the bound label is not in the folder
+     { error: 'backup' }      the first overwrite was refused: nothing was saved
+     { error: 'fetch' }       the asset itself could not be downloaded
+     { error: 'upload' }      the avatar endpoint refused
+     { ok: true, backedUp }   written; backedUp says a backup was made just now
+*/
+export async function applyBoundImage({ ctx, root, persona, avatarId, label, force }) {
+    if (!label) return { skipped: 'none' };
+    if (!force && persona?.avatarWritten === label) return { skipped: 'same' };
+    return queueImageWrite(async () => {
+        const key = resolveFolderKey(root, avatarId);
+        let list;
+        try { list = await listAssets(ctx, key); } catch (e) {
+            return { error: 'listing', detail: String(e?.message ?? e) };
+        }
+        // listAssets hands back the server's own entries, and .label is the name
+        // every other screen here shows, so a binding stored from one of those
+        // screens matches on the same field it was taken from.
+        const hit = list.find(asset => asset?.label === label);
+        if (!hit) return { error: 'missing', detail: label };
+
+        /* The avatar file is overwritten, so the picture that is there now is
+           about to stop existing. Kept once, before the first write, and the
+           write is refused outright when keeping it fails. */
+        let backedUp = false;
+        if (!persona?.avatarBackup) {
+            const original = await captureAvatarFile(ctx, avatarId);
+            if (!original) return { error: 'backup', detail: 'capture' };
+            try {
+                await uploadAsset(ctx, claimFolderKey(root, avatarId) ?? key, original);
+            } catch (e) {
+                return { error: 'backup', detail: String(e?.message ?? e) };
+            }
+            backedUp = true;
+        }
+
+        const file = await fetchAssetFile(hit.path, label);
+        if (!file) return { error: 'fetch', detail: label };
+        const wrote = await uploadPersonaAvatar(ctx, avatarId, file);
+        if (!wrote.ok) return { error: 'upload', detail: wrote.detail ?? wrote.reason };
+        return { ok: true, backedUp };
+    });
+}
+
 const MACROS = ['persona_assets', 'persona_asset_prompt'];
 
 // A version may carry an assetSelection naming the files it uses,
@@ -327,19 +432,56 @@ export function unregisterAssetMacros(ctx) {
    the diagnostic read off the persona list's own img. The bytes before and after
    are compared, so the answer is what the server now serves rather than what we
    hoped the upload did. */
-export async function personaThumbBytes(ctx, avatarId) {
-    if (typeof ctx?.getThumbnailUrl !== 'function') return null;
+/* Drops the browser's copy of a persona picture, the way SillyTavern drops its
+   own after an upload: cache 'reload' asks the network even when a fresh copy is
+   sitting in the cache. The server has already deleted its cached thumbnail (the
+   upload endpoint does that whenever overwrite_name is present), so this is the
+   only copy left that could still be stale. Best effort: a failed bust shows an
+   old picture, which the pmv token on our own <img> elements covers anyway. */
+async function bustPersonaImage(ctx, avatarId) {
+    if (typeof ctx?.getThumbnailUrl !== 'function') return;
     let url;
-    try { url = ctx.getThumbnailUrl('persona', avatarId); } catch { return null; }
-    if (!url) return null;
-    // A cache buster of our own: the browser has this picture already, and the
-    // whole point of the second read is to see whether the server changed it.
-    const bust = url.includes('?') ? '&' : '?';
+    try { url = ctx.getThumbnailUrl('persona', avatarId); } catch { return; }
+    if (!url) return;
+    try { await fetch(url, { cache: 'reload' }); } catch { /* the token still covers us */ }
+}
+
+/* Replaces a persona's picture through the endpoint SillyTavern's own persona
+   screen posts to.
+
+   This used to be done by putting the file into SillyTavern's hidden file input
+   and firing a change event, then watching the thumbnail's byte length to find
+   out whether anything happened. Both halves were wrong. The change handler
+   (changeUserAvatar in personas.js) opens a CROP dialog unless the user has
+   turned resizing off, so the upload does not even begin until the user answers
+   it - long after any watch window closes. And the watch could not tell "no
+   measurement" from "no change": on a retry the byte length it compared against
+   was already the new picture's, so uploading the same file twice reported
+   failure every time. That is the popup that would not stop.
+
+   The endpoint answers the question directly instead. A 200 means the file is
+   written; anything else carries a status worth putting on screen. */
+export async function uploadPersonaAvatar(ctx, avatarId, file) {
+    const body = new FormData();
+    // The field names are SillyTavern's own form: avatar for the file, and
+    // overwrite_name for the avatar being replaced. An empty overwrite_name
+    // would CREATE a persona rather than replace one, so it is never omitted.
+    body.append('avatar', file);
+    body.append('overwrite_name', avatarId);
+    let res;
     try {
-        const res = await fetch(`${url}${bust}pmcheck=${Date.now()}`, { cache: 'no-store' });
-        if (!res.ok) return null;
-        return (await res.arrayBuffer()).byteLength;
-    } catch { return null; }
+        res = await fetch('/api/avatars/upload', {
+            method: 'POST',
+            headers: formHeaders(ctx),
+            cache: 'no-cache',
+            body,
+        });
+    } catch (e) {
+        return { ok: false, reason: 'network', detail: String(e?.message ?? e) };
+    }
+    if (!res.ok) return { ok: false, reason: 'http', status: res.status, detail: `HTTP ${res.status}` };
+    await bustPersonaImage(ctx, avatarId);
+    return { ok: true };
 }
 
 // Hands the file to SillyTavern's own uploader, with the avatar to overwrite in
