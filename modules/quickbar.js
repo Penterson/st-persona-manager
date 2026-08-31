@@ -871,22 +871,29 @@ export async function runBoundImageWrite(avatarId, versionId, force, known) {
         ctx, root: before, persona: first, avatarId, label, force, known, now,
     });
     if (!result.ok) return result;
+    // The address holds a different picture whatever happens next, so the token
+    // is bumped before any of the bookkeeping below can return early.
+    bumpThumbnails(avatarId);
     // Read again, because the three round trips above are long enough for the
     // root to have been replaced under us.
     const root = getRoot();
-    if (!root || root.readOnly) return result;
-    const persona = getPersona(root, avatarId);
-    if (!persona) return result;
+    const persona = root && !root.readOnly ? getPersona(root, avatarId) : null;
+    if (!persona) {
+        // The picture was written but the record of it cannot be. Said out loud,
+        // because a backup was possibly consumed and the next apply will take
+        // another one: a silent success here is a lie about what was saved.
+        return { ...result, backedUp: !!result.backup, unrecorded: true };
+    }
     // The backup record closes the guard that decides whether to take one. Without
     // it every apply takes another, and the second holds the first one's
     // replacement rather than the picture that was there to begin with.
     if (result.backup && !persona.avatarBackup) persona.avatarBackup = result.backup;
     persona.avatarWritten = label;
-    addLog(persona, 'image-apply', label, now);
+    // Stamped when the write FINISHED, not when the tap happened: the three
+    // round trips above can take seconds on a phone, and an entry dated before
+    // edits that actually happened earlier sorts wrongly in the history tab.
+    addLog(persona, 'image-apply', label, Date.now());
     freshContext()?.saveSettingsDebounced?.();
-    // The address holds a different picture now, so every image pointed at it
-    // needs a new query.
-    bumpThumbnails(avatarId);
     scheduleDraw();
     return { ...result, backedUp: !!result.backup };
 }
@@ -895,7 +902,11 @@ export async function runBoundImageWrite(avatarId, versionId, force, known) {
    only a failure is worth a sentence. Success is the picture itself changing. */
 async function runBoundImageFromPanel(avatarId, versionId) {
     const result = await runBoundImageWrite(avatarId, versionId, false, null);
-    if (!result || result.skipped || result.ok) return;
+    if (!result || result.skipped) return;
+    if (result.ok) {
+        if (result.unrecorded) notify('warning', STRINGS.manager.imageAppliedUnrecorded);
+        return;
+    }
     if (result.error === 'missing') { notify('warning', STRINGS.manager.imageAssetMissing(result.detail)); return; }
     if (result.error === 'backup') { notify('error', STRINGS.manager.imageBackupFailed(result.detail)); return; }
     notify('error', STRINGS.manager.imageApplyFailed(result.detail ?? result.error));

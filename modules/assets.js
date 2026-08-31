@@ -81,6 +81,24 @@ export function labelOf(filename) {
     return String(filename ?? '').replace(/\.[^.]*$/, '');
 }
 
+/* The avatar backups this extension writes live in the same sprite folder as
+   the user's own pictures, because that is the only folder we own. They are
+   bookkeeping, not content, so everything that shows or SENDS the folder has to
+   be able to tell them apart: unfiltered, a backup reached the prompt through
+   {{persona_assets}} and the model could draw the user's old avatar into the
+   chat with {{pimg::}}. One prefix, one predicate, checked everywhere the list
+   is read for the user or for the model. */
+export const BACKUP_PREFIX = 'pm-원본-';
+
+function isBackupLabel(label) {
+    return String(label ?? '').startsWith(BACKUP_PREFIX);
+}
+
+// The folder as the user and the model should see it.
+export function withoutBackups(list) {
+    return (list ?? []).filter(item => !isBackupLabel(typeof item === 'string' ? item : item?.label));
+}
+
 export function assetLookup(folders, folderKey, filename) {
     // Decides what a folder qualified tag can do right now, given what we have
     // listed so far. Kept pure so the rendering path stays testable.
@@ -306,7 +324,7 @@ export async function captureAvatarFile(ctx, avatarId, stamp) {
         const res = await fetch(url, { cache: 'no-store' });
         if (!res.ok) return null;
         const blob = await res.blob();
-        const label = `pm-원본-${stamp}`;
+        const label = `${BACKUP_PREFIX}${stamp}`;
         return { file: new File([blob], `${label}.png`, { type: blob.type || 'image/png' }), label };
     } catch { return null; }
 }
@@ -318,6 +336,15 @@ export async function captureAvatarFile(ctx, avatarId, stamp) {
    interleave, and the second answer would describe the first one's upload. The
    chain also means a burst of version taps ends with the last one winning,
    which is what the taps meant. */
+/* Avatars whose backup has already been taken in this session.
+
+   persona.avatarBackup is the durable record, but the caller can only write it
+   AFTER its await resolves, and the queue starts the next job one microtask
+   before that. Two quick version taps therefore both saw an empty record and
+   both took a backup, the second one holding the first one's replacement. This
+   set closes that window; the stored record still governs across reloads. */
+const backedUpThisSession = new Set();
+
 let imageChain = Promise.resolve();
 function queueImageWrite(job) {
     const run = imageChain.then(job, job);
@@ -372,15 +399,18 @@ export async function applyBoundImage({ ctx, root, persona, avatarId, label, for
                every apply would take another backup, and the second one would hold
                the first one's replacement instead of the original. */
             let backup = null;
-            if (!persona?.avatarBackup) {
+            if (!persona?.avatarBackup && !backedUpThisSession.has(avatarId)) {
+                backedUpThisSession.add(avatarId);
                 const captured = await captureAvatarFile(ctx, avatarId, now);
-                if (!captured) return { error: 'backup', detail: 'capture' };
+                if (!captured) { backedUpThisSession.delete(avatarId); return { error: 'backup', detail: 'capture' }; }
                 try {
                     // saveSettingsDebounced is handed over so a key claimed here
                     // survives a later failure on this same path.
                     const folder = claimFolderKey(root, avatarId, ctx?.saveSettingsDebounced);
                     await uploadAsset(ctx, folder ?? key, captured.file);
                 } catch (e) {
+                    // Not backed up after all, so the next attempt must try again.
+                    backedUpThisSession.delete(avatarId);
                     return { error: 'backup', detail: String(e?.message ?? e) };
                 }
                 backup = { label: captured.label, at: now, source: 'thumbnail' };
@@ -409,10 +439,14 @@ const MACROS = ['persona_assets', 'persona_asset_prompt'];
 // agrees, and every file in the folder still reaches the model. Kept here rather
 // than imported from manager-pure so the macro path does not depend on the UI layer.
 function activeAssetNames(s) {
+    // Backups never reach the model. They are this extension's own copies of a
+    // picture the user replaced, and naming one in the prompt invites the model
+    // to draw it back into the chat.
+    const names = withoutBackups(s.assetNames);
     const selection = (s.persona?.versions ?? [])
         .find(v => v.id === s.persona?.activeVersionId)?.assetSelection;
-    if (!Array.isArray(selection)) return s.assetNames;
-    return s.assetNames.filter(name => selection.includes(name));
+    if (!Array.isArray(selection)) return names;
+    return names.filter(name => selection.includes(name));
 }
 
 export function registerAssetMacros(ctx, getState) {

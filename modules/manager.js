@@ -40,7 +40,7 @@ import {
 // Matching, language detection and paging.
 import { rankOf, textContains, detectLanguage, chatLanguage, pageOf } from './search-pure.js';
 import {
-    resolveFolderKey, claimFolderKey, listAssets, uploadAsset, deleteAsset,
+    resolveFolderKey, claimFolderKey, listAssets, uploadAsset, deleteAsset, withoutBackups,
     uploadPersonaAvatar, feedPersonaImage,
 } from './assets.js';
 import {
@@ -2675,7 +2675,13 @@ async function runBoundImage(avatarId, versionId, force) {
     const known = (assetState.avatar === avatarId && !assetState.error) ? assetState.list : null;
     const result = await runBoundImageWrite(avatarId, versionId, force, known);
     if (!result || result.skipped) return;
+    // This screen has its own draw. The shared writer redraws the quick panel,
+    // which is a different surface: without this the version drawer and the
+    // header avatar keep the picture they were drawn with, and the user taps
+    // again because nothing appeared to happen.
+    scheduleDraw();
     if (result.ok) {
+        if (result.unrecorded) { notify('warning', STRINGS.manager.imageAppliedUnrecorded); return; }
         if (result.backedUp) notify('info', STRINGS.manager.imageBackupMade);
         return;
     }
@@ -2726,6 +2732,12 @@ function versionImageBlock(version, writable, reason) {
         const path = assetState.list.find(asset => asset?.label === view.label)?.path;
         if (path) {
             const img = el('img', 'pm-manager-targetimg');
+            // The sprite path serves the file at full size. This is a preview the
+            // width of a thumbnail, so the browser is told how small it will be
+            // drawn and the row stays cheap to open on a phone.
+            img.width = 96;
+            img.height = 96;
+            img.decoding = 'async';
             img.src = path;
             img.alt = '';
             img.loading = 'lazy';
@@ -3793,7 +3805,9 @@ function historyTab(s, writable, reason) {
 /* Assets tab */
 
 function assetLabels() {
-    return assetState.list.map(item => item.label);
+    // The backups this feature writes sit in the same folder. They are ours, not
+    // the user's, so no screen that offers a choice offers them.
+    return withoutBackups(assetState.list).map(item => item.label);
 }
 
 function assetStyleClass() {

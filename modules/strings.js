@@ -574,6 +574,10 @@ export const STRINGS = deepFreeze({
         imageListingFailed: detail => `에셋 목록 읽기 실패: ${detail}`,
         imageAssetMissing: label => `지정된 에셋 없음: ${label}`,
         imageApplyFailed: detail => `이미지 교체 실패: ${detail}`,
+        // The picture changed but the record of it did not, so the next apply
+        // will do the work again. Reported rather than passed off as a clean
+        // success, which is what the caller cannot see from the outside.
+        imageAppliedUnrecorded: '이미지 교체 완료. 기록 저장 실패',
         confirmOverwriteVersion: name => `버전 "${name}" 덮어쓰기 (이전 내용 복구 불가)`,
         confirmDropVersion: name => `버전 "${name}" 삭제`,
         overwrite: '덮어쓰기',
