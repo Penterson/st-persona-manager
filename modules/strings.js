@@ -258,6 +258,7 @@ export const STRINGS = deepFreeze({
         // The keys are the stored values and never change.
         logKinds: {
             import: '가져오기',
+            'persona-create': '페르소나 생성',
             'section-add': '항목 추가',
             'section-rename': '항목 이름 변경',
             'section-move': '항목 이동',
@@ -511,6 +512,18 @@ export const STRINGS = deepFreeze({
         duplicateNotFound: '새 페르소나 확인 불가. SillyTavern 페르소나 목록 확인 필요',
         duplicateManyFound: '새 페르소나가 여럿 늘어 판별 불가. 관리자 구성 복사 취소',
         duplicateDone: name => `${name}${euRo(name)} 복제 완료`,
+        /* 새 페르소나 생성 (user request). Rides the duplicate command, so the
+           refusals above it apply here too; these are only the sentences that
+           differ. The confirm names the two things a user cannot see coming:
+           the composition starts blank, and the image is the current one's. */
+        createPersona: '새 페르소나 생성',
+        createNamePrompt: '새 페르소나 이름',
+        createNameTaken: name => `이미 있는 이름: "${name}"`,
+        confirmCreatePersona: name => `"${name}" 새 페르소나 생성 (빈 구성, 현재 페르소나 이미지 복사됨)`,
+        createNoCommand: '페르소나 생성 불가: 현재 빌드에 복제 커맨드 없음',
+        createManyFound: '새 페르소나가 여럿 늘어 판별 불가. 기본 구성 생략',
+        createRenameFailed: name => `생성 완료. 이름 변경 실패로 "${name}" 유지`,
+        createDone: name => `"${name}" 생성 완료`,
 
         /* 페르소나 복사 (user request). SillyTavern owns making a persona and the
            path for it is unmeasured, so the destination is always one it already

@@ -18,7 +18,7 @@
 // doc 4.2's singular prompt field is written. That is what lets the user edit a
 // persona they are not currently playing: a persona switch elsewhere no longer
 // invalidates the edit, because it never decided where the edit was going.
-import { MODULE_NAME, makeId, getPersona, HEADING_FORMATS, TILE_SHAPES } from './store.js';
+import { MODULE_NAME, makeId, getPersona, ensurePersona, HEADING_FORMATS, TILE_SHAPES } from './store.js';
 import {
     getState, getRoot, adoptFor, saveAndComposeFor, refreshAssets,
 } from './state.js';
@@ -2516,6 +2516,7 @@ function personaBox(ctx, s, writable, reason) {
     box.append(imageRow, input);
 
     box.append(actionsRow([
+        actionButton(STRINGS.manager.createPersona, () => createTargetPersona(), writable, '', reason),
         actionButton(STRINGS.manager.duplicatePersona, () => duplicateTargetPersona(), writable, '', reason),
         actionButton(STRINGS.manager.copyOpen, () => openCopyPicker(), writable, '', reason),
     ]));
@@ -2686,20 +2687,32 @@ async function changeTargetImage(file) {
    reported rather than guessed at. */
 const DUPLICATE_COMMANDS = Object.freeze(['persona-duplicate']);
 
-async function duplicateTargetPersona() {
-    const s = guardTarget();
-    if (!s) return;
-    if (s.readOnly || s.ambiguous) { notify('error', writeReason(s)); return; }
-    const startAvatar = targetAvatar;
-    const commands = freshContext()?.SlashCommandParser?.commands;
-    // Discovered, never hardcoded into a call: the same rule the persona switch
-    // follows, and the reason that one survived a SillyTavern rename.
-    const command = DUPLICATE_COMMANDS.find(name => commands && Object.hasOwn(commands, name) && commands[name]);
-    if (!command) { notify('error', STRINGS.manager.duplicateNoCommand); return; }
-    const personas = freshContext()?.powerUserSettings?.personas ?? {};
-    const label = personas[startAvatar] ?? startAvatar;
-    if (!(await askConfirm(STRINGS.manager.confirmDuplicatePersona(label)))) return;
-    if (!guardTarget(startAvatar)) return;
+// The two flows below mint through the same measured command and verify the
+// result the same way, and all three flows under this line end on the same
+// screen reset. Shared, because this file has already had one duplicated block
+// drift; the third copy of each was the warning.
+function landOnPersona(avatar) {
+    pickerMode = 'target';
+    pickerOpen = false;
+    targetAvatar = avatar;
+    openVariant = null;
+    editorDirty = false;
+    expandedRow = null;
+    historyVariant = null;
+    historyIndex = null;
+    lastMissing = null;
+    placementOpen = false;
+    namesOpen = false;
+    personaOpen = false;
+    resetRevise();
+    resetFullText();
+    resetListUi();
+}
+
+// Runs the discovered duplicate command and answers with the ONE new key in the
+// persona map, or null after reporting why. The many-found sentence is the
+// caller's, because what gets cancelled differs (구성 복사 vs 기본 구성).
+async function mintPersona(command, label, manyFoundMessage) {
     const before = new Set(Object.keys(freshContext()?.powerUserSettings?.personas ?? {}));
     try {
         await freshContext()?.executeSlashCommandsWithOptions(`/${command} ${quoteArg(label)}`);
@@ -2719,9 +2732,28 @@ async function duplicateTargetPersona() {
         }
         return added.length > 0;
     }, undefined, CREATE_WAIT_TURNS);
-    if (!added.length) { notify('error', STRINGS.manager.duplicateNotFound); scheduleDraw(); return; }
-    if (added.length > 1) { notify('warning', STRINGS.manager.duplicateManyFound); scheduleDraw(); return; }
-    const destAvatar = added[0];
+    if (!added.length) { notify('error', STRINGS.manager.duplicateNotFound); scheduleDraw(); return null; }
+    if (added.length > 1) { notify('warning', manyFoundMessage); scheduleDraw(); return null; }
+    return added[0];
+}
+
+
+async function duplicateTargetPersona() {
+    const s = guardTarget();
+    if (!s) return;
+    if (s.readOnly || s.ambiguous) { notify('error', writeReason(s)); return; }
+    const startAvatar = targetAvatar;
+    const commands = freshContext()?.SlashCommandParser?.commands;
+    // Discovered, never hardcoded into a call: the same rule the persona switch
+    // follows, and the reason that one survived a SillyTavern rename.
+    const command = DUPLICATE_COMMANDS.find(name => commands && Object.hasOwn(commands, name) && commands[name]);
+    if (!command) { notify('error', STRINGS.manager.duplicateNoCommand); return; }
+    const personas = freshContext()?.powerUserSettings?.personas ?? {};
+    const label = personas[startAvatar] ?? startAvatar;
+    if (!(await askConfirm(STRINGS.manager.confirmDuplicatePersona(label)))) return;
+    if (!guardTarget(startAvatar)) return;
+    const destAvatar = await mintPersona(command, label, STRINGS.manager.duplicateManyFound);
+    if (!destAvatar) return;
     const after = guardTarget(startAvatar);
     if (!after) return;
     // The new persona is SillyTavern's; the composition on it is ours to put
@@ -2732,22 +2764,74 @@ async function duplicateTargetPersona() {
     freshContext()?.saveSettingsDebounced?.();
     const newName = freshContext()?.powerUserSettings?.personas?.[destAvatar] ?? destAvatar;
     // Onto the copy, which is what the user made and what they will edit next.
-    pickerMode = 'target';
-    pickerOpen = false;
-    targetAvatar = destAvatar;
-    openVariant = null;
-    editorDirty = false;
-    expandedRow = null;
-    historyVariant = null;
-    historyIndex = null;
-    lastMissing = null;
-    placementOpen = false;
-    namesOpen = false;
-    personaOpen = false;
-    resetRevise();
-    resetFullText();
-    resetListUi();
+    landOnPersona(destAvatar);
     notify('info', STRINGS.manager.duplicateDone(newName));
+    scheduleDraw();
+}
+
+/* ── 새 페르소나 생성 (user request) ─────────────────────────────────────────
+   SillyTavern owns creating a persona and no dedicated creation path has been
+   measured on this build, so the one measured mint is reused: /persona-duplicate
+   makes the entry and the result is verified by diffing the persona map, exactly
+   as the duplicate above does. What makes the result NEW instead of a copy is
+   done by us afterwards, in this order: the typed name goes on first (one map
+   entry, applyPersonaName's list scope), because saveAndComposeFor refuses while
+   any two personas share a name and SillyTavern may have named the copy exactly
+   like its source. Then a blank default composition replaces the description
+   SillyTavern copied over. The avatar image stays inherited: replacing an image
+   is its own measured control ([이미지 변경], right above this button), and the
+   confirm popup says so before anything runs. */
+async function createTargetPersona() {
+    const s = guardTarget();
+    if (!s) return;
+    if (s.readOnly || s.ambiguous) { notify('error', writeReason(s)); return; }
+    const startAvatar = targetAvatar;
+    const commands = freshContext()?.SlashCommandParser?.commands;
+    // Discovered, never hardcoded into a call: the same rule the duplicate follows.
+    const command = DUPLICATE_COMMANDS.find(name => commands && Object.hasOwn(commands, name) && commands[name]);
+    if (!command) { notify('error', STRINGS.manager.createNoCommand); return; }
+    const name = (await askText(STRINGS.manager.createNamePrompt, ''))?.trim();
+    if (!name) return;
+    // Refused before SillyTavern is asked for anything: renaming INTO a duplicate
+    // name is the one outcome the name machinery must never produce, and finding
+    // out only after the persona exists would leave it stuck under whatever name
+    // SillyTavern gave it.
+    const taken = Object.values(freshContext()?.powerUserSettings?.personas ?? {}).includes(name);
+    if (taken) { notify('error', STRINGS.manager.createNameTaken(name)); return; }
+    if (!(await askConfirm(STRINGS.manager.confirmCreatePersona(name)))) return;
+    if (!guardTarget(startAvatar)) return;
+    const label = freshContext()?.powerUserSettings?.personas?.[startAvatar] ?? startAvatar;
+    const destAvatar = await mintPersona(command, label, STRINGS.manager.createManyFound);
+    if (!destAvatar) return;
+    // The typed name, list scope only: nothing here touches the chat. A refusal
+    // is not rolled back by deleting the persona, because no deletion path has
+    // been measured; the persona exists either way and the toast says under
+    // which name.
+    const renamed = await applyPersonaName(destAvatar, name, { toChat: false });
+    /* Deliberately NOT guardTarget(startAvatar): the persona already exists in
+       SillyTavern, so bailing because the SOURCE moved (the manager closed during
+       the wait, the record vanished) would leave the copy carrying the source's
+       description while claiming to be new. The blank composition is owed to the
+       persona that now exists, whatever happened to the one it was minted from. */
+    const root = getRoot();
+    if (root && !root.readOnly) {
+        // A blank default composition, not a copy: that is the difference between
+        // this button and the one beside it. The birth log line is what keeps the
+        // pruner off an entry whose variants are all deliberately empty.
+        const persona = ensurePersona(root, destAvatar, freshContext()?.uuidv4);
+        addLog(persona, 'persona-create', name, Date.now());
+        // Overwrites the description SillyTavern copied with the (empty) composition.
+        saveAndComposeFor(destAvatar);
+    }
+    freshContext()?.saveSettingsDebounced?.();
+    // Onto the new persona, exactly as the duplicate lands on its copy.
+    landOnPersona(destAvatar);
+    if (renamed?.ok) {
+        notify('info', STRINGS.manager.createDone(name));
+    } else {
+        const stName = freshContext()?.powerUserSettings?.personas?.[destAvatar] ?? destAvatar;
+        notify('warning', STRINGS.manager.createRenameFailed(stName));
+    }
     scheduleDraw();
 }
 
@@ -2806,21 +2890,7 @@ async function copyOnto(destAvatar) {
     // The copy is what the user made and what they are about to work on, so the
     // screen moves onto it. Everything screen local belongs to the persona being
     // left, exactly as selectTarget clears it.
-    pickerMode = 'target';
-    pickerOpen = false;
-    targetAvatar = destAvatar;
-    openVariant = null;
-    editorDirty = false;
-    expandedRow = null;
-    historyVariant = null;
-    historyIndex = null;
-    lastMissing = null;
-    placementOpen = false;
-    namesOpen = false;
-    personaOpen = false;
-    resetRevise();
-    resetFullText();
-    resetListUi();
+    landOnPersona(destAvatar);
     notify('info', STRINGS.manager.copyDone(toName));
     scheduleDraw();
 }
@@ -3622,7 +3692,10 @@ function historyTab(s, writable, reason) {
         row.append(el('span', 'pm-manager-historytime', formatTime(line.at)));
         // Anything the map does not name falls back to the raw stored kind rather
         // than to a blank cell, so a line written by a newer build stays legible.
-        row.append(el('span', 'pm-manager-logkind', STRINGS.manager.logKinds[line.kind] ?? String(line.kind ?? '')));
+        // Own properties only: a stored kind of 'constructor' out of a hand
+        // edited settings.json must fall back, not render an inherited member.
+        row.append(el('span', 'pm-manager-logkind',
+            Object.hasOwn(STRINGS.manager.logKinds, line.kind) ? STRINGS.manager.logKinds[line.kind] : String(line.kind ?? '')));
         row.append(el('span', 'pm-manager-name', previewText(line.detail, 30)));
         logBox.append(row);
     }
