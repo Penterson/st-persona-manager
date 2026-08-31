@@ -33,7 +33,11 @@ export function historyBytes(root) {
     let total = 0;
     for (const persona of Object.values(root.personas ?? {})) {
         for (const list of Object.values(persona.history ?? {})) {
-            for (const entry of list) total += encoder.encode(entry.text ?? '').length + 24;
+            // expireOldHistory a few lines down checks this and these two did not,
+            // so a history value that is not an array threw here instead - which is
+            // inside the save path, on data the user is about to lose.
+            if (!Array.isArray(list)) continue;
+            for (const entry of list) total += encoder.encode(entry?.text ?? '').length + 24;
         }
     }
     return total;
@@ -72,7 +76,9 @@ export function expireOldHistory(root, settings, now = Date.now()) {
         // a line is indistinguishable from data loss. Expiry was returning a count
         // nobody read, so a user who set 보관 기간 saw a shorter list, no banner and
         // no log entry.
-        if (personaDropped) addLog(persona, 'history-expired', String(personaDropped), now);
+        // Through STRINGS like every other line the user reads: this one used to
+        // print the bare number, so the history screen showed "기간 만료 · 13".
+        if (personaDropped) addLog(persona, 'history-expired', STRINGS.manager.logDetails.expired(personaDropped), now);
     }
     return dropped;
 }
@@ -89,7 +95,8 @@ export function enforceGlobalBudget(root, settings, now = Date.now()) {
     const all = [];
     for (const persona of Object.values(root.personas ?? {})) {
         for (const [variantId, list] of Object.entries(persona.history ?? {})) {
-            list.forEach(entry => all.push({ persona, variantId, at: entry.at }));
+            if (!Array.isArray(list)) continue;
+            list.forEach(entry => all.push({ persona, variantId, at: entry?.at }));
         }
     }
     all.sort((a, b) => a.at - b.at);

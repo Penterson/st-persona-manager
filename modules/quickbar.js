@@ -18,7 +18,7 @@ import { STRINGS } from './strings.js';
 // One helper, not the screen: manager-pure.js holds no DOM and importing it here
 // keeps both screens comparing the empty section set the same way. A second copy
 // of the rule would be a second chance to get it wrong.
-import { missingSignature, addTagToAll, removeTagFromAll, tagsAcross, boundAsset } from './manager-pure.js';
+import { missingSignature, addTag, removeTag, tagsAcross, boundAsset } from './manager-pure.js';
 // assets.js imports nothing at all, so reaching it from here adds no cycle.
 import { applyBoundImage } from './assets.js';
 // Matching, language detection and paging.
@@ -58,6 +58,13 @@ let expandedAvatar = null;
 // text selection or an image save. Strings only, per the module state rule.
 let selectMode = false;
 let selectedAvatars = [];
+/* What the persona list actually drew, after the group chip, the language and tag
+   chips, the search and the page cut. The bulk bar stands ABOVE the list and its
+   [전체 선택] is scoped to "what the user can see they are choosing", which is this
+   and not buildRosterView's output: that one has only had the group chip applied,
+   so a search showing two personas had [전체 선택] pick all thirty and [삭제]
+   take them. Written by fillRosterList, read by the bulk bar at tap time. */
+let rosterVisible = [];
 // One redraw per frame, and none at all while the user is typing. See scheduleDraw.
 let drawFrame = 0;
 let drawDeferred = false;
@@ -129,6 +136,33 @@ export function blockDrawerClose(node) {
 // and acting on it would fire the control while the user is still typing.
 export function isComposingKey(e) {
     return e.isComposing || e.keyCode === 229;
+}
+
+/* A row that answers a tap has to answer a key as well.
+
+   The rows in this panel are divs, because a div is what can hold a portrait, a
+   name, a badge and a tick without a button's own box fighting the layout - the
+   fold heads made the same choice and say so where they are built. What the divs
+   never got is what a button gives away for free: a place in the tab order, a
+   role a screen reader can announce, and Enter and Space. So the persona list,
+   which is the one thing this panel exists for, could be operated by a finger and
+   by nothing else. TalkBack read the names and had no way to choose one.
+
+   The role is only supplied when the caller has not set one: a row in select mode
+   is a checkbox, not a button, and it says so itself. Space is prevented because
+   otherwise it scrolls the panel out from under the row it just fired. */
+export function makeRowActivatable(node, onActivate) {
+    if (!node || typeof onActivate !== 'function') return node;
+    if (!node.hasAttribute('role')) node.setAttribute('role', 'button');
+    node.tabIndex = 0;
+    node.addEventListener('click', onActivate);
+    node.addEventListener('keydown', e => {
+        if (isComposingKey(e)) return;
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        onActivate(e);
+    });
+    return node;
 }
 
 // getThumbnailUrl's third argument was never measured. On some SillyTavern builds
@@ -513,6 +547,7 @@ export function closePanel() {
     rosterPage = 1;
     rosterLang = null;
     rosterTags = [];
+    rosterVisible = [];
     // Removing a focused input does not reliably fire blur, so the one shot listener
     // may never run. It is registered with once and dies with its node; the flag is
     // the only thing that would outlive the panel.
@@ -778,6 +813,29 @@ export async function askConfirm(message) {
 // rather than inventing an API that may not exist. The options are printed in the
 // prompt because an input box with no list is a guess; a number is asked for
 // because typing a Korean tag name exactly is harder than typing 3.
+/* The same question, answered by POSITION rather than by the string at it.
+
+   Two groups may share a name, so the caller cannot resolve the answer by name
+   without silently picking the first of a pair - and the caller that knew this
+   worked around it by numbering its own options before handing them over, which
+   this function then numbered again: the user read "1. 1. 그룹A". One numbering,
+   done here, and the index is what comes back. -1 is a cancel or no match. */
+export async function askChoiceIndex(message, options) {
+    const list = (options ?? []).filter(o => typeof o === 'string' && o.length);
+    if (!list.length) return -1;
+    const menu = list.map((o, i) => `${i + 1}. ${o}`).join('\n');
+    const answer = await askText(`${message}\n${menu}`, '1');
+    if (answer === null) return -1;
+    const trimmed = String(answer).trim();
+    // The exact NAME first, for the same reason askChoice states below.
+    const named = list.indexOf(trimmed);
+    if (named !== -1) return named;
+    const n = Number(trimmed);
+    if (Number.isInteger(n) && n >= 1 && n <= list.length) return n - 1;
+    notify('info', STRINGS.quick.choiceNoMatch);
+    return -1;
+}
+
 export async function askChoice(message, options) {
     const list = (options ?? []).filter(o => typeof o === 'string' && o.length);
     if (!list.length) return null;
@@ -840,7 +898,13 @@ async function applyVersion(versionId) {
     const version = (after.persona.versions ?? []).find(v => v.id === versionId);
     after.persona.activeVersionId = version.id;
     after.persona.activePicks = { ...(version.picks ?? {}) };
-    commit('version-apply', version.name ?? '');
+    // Only when the prompt write was accepted. commit answers false when state.js
+    // refuses - a read only root, an unknowable active persona, a persona that
+    // moved out from under the screen - and in every one of those cases the
+    // version was NOT applied. Overwriting the avatar file anyway puts the
+    // picture of a combination on a persona whose prompt does not carry it, and
+    // it consumes the one backup that is taken before the first overwrite.
+    if (!commit('version-apply', version.name ?? '')) return;
     // Same rule as the manager's copy: the prompt is committed, the picture
     // follows on its own, and a picture that fails never undoes the version.
     void runBoundImageFromPanel(startAvatar, versionId);
@@ -1047,7 +1111,16 @@ function createLabel(name, avatarId) {
 // closeOnDone is false for the automatic rename: that one can land while the user
 // has the panel open and is reading it, and a panel that shuts by itself because
 // a message arrived is a worse surprise than the rename it is reporting.
-export async function switchPersona(avatar, name, { closeOnDone = true } = {}) {
+/* quiet is for the automatic rename and for nothing else.
+
+   That rule is documented as "this one happens by itself and has to stay quiet",
+   and it was true of runAutoName's own code and false of everything it called: a
+   switch that did not land toasts an error from in here, and an ambiguous landing
+   toasts a warning. So a persona whose chat language kept flipping put a red
+   failure on screen after character messages the user had not acted on at all.
+   The result is still returned, and the caller still decides what to say. */
+export async function switchPersona(avatar, name, { closeOnDone = true, quiet = false } = {}) {
+    const say = (kind, message) => { if (!quiet) notify(kind, message); };
     // Every name1 read below is a new context. The old snapshot comment here said the
     // same thing as a local rule; the rule is now the structure of the whole module.
     // closeOnDone is honoured here too. It used to close unconditionally, so the
@@ -1064,7 +1137,7 @@ export async function switchPersona(avatar, name, { closeOnDone = true } = {}) {
         // cannot say which avatar we landed on, so we say that rather than imply
         // more certainty than we have.
         if ((getState()?.duplicateNames ?? []).includes(name)) {
-            notify('warning', STRINGS.quick.switchAmbiguous(name));
+            say('warning', STRINGS.quick.switchAmbiguous(name));
         }
         if (closeOnDone) closePanel();
         return true;
@@ -1099,7 +1172,7 @@ export async function switchPersona(avatar, name, { closeOnDone = true } = {}) {
     // measuring on the phone caught it.
     const command = pickPersonaCommand(freshContext()?.SlashCommandParser?.commands);
     if (!command) {
-        notify('error', STRINGS.quick.noSwitchCommand);
+        say('error', STRINGS.quick.noSwitchCommand);
         return false;
     }
     const run = async text => {
@@ -1118,7 +1191,7 @@ export async function switchPersona(avatar, name, { closeOnDone = true } = {}) {
 
     // Never report a success we did not observe, and never report a failure we did
     // not observe either: both waits above have expired by the time we get here.
-    notify('error', STRINGS.quick.switchFailed(name));
+    say('error', STRINGS.quick.switchFailed(name));
     return false;
 }
 
@@ -1145,7 +1218,7 @@ export async function switchPersona(avatar, name, { closeOnDone = true } = {}) {
 
    Verified rather than assumed: the map has to come back carrying the new name,
    and for the persona being played, name1 has to follow. */
-async function renameThroughSillyTavern(avatar, from, to, toChat) {
+async function renameThroughSillyTavern(avatar, from, to, toChat, quiet) {
     const commands = freshContext()?.SlashCommandParser?.commands;
     const command = PERSONA_UPDATE_COMMANDS.find(
         name => commands && Object.hasOwn(commands, name) && commands[name]);
@@ -1166,14 +1239,14 @@ async function renameThroughSillyTavern(avatar, from, to, toChat) {
     // with it. Should is not a measurement, so it is checked, and the switch is
     // only run when it did not.
     if (await waitFor(() => freshContext()?.name1 === to)) return { ok: true, reason: 'applied' };
-    return (await switchPersona(avatar, to, { closeOnDone: false }))
+    return (await switchPersona(avatar, to, { closeOnDone: false, quiet }))
         ? { ok: true, reason: 'applied' }
         : { ok: false, reason: 'switch-failed' };
 }
 
 const PERSONA_UPDATE_COMMANDS = Object.freeze(['persona-update']);
 
-export async function applyPersonaName(avatar, name, { closeOnDone = true, toChat = true } = {}) {
+export async function applyPersonaName(avatar, name, { closeOnDone = true, toChat = true, quiet = false } = {}) {
     const ctx = freshContext();
     const personas = ctx?.powerUserSettings?.personas;
     if (!personas || !Object.hasOwn(personas, avatar)) return { ok: false, reason: 'unknown' };
@@ -1191,7 +1264,7 @@ export async function applyPersonaName(avatar, name, { closeOnDone = true, toCha
        where its thoroughness is the point; the list scope writes the one map entry
        it was asked to write and nothing else. */
     if (toChat) {
-        const own = await renameThroughSillyTavern(avatar, previous, name, toChat);
+        const own = await renameThroughSillyTavern(avatar, previous, name, toChat, quiet);
         if (own.ok) return { ...own, previous };
         if (own.reason === 'switch-failed') return { ok: false, reason: 'switch-failed', previous };
     }
@@ -1206,7 +1279,7 @@ export async function applyPersonaName(avatar, name, { closeOnDone = true, toCha
     // what this function used to do to anybody who renamed a background persona
     // from the manager: they asked for a name and got a persona switch.
     if (!toChat) return { ok: true, reason: 'listed', previous };
-    const landed = await switchPersona(avatar, name, { closeOnDone });
+    const landed = await switchPersona(avatar, name, { closeOnDone, quiet });
     if (landed) return { ok: true, reason: 'applied', previous };
     // Put it back. A map that says one thing while the chat says another is worse
     // than a rename that did not happen, and the caller can only report the
@@ -1268,7 +1341,7 @@ async function runAutoName() {
     autoNameRunning = true;
     let result;
     try {
-        result = await applyPersonaName(avatar, name, { closeOnDone: false });
+        result = await applyPersonaName(avatar, name, { closeOnDone: false, quiet: true });
     } finally {
         // In a finally, so a throw anywhere in the switch does not leave this
         // feature switched off for the rest of the session.
@@ -1297,7 +1370,7 @@ function groupOf(title) {
 function rowOf(text, onClick) {
     const row = el('div', 'pm-row pm-quickbar-row');
     row.append(el('span', 'pm-quickbar-name', text));
-    if (onClick) row.addEventListener('click', onClick);
+    if (onClick) makeRowActivatable(row, onClick);
     else row.classList.add('pm-disabled');
     return row;
 }
@@ -1556,7 +1629,7 @@ function namesGroup(s, writable) {
         row.append(el('span', 'pm-quickbar-lang', STRINGS.common.languageNames[entry.lang] ?? entry.lang));
         row.append(el('span', 'pm-quickbar-name', entry.name));
         row.append(checkMark(entry.name === current));
-        if (writable) row.addEventListener('click', () => applyLocalName(entry.lang, entry.name));
+        if (writable) makeRowActivatable(row, () => applyLocalName(entry.lang, entry.name));
         else row.classList.add('pm-disabled');
         box.append(row);
     }
@@ -1726,19 +1799,23 @@ async function bulkGroup(view) {
     // with its position baked in and resolved back by INDEX. Matching on the name
     // afterwards always found the first of a duplicate pair, and the whole
     // selection went into a group the user did not pick.
-    const menu = labels.map((l, i) => `${i + 1}. ${l.name ?? ''}`);
-    const chosen = await askChoice(STRINGS.quick.bulkGroupPrompt, menu);
-    if (!chosen) return;
-    const pickedId = labels[menu.indexOf(chosen)]?.id;
+    // Answered by position, which is the only thing that separates two groups
+    // sharing a name, and numbered once rather than twice.
+    const picked = await askChoiceIndex(STRINGS.quick.bulkGroupPrompt, labels.map(l => l.name ?? ''));
+    if (picked < 0) return;
+    const pickedId = labels[picked]?.id;
     const after = getRoot();
     if (!after || after.readOnly) return;
     const label = (after.labels ?? []).find(l => l.id === pickedId);
     if (!label) return;
     if (!Array.isArray(label.members)) label.members = [];
+    let added = 0;
     for (const avatar of selectedAvatars) {
-        if (!label.members.includes(avatar)) label.members.push(avatar);
+        if (!label.members.includes(avatar)) { label.members.push(avatar); added++; }
     }
-    notify('info', STRINGS.quick.selectedCount(selectedAvatars.length));
+    // Which group, and how many went into it. It used to report the size of the
+    // selection, which is the one number the user could already see.
+    notify('info', STRINGS.quick.bulkGrouped(label.name ?? '', added));
     bulkSave(after);
 }
 
@@ -1768,18 +1845,26 @@ async function bulkDelete() {
     bulkSave(after);
 }
 
+// Whether every persona currently on screen is already picked. Asked of the list
+// as it stands, so the label and the action can never mean different things.
+function everyVisiblePicked() {
+    return rosterVisible.length > 0 && rosterVisible.every(a => selectedAvatars.includes(a));
+}
+
 function bulkBar(view, writable) {
     const bar = el('div', 'pm-quickbar-bulk');
     bar.append(el('div', 'pm-quickbar-bulkcount', STRINGS.quick.selectedCount(selectedAvatars.length)));
     const row = el('div', 'pm-manager-actions');
-    const all = (view?.entries ?? []).map(e => e.avatar);
-    const everyPicked = all.length > 0 && all.every(a => selectedAvatars.includes(a));
-    const pickAll = el('button', 'pm-quickbar-btn', everyPicked ? STRINGS.quick.selectNone : STRINGS.quick.selectAll);
+    const pickAll = el('button', 'pm-quickbar-btn',
+        everyVisiblePicked() ? STRINGS.quick.selectNone : STRINGS.quick.selectAll);
     pickAll.type = 'button';
+    pickAll.dataset.pmPickall = '1';
     pickAll.addEventListener('click', () => {
         // Scoped to what is on screen, which is what the user can see they are
-        // choosing. A filter or a search is part of the question they asked.
-        selectedAvatars = everyPicked ? [] : [...all];
+        // choosing. A filter, a search and the page cut are all part of the
+        // question they asked, and all three are applied by the time the list
+        // publishes what it drew.
+        selectedAvatars = everyVisiblePicked() ? [] : [...rosterVisible];
         scheduleDraw();
     });
     row.append(pickAll);
@@ -1835,6 +1920,12 @@ function editToggleButton(writable) {
         btn.addEventListener('click', () => {
             editMode = !editMode;
             if (!editMode) expandedAvatar = null;
+            // The row tap answers to select mode FIRST, so turning group editing on
+            // underneath it produced a button that lit up and changed nothing at
+            // all. The two modes are alternatives, and the select toggle beside
+            // this one has always said so by turning group editing off; this is
+            // the same sentence read the other way.
+            else if (selectMode) { selectMode = false; selectedAvatars = []; }
             scheduleDraw();
         });
     } else {
@@ -1946,7 +2037,9 @@ function personaRow(ctx, entry, s, version) {
     if (version?.line) text.append(el('div', 'pm-quickbar-versionline', version.line));
     row.append(text);
     row.append(checkMark(entry.avatar === s.avatar));
-    if (onClick) row.addEventListener('click', onClick);
+    // The role is already on the row in select mode, and makeRowActivatable
+    // leaves whatever it finds.
+    if (onClick) makeRowActivatable(row, onClick);
     else row.classList.add('pm-disabled');
     return row;
 }
@@ -2077,10 +2170,22 @@ function personaLanguage(root, avatar) {
 // Without it this rebuilt and re-sorted the whole roster a second time from the
 // same data. The parameter stays optional because redrawRosterList repaints this
 // container alone, with no rosterGroup above it to inherit from.
+/* Publishes what the list drew, and puts the bulk bar's label in step with it.
+
+   The bar is built before this runs, and this also runs on its own when only the
+   list is repainted (a keystroke, a page step), so the label is settled from here
+   rather than from the draw that built the button. */
+function publishVisible(avatars) {
+    rosterVisible = avatars;
+    const pickAll = document.getElementById(PANEL_ID)?.querySelector('[data-pm-pickall]');
+    if (pickAll) pickAll.textContent = everyVisiblePicked() ? STRINGS.quick.selectNone : STRINGS.quick.selectAll;
+}
+
 function fillRosterList(container, prebuilt) {
     const ctx = freshContext();
     const s = getState();
     container.replaceChildren();
+    publishVisible([]);
     if (!s) return;
     const writable = !s.ambiguous && !s.readOnly;
     const view = prebuilt
@@ -2185,6 +2290,10 @@ function fillRosterList(container, prebuilt) {
     const paged = pageOf(entries, rosterPage, perPage);
     rosterPage = paged.page;
 
+    // Everything that decides which personas are on screen has been applied by
+    // now, which is what makes this the answer [전체 선택] is scoped to.
+    publishVisible(paged.slice.map(entry => entry.avatar));
+
     // The label-filter check above cannot see the query or the page cut. If the
     // expanded row is not on the SCREEN, its editor closes for good instead of
     // springing back when the query is erased (same rationale).
@@ -2272,7 +2381,11 @@ function rosterGroup(ctx, s, writable) {
     controls.append(selectToggleButton(writable));
     controls.append(editToggleButton(writable));
     box.append(controls);
-    if (selectMode) box.append(bulkBar(view, writable));
+    // The bar is BUILT after the list, because [전체 선택] is scoped to what the
+    // list drew and the list is what works that out. A placeholder holds its
+    // place in the order so the bar still stands above the rows.
+    const bulkSlot = selectMode ? el('div') : null;
+    if (bulkSlot) box.append(bulkSlot);
 
     const chips = chipsRow(view, writable);
     if (chips) box.append(chips);
@@ -2305,6 +2418,7 @@ function rosterGroup(ctx, s, writable) {
     container.dataset.pmRosterList = '1';
     box.append(container);
     fillRosterList(container, view);
+    if (bulkSlot) bulkSlot.replaceWith(bulkBar(view, writable));
     return box;
 }
 
@@ -2465,6 +2579,7 @@ export function unmountQuickbar() {
     selectMode = false;
     selectedAvatars = [];
     expandedAvatar = null;
+    rosterVisible = [];
     drawDeferred = false;
     lastMissing = null;
     // destroy() has to leave no module state behind, and both of these are

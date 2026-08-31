@@ -81,6 +81,22 @@ export function labelOf(filename) {
     return String(filename ?? '').replace(/\.[^.]*$/, '');
 }
 
+/* What a {{pimg::}} tag names, looked up in a listing keyed by the server's own
+   labels.
+
+   The tag was resolved through labelOf alone, which strips everything after the
+   last dot, and a sprite label is free to contain one: an asset the server calls
+   "포즈 1.5" was looked up as "포즈 1", found nothing, and the tag stayed as raw
+   text forever with no way for the user to work out why. The name as written is
+   what the user typed and what the picker showed them, so it is tried first;
+   stripping is the fallback that lets somebody write the file name with its
+   extension and still be understood. */
+export function lookupLabel(map, filename) {
+    if (!map || typeof map.get !== 'function') return null;
+    const raw = String(filename ?? '');
+    return map.get(raw) ?? map.get(labelOf(raw)) ?? null;
+}
+
 /* The avatar backups this extension writes live in the same sprite folder as
    the user's own pictures, because that is the only folder we own. They are
    bookkeeping, not content, so everything that shows or SENDS the folder has to
@@ -116,7 +132,7 @@ export function assetLookup(folders, folderKey, filename) {
     // Decides what a folder qualified tag can do right now, given what we have
     // listed so far. Kept pure so the rendering path stays testable.
     const listing = folders?.get(folderKey);
-    if (listing instanceof Map) return { path: listing.get(labelOf(filename)) ?? null, fetch: false };
+    if (listing instanceof Map) return { path: lookupLabel(listing, filename), fetch: false };
     // A key we have never seen is worth exactly one listing request. A key that is
     // present without a listing is either in flight or already known to have failed,
     // and refetching it on every render sweep would hammer the server.
@@ -460,10 +476,18 @@ export async function applyBoundImage({ ctx, root, persona, avatarId, label, for
                 backup = { label: captured.label, at: now, source: 'thumbnail' };
             }
 
+            /* Every exit from here on carries the backup, because by here the file
+               is ON THE SERVER whatever happens next. The two failures below used
+               to return without it, the caller only records what it is handed, and
+               the record is what makes the guard above skip the next backup: so a
+               fetch or an upload that failed left a file in the folder that nothing
+               could name, and the next attempt made another one. They are hidden
+               from every screen by the backup prefix, so they were unreachable as
+               well as invisible. */
             const file = await fetchAssetFile(hit.path, label);
-            if (!file) return { error: 'fetch', detail: label };
+            if (!file) return { error: 'fetch', detail: label, backup };
             const wrote = await uploadPersonaAvatar(ctx, avatarId, file);
-            if (!wrote.ok) return { error: 'upload', detail: wrote.detail ?? wrote.reason };
+            if (!wrote.ok) return { error: 'upload', detail: wrote.detail ?? wrote.reason, backup };
             return { ok: true, backup };
         } catch (e) {
             // The contract above says this never throws, and the callers run it

@@ -18,7 +18,7 @@
 // doc 4.2's singular prompt field is written. That is what lets the user edit a
 // persona they are not currently playing: a persona switch elsewhere no longer
 // invalidates the edit, because it never decided where the edit was going.
-import { MODULE_NAME, makeId, getPersona, ensurePersona, HEADING_FORMATS, TILE_SHAPES } from './store.js';
+import { MODULE_NAME, makeId, getPersona, ensurePersona, HEADING_FORMATS } from './store.js';
 import {
     getState, getRoot, adoptFor, saveAndComposeFor, refreshAssets,
 } from './state.js';
@@ -28,15 +28,16 @@ import {
     readPlacement, writePlacement,
 } from './compose.js';
 import { addLog, snapshot, enforceGlobalBudget, restore, diffWords, expireOldHistory } from './history.js';
-import { livingLabels, toggleMember } from './roster.js';
+import { livingLabels, toggleMember, modifiedAt } from './roster.js';
 import {
     isTextEntry, pickApplicable, versionApplicable, quoteArg, waitFor, nameCollides,
     CREATE_WAIT_TURNS,
 } from './quickbar-pure.js';
 import {
     closePanel, openPanel, isPanelOpen, notify, askConfirm, askChoice, askText, blockDrawerClose,
-    isComposingKey, el, thumbnailUrl, markedText, pagerRow, applyShapeClass,
-    applyPersonaName, bumpThumbnails, runBoundImageWrite } from './quickbar.js';
+    isComposingKey, makeRowActivatable, el, thumbnailUrl, markedText, pagerRow, applyShapeClass,
+    applyPersonaName, bumpThumbnails, runBoundImageWrite,
+    scheduleAutoName, cancelAutoName } from './quickbar.js';
 // Matching, language detection and paging.
 import { rankOf, textContains, detectLanguage, chatLanguage, pageOf } from './search-pure.js';
 import {
@@ -406,6 +407,7 @@ function closeManager(reopenPanel = true) {
     lastMissing = null;
     // Two full description bodies, so it does not get to outlive the screen.
     diffMemo = null;
+    languageMemo.clear();
     clearDragState();
     assetState = { avatar: null, list: [], error: null, loading: false };
     // Unlike drafts, applied replacements do not survive a close: requestClose
@@ -579,8 +581,12 @@ async function renameSection(sectionId, current) {
 function shiftSection(sectionId, delta) {
     const s = guardTarget();
     if (!s) return;
+    // Read before the move, because the line is about the item and the id is only
+    // the handle on it. It used to log the id, which put a uuid in the one list on
+    // this screen a person actually reads.
+    const name = (s.persona.sections ?? []).find(entry => entry.id === sectionId)?.name ?? '';
     if (!moveSection(s.persona, sectionId, delta)) return;
-    commit('section-move', sectionId, s.avatar);
+    commit('section-move', name, s.avatar);
 }
 
 async function dropSection(sectionId, name) {
@@ -599,6 +605,10 @@ async function dropSection(sectionId, name) {
     const gone = removeSection(after.persona, sectionId, Date.now());
     if (!gone) { notify('error', STRINGS.manager.lastItemKept); scheduleDraw(); return; }
     if (openVariant?.sectionId === sectionId) { openVariant = null; editorDirty = false; }
+    // The history tab may be sitting on one of the bodies that went with it. Left
+    // behind, its choice select shows nothing chosen while the tab underneath
+    // reports "no history" about a variant that no longer exists.
+    if (gone.variantIds.includes(historyVariant)) { historyVariant = null; historyIndex = null; }
     // The drafts belonged to bodies that no longer exist, exactly as in dropVariant.
     // Left behind they are unreachable text that nothing on any screen can show or
     // clear, and they survive until teardown.
@@ -691,6 +701,24 @@ async function dropVariant(sectionId, variantId, label) {
     commit(null, result.label, startAvatar);
 }
 
+/* A snapshot, with the history tab's selection kept honest.
+
+   historyIndex is a POSITION into one variant's stored list, and snapshot()'s own
+   per-variant cap drops from the FRONT of that list, so a save on a variant whose
+   history is already at the cap shifts every index by one and the tick the user
+   left on a snapshot silently comes to mean a different one. The bounds check
+   downstream only catches an index that fell off the END.
+
+   What is compared is the identity of the first entry: it changed exactly when
+   the front was dropped, which is exactly when the indices moved. The two expiry
+   passes are still counted separately by their callers, because those can drop
+   entries this cap did not. */
+function snapshotKeepingIndex(persona, variantId, previous, now, settings) {
+    const first = persona.history?.[variantId]?.[0];
+    snapshot(persona, variantId, previous, now, settings);
+    if (historyVariant === variantId && persona.history?.[variantId]?.[0] !== first) historyIndex = null;
+}
+
 // The one path that writes a variant body. The text being replaced
 // goes into history first, so saving is never the operation that loses something.
 function saveVariantText(sectionId, variantId, text) {
@@ -708,7 +736,7 @@ function saveVariantText(sectionId, variantId, text) {
         return;
     }
     const now = Date.now();
-    snapshot(s.persona, variantId, previous, now, s.settings);
+    snapshotKeepingIndex(s.persona, variantId, previous, now, s.settings);
     variant.text = text;
     variant.updatedAt = now;
     // The per variant cap does not bound the total, and the
@@ -757,7 +785,13 @@ async function applyVersion(versionId) {
     const version = (after.persona.versions ?? []).find(entry => entry.id === versionId);
     after.persona.activeVersionId = version.id;
     after.persona.activePicks = { ...(version.picks ?? {}) };
-    commit('version-apply', version.name ?? '', startAvatar);
+    // Only when the prompt write was accepted. commit answers false when state.js
+    // refuses - a read only root, an unknowable active persona, a persona that
+    // moved out from under the screen - and in every one of those cases the
+    // version was NOT applied. Overwriting the avatar file anyway puts the
+    // picture of a combination on a persona whose prompt does not carry it, and
+    // it consumes the one backup that is taken before the first overwrite.
+    if (!commit('version-apply', version.name ?? '', startAvatar)) return;
     // The prompt is applied and saved above; the picture follows on its own. A
     // version that cannot move its picture is still an applied version, so this
     // is never awaited into the tap and never undoes what commit just wrote.
@@ -815,6 +849,13 @@ function duplicateVersion(versionId) {
         // combination silently edit the other's.
         picks: { ...(source.picks ?? {}) },
         assetSelection: Array.isArray(source.assetSelection) ? [...source.assetSelection] : null,
+        // The two fields a copy used to arrive without. A version carries its tags
+        // and the picture it puts on the persona, and a duplicate made to be
+        // edited that quietly drops both is not a duplicate: either the user
+        // re-tags and re-binds it, or they do not notice and apply a version
+        // whose picture is somebody else's.
+        tags: Array.isArray(source.tags) ? [...source.tags] : [],
+        avatarAsset: typeof source.avatarAsset === 'string' ? source.avatarAsset : null,
         updatedAt: Date.now(),
     };
     // Next to the original, not at the end: a copy made to be edited is easier to
@@ -1689,10 +1730,32 @@ function redrawManagerListNow(key) {
     else if (key === 'groups') fillGroupList(container, ctx, s);
 }
 
-// One version's language, judged from the text ITS picks compose, not from the
-// live combination.
-function versionLanguage(persona, version) {
-    return detectLanguage(composePicked(persona, version?.picks).text);
+/* One version's language, judged from the text ITS picks compose, not from the
+   live combination.
+
+   Memoised across draws, because the answer only moves when the version's picks
+   move or when one of the bodies they name is edited, and the 버전 tab asks it of
+   every version on every list repaint - which is once per frame while somebody is
+   typing in its search box. Twenty versions of a persona this size measured
+   0.58ms a repaint on this desktop, so several times that on the phone, for an
+   answer that had not changed.
+
+   The key carries both clocks. version.updatedAt moves when the picks do;
+   modifiedAt(persona) is the newest updatedAt across every variant, which is what
+   moves when a BODY is edited under an untouched version. A cache keyed on the
+   version alone would have gone stale on the second of those. */
+const languageMemo = new Map();
+
+function versionLanguage(persona, version, stamp) {
+    if (typeof stamp !== 'number') return detectLanguage(composePicked(persona, version?.picks).text);
+    const key = `${version?.id}|${version?.updatedAt}|${stamp}`;
+    if (languageMemo.has(key)) return languageMemo.get(key);
+    // The same ceiling search-pure puts on its own caches, for the same reason:
+    // an entry per version per edit is unbounded over a long session.
+    if (languageMemo.size > 500) languageMemo.clear();
+    const answer = detectLanguage(composePicked(persona, version?.picks).text);
+    languageMemo.set(key, answer);
+    return answer;
 }
 
 /* Tags */
@@ -1969,7 +2032,7 @@ function saveFullText() {
         // can do. Checked anyway: the alternative is a thrown exception that
         // takes half a save with it.
         if (!variant) continue;
-        snapshot(s.persona, write.variantId, write.before, now, s.settings);
+        snapshotKeepingIndex(s.persona, write.variantId, write.before, now, s.settings);
         variant.text = write.after;
         variant.updatedAt = now;
         addLog(s.persona, 'variant-edit', variant.label ?? '', now);
@@ -2549,6 +2612,10 @@ function toggleAutoName() {
     const root = getRoot();
     if (!root || root.readOnly) { notify('error', STRINGS.manager.refusalReadOnly); return; }
     root.settings.autoLocalName = !root.settings.autoLocalName;
+    // Acts on the chat that is already open, the same way the quick panel's copy
+    // of this switch does. Off has to cancel whatever was already queued.
+    if (root.settings.autoLocalName) scheduleAutoName();
+    else cancelAutoName();
     freshContext()?.saveSettingsDebounced?.();
     // The settings drawer keeps a checkbox for the same value, and it syncs on
     // this event rather than on a redraw of its own.
@@ -2695,7 +2762,22 @@ async function changeTargetImage(file) {
        the retry that used to make this popup repeat. */
     bumpThumbnails(startAvatar);
     scheduleDraw();
-    if (result.ok) { notify('info', STRINGS.manager.changeImageDone); return; }
+    if (result.ok) {
+        /* avatarWritten is a cache of "which asset label is on the avatar file
+           right now", and applyBoundImage skips its whole write when the label it
+           was asked for matches. The user has just put a different picture there
+           by hand, so that cache is wrong, and leaving it meant the version whose
+           picture was replaced could never put its own back: every later apply
+           answered {skipped:'same'} and nothing happened at all. Cleared here for
+           the same reason [원본 되돌리기] clears it. */
+        const live = getPersona(getRoot(), startAvatar);
+        if (live && live.avatarWritten !== null) {
+            live.avatarWritten = null;
+            freshContext()?.saveSettingsDebounced?.();
+        }
+        notify('info', STRINGS.manager.changeImageDone);
+        return;
+    }
     /* A build without that endpoint falls back to the path this used to take:
        SillyTavern's own file input, which finishes inside SillyTavern's crop
        dialog. Nothing is measured afterwards, because there is nothing of ours
@@ -2766,7 +2848,12 @@ function clearBoundAsset(versionId) {
    one image. */
 function versionImageBlock(version, writable, reason) {
     const box = el('div', 'pm-manager-assetsel');
-    const listingOk = assetState.avatar === targetAvatar && !assetState.error;
+    // A listing still in flight is not an answer. loadAssets sets its avatar
+    // synchronously before it awaits, so this row matched the persona while the
+    // list was still empty and the block reported a perfectly good binding as
+    // "the file is gone" - which is the one sentence that sends a user looking
+    // for a file nothing deleted.
+    const listingOk = assetState.avatar === targetAvatar && !assetState.error && !assetState.loading;
     const view = versionImageState(version, assetLabels(), listingOk);
     const head = view.state === 'none' ? STRINGS.manager.versionImageNone
         : view.state === 'ok' ? view.label
@@ -2886,12 +2973,18 @@ async function duplicateTargetPersona() {
     // there, through the same copy the picker's 복사 uses.
     const copy = copyPersonaOnto(after.root, startAvatar, destAvatar,
         freshContext()?.uuidv4, Date.now(), STRINGS.manager.copyLogDetail(label));
-    if (copy) saveAndComposeFor(destAvatar);
+    // The refusal was being thrown away and the success toast printed over it.
+    // SillyTavern has made the persona either way, so this is not a failure to
+    // roll back; what it is is a persona carrying the description SillyTavern
+    // copied rather than the one this extension just built for it, and the user
+    // has to be told which of the two they are looking at.
+    const composed = copy ? saveAndComposeFor(destAvatar) : null;
     freshContext()?.saveSettingsDebounced?.();
     const newName = freshContext()?.powerUserSettings?.personas?.[destAvatar] ?? destAvatar;
     // Onto the copy, which is what the user made and what they will edit next.
     landOnPersona(destAvatar);
-    notify('info', STRINGS.manager.duplicateDone(newName));
+    if (copy && !composed) notify('warning', refusalMessage(destAvatar));
+    else notify('info', STRINGS.manager.duplicateDone(newName));
     scheduleDraw();
 }
 
@@ -3517,9 +3610,11 @@ function fillVersionList(container, s, writable, reason) {
         // Language answers computed once per version per fill: the chips and
         // the filter below would otherwise compose every version twice per
         // keystroke. A call-local map, not module state.
+        // The persona's own clock, read once for the whole fill.
+        const stamp = modifiedAt(persona);
         const langCache = new Map();
         const langOf = version => {
-            if (!langCache.has(version.id)) langCache.set(version.id, versionLanguage(persona, version));
+            if (!langCache.has(version.id)) langCache.set(version.id, versionLanguage(persona, version, stamp));
             return langCache.get(version.id);
         };
         // Language and tag filter chips, from what the versions
@@ -3807,7 +3902,7 @@ function historyTab(s, writable, reason) {
                 row.append(el('span', 'pm-manager-historytime', formatTime(snap.at)));
                 row.append(el('span', 'pm-manager-name', snap.preview));
                 row.append(checkMark(historyIndex === snap.index));
-                row.addEventListener('click', () => {
+                makeRowActivatable(row, () => {
                     historyIndex = historyIndex === snap.index ? null : snap.index;
                     scheduleDraw();
                 });
@@ -3955,6 +4050,12 @@ function versionAssetBlock(version, writable) {
         box.append(noteOf(STRINGS.manager.assetOpenTabFirst));
         return box;
     }
+    // Same reason as versionImageBlock above: the list being empty because the
+    // request has not come back is not the list being empty.
+    if (assetState.loading) {
+        box.append(noteOf(STRINGS.manager.assetLoading));
+        return box;
+    }
     if (!labels.length) {
         box.append(noteOf(STRINGS.manager.assetNoneForPersona));
         return box;
@@ -4019,7 +4120,12 @@ function assetsTab(s, writable, reason) {
     const error = assetState.error ?? sharedError;
     if (error) {
         box.append(bannerOf('pm-manager-warn', STRINGS.manager.assetListFailed(error)));
-        box.append(actionsRow([actionButton(STRINGS.manager.assetRetry, () => loadAssets(targetAvatar), true)]));
+        // refreshAssetViews and not loadAssets: the error drawn above is whichever
+        // of the two listings failed, and this tab reads BOTH. Retrying only our
+        // own left state.js's error standing, so a retry that actually succeeded
+        // redrew the same failure screen and there was no way out of it but a
+        // persona switch.
+        box.append(actionsRow([actionButton(STRINGS.manager.assetRetry, () => refreshAssetViews(targetAvatar), true)]));
         return box;
     }
 
@@ -4037,7 +4143,7 @@ function assetsTab(s, writable, reason) {
     list.dataset.pmList = 'assets';
     fillAssetList(list, s, writable, reason);
     box.append(list);
-    box.append(actionsRow([actionButton(STRINGS.manager.assetRefresh, () => loadAssets(targetAvatar), true)]));
+    box.append(actionsRow([actionButton(STRINGS.manager.assetRefresh, () => refreshAssetViews(targetAvatar), true)]));
     box.append(noteOf(STRINGS.manager.assetVersionNote));
     return box;
 }
@@ -4370,7 +4476,7 @@ function fillPickerList(container, ctx) {
         row.append(checkMark(avatar === targetAvatar));
         // Which job the tap does is read at tap time, not baked in at draw time:
         // pickerMode is one string and the handler outlives the draw that made it.
-        row.addEventListener('click', () => {
+        makeRowActivatable(row, () => {
             if (pickerMode === 'copy') copyOnto(avatar);
             else selectTarget(avatar);
         });
@@ -4413,8 +4519,8 @@ function clearDragState() {
     dragOverSection = null;
     if (dragAutoScroll) { cancelAnimationFrame(dragAutoScroll); dragAutoScroll = 0; }
     const host = document.getElementById(PANEL_ID);
-    for (const node of host?.querySelectorAll('.pm-dragging, .pm-dragover') ?? []) {
-        node.classList.remove('pm-dragging', 'pm-dragover');
+    for (const node of host?.querySelectorAll('.pm-dragging, .pm-dragover, .pm-dragover-after') ?? []) {
+        node.classList.remove('pm-dragging', 'pm-dragover', 'pm-dragover-after');
     }
 }
 
@@ -4427,21 +4533,32 @@ function clearDragState() {
 // positions are not indices into persona.sections. Returning a position and
 // handing it to reorderSection put a dragged item at the wrong place whenever a
 // search was active. The id survives the filter; dropSectionAt converts it.
+//
+// `after` is the other half of the answer, and the half that was missing. Every
+// row named here meant "insert ABOVE this one", so the one position a thirteen
+// item list most often needs - the end - could not be expressed at all: dragging
+// past the bottom named the last row and landed one slot short of it. A finger
+// below the last row's midpoint is asking to go after it, and now says so.
 function dropTargetAt(clientY) {
     const host = document.getElementById(PANEL_ID);
     const rows = [...(host?.querySelectorAll('[data-pm-section]') ?? [])];
     if (!rows.length) return null;
     for (const row of rows) {
         const r = row.getBoundingClientRect();
-        if (clientY < r.top + r.height / 2) return row.dataset.pmSection ?? null;
+        if (clientY < r.top + r.height / 2) return { sectionId: row.dataset.pmSection ?? null, after: false };
     }
-    return rows[rows.length - 1].dataset.pmSection ?? null;
+    return { sectionId: rows[rows.length - 1].dataset.pmSection ?? null, after: true };
 }
 
-function paintDragOver(sectionId) {
+// The rule is drawn on the edge the drop will land against, so what the screen
+// promises and what the write does cannot disagree: above the row for an insert
+// before it, below it for the one target that inserts after.
+function paintDragOver(target) {
     const host = document.getElementById(PANEL_ID);
     for (const row of host?.querySelectorAll('[data-pm-section]') ?? []) {
-        row.classList.toggle('pm-dragover', dragSectionId !== null && row.dataset.pmSection === sectionId);
+        const hit = dragSectionId !== null && !!target && row.dataset.pmSection === target.sectionId;
+        row.classList.toggle('pm-dragover', hit && !target.after);
+        row.classList.toggle('pm-dragover-after', hit && !!target.after);
     }
 }
 
@@ -4535,7 +4652,7 @@ function dragHandle(sectionId, writable, reason) {
 
 // The write, guarded the same way every other write on this screen is: the header
 // can move the target between the gesture starting and it ending.
-function dropSectionAt(sectionId, ontoSectionId) {
+function dropSectionAt(sectionId, target) {
     const after = guardTarget();
     if (!after) return;
     const persona = ensureShape(after.persona);
@@ -4543,18 +4660,20 @@ function dropSectionAt(sectionId, ontoSectionId) {
     // exists NOW rather than against whatever the list looked like when the drag
     // started. A section deleted mid-drag simply has no index and nothing moves.
     const sections = persona.sections ?? [];
-    const onto = sections.findIndex(sec => sec.id === ontoSectionId);
+    const onto = sections.findIndex(sec => sec.id === target?.sectionId);
     const from = sections.findIndex(sec => sec.id === sectionId);
-    if (onto === -1 || from === -1) { scheduleDraw(); return; }
-    // dropTargetAt names the row whose TOP HALF the finger is in, and .pm-dragover
-    // draws the rule across that row's top edge, so the promise on screen is
-    // "insert ABOVE this row". reorderSection splices the item OUT first, which
-    // shifts every index after it down by one, so a downward drag landed one slot
-    // past the line the user was looking at: A dropped above C gave B,C,A,D where
-    // the rule promised B,A,C,D. Upward drags were already right, which is why it
-    // looked like it worked. Neither unit test caught it: both sides were
-    // self-consistent and the seam between them was the wrong part.
-    const toIndex = onto > from ? onto - 1 : onto;
+    // Dropping an item on itself is a tap that travelled a few pixels, not a move.
+    if (onto === -1 || from === -1 || onto === from) { scheduleDraw(); return; }
+    // reorderSection splices the item OUT first, which shifts every index after it
+    // down by one, so a downward drag landed one slot past the line the user was
+    // looking at: A dropped above C gave B,C,A,D where the rule promised B,A,C,D.
+    // Upward drags were already right, which is why it looked like it worked.
+    // Neither unit test caught it: both sides were self-consistent and the seam
+    // between them was the wrong part.
+    const adjusted = onto > from ? onto - 1 : onto;
+    // And the one target that means "after this row" rather than "before it",
+    // which is the only way the end of the list is reachable by a finger.
+    const toIndex = target?.after ? adjusted + 1 : adjusted;
     if (!reorderSection(persona, sectionId, toIndex)) { scheduleDraw(); return; }
     const name = (persona.sections ?? []).find(sec => sec.id === sectionId)?.name ?? '';
     commit('section-move', name);
@@ -4692,6 +4811,11 @@ function drawManager() {
     if (pickerOpen) {
         body.append(personaPicker(ctx));
         if (scrollTop) scroll.scrollTop = scrollTop;
+        // The picker draws its own search row and returns before the tail of this
+        // function, so the focus request made by 검색 was never consumed: the field
+        // appeared, the caret stayed wherever it was, and on a phone the keyboard
+        // never came up. Every other list on this screen lands on its field.
+        if (focusSearch) takeSearchFocus();
         return;
     }
 
@@ -4815,8 +4939,10 @@ function onOpenRequest(e) {
 export function invalidateManagerCaches() {
     assetState = { avatar: null, list: [], error: null, loading: false };
     // An import replaces every body under us, so a diff keyed on the old ones is
-    // an answer about data that no longer exists.
+    // an answer about data that no longer exists. The language answers are keyed
+    // on ids the imported tree can reuse, so they go the same way.
     diffMemo = null;
+    languageMemo.clear();
     clearDrafts();
     if (typeof document !== 'undefined' && document.getElementById(HOST_ID)) scheduleDraw();
 }

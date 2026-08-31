@@ -13,9 +13,11 @@
 import { MODULE_NAME, makeId, pruneEmpty, HEADING_FORMATS, TILE_SHAPES } from './store.js';
 import { getRoot, getState, readUsageBytes, refresh } from './state.js';
 import { freshContext, getPrecisePath, avatarBlockReport } from './ctx.js';
-import { addLog } from './history.js';
+import { addLog, expireOldHistory, enforceGlobalBudget } from './history.js';
 import { resolveFolderKey, buildImgHtml } from './assets.js';
-import { el, notify, askConfirm, blockDrawerClose, isComposingKey } from './quickbar.js';
+import {
+    el, notify, askConfirm, blockDrawerClose, isComposingKey, scheduleAutoName, cancelAutoName,
+} from './quickbar.js';
 import { invalidateManagerCaches } from './manager.js';
 import { clampSetting, SETTING_RANGES, serializeRoot, parseImportedRoot } from './manager-pure.js';
 // Every sentence the user reads in this drawer comes from there.
@@ -54,6 +56,29 @@ function panel() {
     return typeof document === 'undefined' ? null : document.getElementById(PANEL_ID);
 }
 
+/* The per-variant cap, applied to history that already exists.
+
+   history.js enforces this one at the moment a snapshot is taken, which is the
+   only moment it can grow, so there is no sweep of its own over there. Lowering
+   the number is the other moment it can be exceeded, and it happens here. Drops
+   from the FRONT, exactly as snapshot() does, so the oldest go first. */
+function trimPerVariant(root, settings) {
+    const cap = Number(settings?.historyPerVariant ?? 0);
+    if (!Number.isFinite(cap) || cap < 0) return 0;
+    let dropped = 0;
+    for (const persona of Object.values(root?.personas ?? {})) {
+        const history = persona?.history;
+        if (!history || typeof history !== 'object') continue;
+        for (const [variantId, list] of Object.entries(history)) {
+            if (!Array.isArray(list) || list.length <= cap) continue;
+            dropped += list.length - cap;
+            if (cap === 0) delete history[variantId];
+            else list.splice(0, list.length - cap);
+        }
+    }
+    return dropped;
+}
+
 /* Field builders */
 
 function rowOf(labelText, control, hint) {
@@ -74,6 +99,14 @@ function toggleField(key, labelText, hint) {
         const root = getRoot();
         if (!root || root.readOnly) { syncFields(); return; }
         root.settings[key] = input.checked;
+        // 언어별 이름 자동 적용 reads the chat, and the chat is already on screen
+        // when this is switched on. Waiting for the next message meant the switch
+        // looked like it had done nothing for as long as the user sat reading.
+        // The quick panel's own copy of this toggle has always done both.
+        if (key === 'autoLocalName') {
+            if (input.checked) scheduleAutoName();
+            else cancelAutoName();
+        }
         save();
         syncFields();
     });
@@ -99,6 +132,18 @@ function numberField(key, labelText, hint) {
         if (!root || root.readOnly) { syncFields(); return; }
         const value = clampSetting(key, input.value);
         root.settings[key] = value;
+        /* A lowered cap that only applies to snapshots taken from now on is a
+           control that does nothing for the person who went looking for it: the
+           reason to lower it is the history that is already there. Both passes are
+           the same ones every save runs, so this adds no new rule, only the moment
+           the user asked for it. Run for the two caps that bound stored history and
+           for nothing else. */
+        if (key === 'historyMaxBytes' || key === 'historyMaxDays' || key === 'historyPerVariant') {
+            const now = Date.now();
+            expireOldHistory(root, root.settings, now);
+            trimPerVariant(root, root.settings);
+            enforceGlobalBudget(root, root.settings, now);
+        }
         // Written back into the field so the user sees what was actually stored
         // rather than the out of range number they typed.
         input.value = String(value);
@@ -266,6 +311,11 @@ function doPrune() {
     // no assets is a shell nobody asked for, and shells are what filled this user's
     // settings.json once already.
     const removed = pruneEmpty(root);
+    // The shared cache still holds the persona objects that were just deleted, and
+    // the quick panel draws from it: without this the rows stay, their versions
+    // stay tappable, and applying one composes an orphan into the live description
+    // and reports success. Before save(), which dispatches pm:changed and redraws.
+    refresh();
     save();
     refreshSettings();
     notify('info', removed.length ? STRINGS.settings.pruneDone(removed.length) : STRINGS.settings.pruneNothing);

@@ -25,19 +25,28 @@ export function normalize(s) {
     return nfc(String(s ?? '')).toLowerCase().replace(/\s+/g, '');
 }
 
-// Normalise while building a normalised-position -> original-position table for
-// highlighting. Lowercasing can grow a character (Turkish İ); every grown piece
-// maps to the same source index so the two sides can never drift apart.
-function normalizeWithMap(s) {
-    let out = '';
+/* The normalised-position -> original-position table for highlighting, built
+   against a normalised string that already exists rather than alongside a second
+   one of its own.
+
+   Lowercasing can GROW a character (Turkish İ becomes two code units); every
+   grown piece maps to the same source index so the two sides cannot drift apart.
+   What is read from each source character is its lowercase LENGTH, never its
+   lowercase value, which is what lets this walk a string produced by lowercasing
+   the whole text at once: the one character JavaScript lowercases differently in
+   context is the Greek final sigma, and that one is length preserving. The
+   bounds check is there for a case nobody has produced, and stops short rather
+   than indexing past the end. */
+function buildMap(src, normalized) {
     const map = [];
-    for (let i = 0; i < s.length; i++) {
-        const ch = s[i];
+    let j = 0;
+    for (let i = 0; i < src.length && j < normalized.length; i++) {
+        const ch = src[i];
         if (/\s/.test(ch)) continue;
-        const lc = ch.toLowerCase();
-        for (let k = 0; k < lc.length; k++) { out += lc[k]; map.push(i); }
+        const grown = ch.toLowerCase().length;
+        for (let k = 0; k < grown && j < normalized.length; k++) { map.push(i); j++; }
     }
-    return { n: out, map };
+    return map;
 }
 
 // Precomposed hangul becomes its initial consonant, everything else passes
@@ -87,16 +96,47 @@ function approxDistance(text, q) {
 // cache clears itself past 5000 entries; the query cache is the last query
 // only, which is what a keystroke-by-keystroke filter re-asks.
 const textCache = new Map();
+/* Three forms of one text, and only the first of them is always needed.
+
+   The filter chips and the 편집 tab's search run textContains over every choice
+   body a persona has, which on this device is 26 bodies of about 2,800 Korean
+   characters. textContains reads the normalised form; it never reads the
+   position table, and it reads the chosung form only when the query carries a
+   jamo. Building all three up front made the first keystroke pay for two
+   answers nobody had asked for.
+
+   Measured on this desktop over those 26 bodies: the character loop below took
+   6.3ms to normalise them and the engine's own string operations take 0.74ms
+   for a result that agrees byte for byte, and toChosung was another 1.3ms. The
+   whole prepText went from 14.7ms to about 3ms, which on the phone is the
+   difference between a visible hitch and none. */
 function prepText(text) {
     let c = textCache.get(text);
     if (!c) {
         if (textCache.size > 5000) textCache.clear();
         const src = nfc(String(text ?? ''));
-        const nm = normalizeWithMap(src);
-        c = { src, t: nm.n, map: nm.map, tc: toChosung(nm.n) };
+        // The same two operations, in the same order, that normalize() applies to
+        // the QUERY. They used to be a character loop here and the engine's own
+        // there, which is a difference nothing needed and nothing checked.
+        c = { src, t: src.toLowerCase().replace(/\s+/g, ''), map: null, tc: null };
         textCache.set(text, c);
     }
     return c;
+}
+
+// The chosung form, on the first question that needs one.
+function chosungOf(p) {
+    if (p.tc === null) p.tc = toChosung(p.t);
+    return p.tc;
+}
+
+// The position table, on the first highlight that needs one, which is names and
+// never bodies. It is derived from the normalised string that is already here,
+// so the two can never describe different strings.
+
+function mapOf(p) {
+    if (p.map === null) p.map = buildMap(p.src, p.t);
+    return p.map;
 }
 
 let lastQuery = null;
@@ -127,7 +167,7 @@ export function scoreOf(text, term) {
     if (t.startsWith(qn)) return S_HEAD;
     if (t.includes(qn)) return S_IN;
     if (JAMO_RE.test(qn)) {
-        const tc = p.tc;
+        const tc = chosungOf(p);
         const qc = q.qc;
         if (tc.startsWith(qc)) return S_CHO_HEAD;
         if (tc.includes(qc)) return S_CHO_IN;
@@ -154,9 +194,9 @@ export function rankOf(text, term) {
     const qn = q.qn;
     const cover = Math.min(1, qn.length / Math.max(1, t.length));
     let at = t.indexOf(qn);
-    if (at < 0 && JAMO_RE.test(qn)) at = p.tc.indexOf(q.qc);
+    if (at < 0 && JAMO_RE.test(qn)) at = chosungOf(p).indexOf(q.qc);
     if (at < 0 && (base === S_CHO_GAP || base === S_GAP)) {
-        at = base === S_CHO_GAP ? p.tc.indexOf(q.qc[0]) : t.indexOf(qn[0]);
+        at = base === S_CHO_GAP ? chosungOf(p).indexOf(q.qc[0]) : t.indexOf(qn[0]);
     }
     const near = at < 0 ? 0 : 1 - Math.min(1, at / Math.max(1, t.length));
     return base * 1000 + Math.round(cover * 600) + Math.round(near * 300);
@@ -164,8 +204,9 @@ export function rankOf(text, term) {
 
 function spanOf(p, at, len) {
     if (at < 0 || !len) return [];
-    const from = p.map[at];
-    const to = p.map[at + len - 1];
+    const map = mapOf(p);
+    const from = map[at];
+    const to = map[at + len - 1];
     return (from == null || to == null) ? [] : [[from, to]];
 }
 
@@ -182,8 +223,9 @@ function subsequenceHits(text, q) {
 // that are whitespace only, so 북부왕국 marks 북부 왕국 as one chunk.
 function rangesOf(p, hits) {
     const out = [];
+    const map = mapOf(p);
     for (const h of hits) {
-        const at = p.map[h];
+        const at = map[h];
         if (at == null) continue;
         const last = out.length ? out[out.length - 1] : null;
         const gap = last ? p.src.slice(last[1] + 1, at) : null;
@@ -205,9 +247,9 @@ export function matchRanges(text, term) {
     if (at >= 0) return spanOf(p, at, q.qn.length);
     const useCho = JAMO_RE.test(q.qn);
     if (useCho) {
-        at = p.tc.indexOf(q.qc);
+        at = chosungOf(p).indexOf(q.qc);
         if (at >= 0) return spanOf(p, at, q.qc.length);
-        const hits = subsequenceHits(p.tc, q.qc);
+        const hits = subsequenceHits(chosungOf(p), q.qc);
         if (hits) return rangesOf(p, hits);
     }
     const hits = subsequenceHits(p.t, q.qn);
@@ -231,7 +273,7 @@ export function textContains(text, term) {
     const q = prepQuery(term);
     if (!q.qn) return false;
     if (p.t.includes(q.qn)) return true;
-    return JAMO_RE.test(q.qn) && p.tc.includes(q.qc);
+    return JAMO_RE.test(q.qn) && chosungOf(p).includes(q.qc);
 }
 
 /* Language detection */

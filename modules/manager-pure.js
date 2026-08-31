@@ -826,6 +826,11 @@ export function duplicatePersona(source, makeIdFn) {
         const next = { ...version, id: makeId(makeIdFn), picks, tags: [...(version.tags ?? [])] };
         // Asset selections name files in a folder the copy does not own yet.
         next.assetSelection = null;
+        // And so does the bound picture, which the spread above carried across.
+        // The label named a file in the SOURCE persona's sprite folder; the copy
+        // has its own, empty one, so every apply on the copy reported "the file is
+        // gone" about a file that was never supposed to be there.
+        next.avatarAsset = null;
         copy.versions.push(next);
         if (source.activeVersionId === version.id) copy.activeVersionId = next.id;
     }

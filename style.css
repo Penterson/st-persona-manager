@@ -2817,3 +2817,209 @@
     flex: 1 1 auto;
     min-width: 0;
 }
+
+
+/* ── Corrections ─────────────────────────────────────────────────────────────
+   Everything below overrides a rule that stands earlier in this file. It is
+   collected here rather than edited in place because in every case the earlier
+   rule is still the one that states the intention, and what went wrong was the
+   cascade around it: a plain class losing to a class-plus-pseudo, a token read
+   outside the root that defines it, a hit area reaching over its neighbour. The
+   note on each says which. */
+
+/* A filled control has to stay filled under the finger.
+
+   The press and hover washes near the top of this file are class-plus-pseudo
+   selectors and outrank the single class that fills the active tab, the active
+   chip and the primary button. So the fill was replaced by a translucent wash
+   while the LABEL stayed --pm-on-mass, which is the panel's own ground colour:
+   for the length of every tap, the label was the same colour as what had just
+   been put behind it. Darkened from the fill instead, so the press still reads
+   as a press and the label never leaves. */
+.pm-manager-tab-active:active,
+.pm-quickbar-chip-active:active,
+.pm-manager-primary:active {
+    background: color-mix(in srgb, var(--pm-mass) 84%, var(--pm-on-mass));
+    color: var(--pm-on-mass);
+    border-color: var(--pm-mass);
+}
+
+/* The same control standing ON an ink block is already inverted, so its press
+   state inverts with it. */
+.pm-mass .pm-manager-primary:active,
+.pm-mass .pm-quickbar-chip-active:active {
+    background: color-mix(in srgb, var(--pm-on-mass) 84%, var(--pm-mass));
+    color: var(--pm-mass);
+    border-color: var(--pm-on-mass);
+}
+
+/* Press feedback for the controls that had none. A tile, a tab, a chip and the
+   persona picker all suppress the Android tap highlight and none of them drew
+   anything in its place, so a tap on a tile did nothing visible until the redraw
+   landed - which on a phone is long enough to tap again. The wash is the same one
+   every button in this file uses. Before the filled-state rules above in source
+   order, so a filled control keeps the darker treatment they give it. */
+.pm-quickbar-tile:active,
+.pm-manager-tab:active,
+.pm-quickbar-chip:active,
+.pm-manager-target:active,
+.pm-manager-rowname:active {
+    background: color-mix(in srgb, currentColor 18%, transparent);
+}
+
+.pm-manager-tab-active:active,
+.pm-quickbar-chip-active:active {
+    background: color-mix(in srgb, var(--pm-mass) 84%, var(--pm-on-mass));
+    color: var(--pm-on-mass);
+}
+
+.pm-mass .pm-quickbar-chip-active:active {
+    background: color-mix(in srgb, var(--pm-on-mass) 84%, var(--pm-mass));
+    color: var(--pm-mass);
+}
+
+@media (hover: hover) {
+    .pm-manager-tab-active:hover,
+    .pm-quickbar-chip-active:hover,
+    .pm-manager-primary:hover {
+        background: color-mix(in srgb, var(--pm-mass) 84%, var(--pm-on-mass));
+        color: var(--pm-on-mass);
+        border-color: var(--pm-mass);
+    }
+
+    .pm-mass .pm-manager-primary:hover,
+    .pm-mass .pm-quickbar-chip-active:hover {
+        background: color-mix(in srgb, var(--pm-on-mass) 84%, var(--pm-mass));
+        color: var(--pm-mass);
+        border-color: var(--pm-on-mass);
+    }
+}
+
+/* The icon in SillyTavern's send row is this extension's front door on the phone,
+   and it was the one control in the file under the floor the rest of it keeps: a
+   22px picture in 8px of padding is 30x22. It cannot simply be made 40px tall,
+   because the send row allots it about 28 and everything beside it would move. So
+   it borrows height the way every other control here does, from a pseudo element
+   that reaches outside the box without changing the layout: 22+18 and 30+10 both
+   land on 40. */
+.pm-quickbar {
+    position: relative;
+}
+
+.pm-quickbar::before {
+    content: '';
+    position: absolute;
+    inset: -9px -5px;
+}
+
+/* --pm-accent is defined on the panel roots, and this button is not inside one:
+   it lives in SillyTavern's send form. So the outline colour was an undefined
+   variable, the whole declaration was invalid, and the one control a keyboard
+   user reaches first had no focus ring at all. Read from the theme directly,
+   which is where --pm-accent gets it from anyway. */
+.pm-quickbar:focus-visible {
+    outline: 2px solid var(--SmartThemeQuoteColor);
+    outline-offset: -2px;
+}
+
+/* Rendered images are injected into #chat, which is outside every root that
+   defines --pm-rule, so the bordered style resolved to an invalid value and drew
+   no border whatsoever: the setting existed and did nothing. Same weight the
+   token carries, written out because there is no root to inherit it from here. */
+.pm-asset-bordered {
+    border: 1px solid color-mix(in srgb, currentColor 42%, transparent);
+}
+
+/* A fold head grows its hit area 7px downward, and what sits 7px below it is the
+   first row of the group it opens. The head's pseudo element is positioned and
+   the rows are not, so the head painted over them and took the tap: pressing the
+   top edge of the first version collapsed the whole list instead. Whatever stands
+   directly under a fold head now paints above that reach, which is the same
+   remedy the button rows further up got when they overlapped each other. */
+.pm-quickbar-foldhead + * {
+    position: relative;
+}
+
+/* In a row of chips that WRAPS, the 6px each chip reaches upward is the whole of
+   the 6px row gap, so the entire gap belongs to the chip on the lower line and a
+   tap under a chip lands on the one below it. On a tag row that means offering to
+   delete a tag the finger never touched. Half the gap, exactly as the horizontal
+   reach already takes half of its own. 34px plus 3px each side still clears the
+   floor. The scrolling chip rows are single line and keep their full reach. */
+.pm-filter-chips .pm-quickbar-chip::before,
+.pm-tag-chips .pm-quickbar-chip::before {
+    inset: -3px;
+}
+
+/* The persona picker sits on the header's ink block, where currentColor is the
+   GROUND colour, so its border of 42% currentColor and its background of 8% of it
+   were ground-on-ground: the button lost its box entirely and the header read as
+   a name floating in the band. The inversion list a few hundred lines up covers
+   the buttons and the selects and never covered this one. */
+.pm-mass .pm-manager-target {
+    border-color: var(--pm-on-mass);
+    color: var(--pm-on-mass);
+    background: color-mix(in srgb, var(--pm-on-mass) 12%, transparent);
+}
+
+/* The two line clamp on a tile name has never once applied, for two reasons and
+   not one. It is written on the single class and undone by the compound one that
+   positions it, which outranks it whatever the order; and -webkit-line-clamp
+   needs display: -webkit-box, which a flex item cannot keep - the tile is a flex
+   container, so the browser blockifies the label back (measured in Chromium:
+   computed display flow-root) however the property is written. So a long name
+   wrapped to as many lines as it liked and stretched every tile in its grid row.
+
+   The clamp is restored for the layouts that can honour it, and the height it
+   promises is stated outright for the one that cannot. line-height is 1.2 here,
+   so two lines is 2.4em of content box, and the padding above stays outside it. */
+.pm-quickbar-tile-named .pm-quickbar-tilelabel {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    max-height: 2.4em;
+    overflow: hidden;
+}
+
+/* .pm-scroll contains its overscroll so the chat does not scroll away behind the
+   panel. These four scroll inside it and did not, so reaching the end of a diff,
+   a body or a revision box handed the gesture straight through to the panel and
+   then to the page. */
+.pm-manager-textscroll,
+.pm-manager-editor-text,
+.pm-full-text,
+.pm-revise-input {
+    overscroll-behavior: contain;
+}
+
+/* The drop target that means "after this row". The rule above a row says the item
+   lands before it; the end of the list is the one position that cannot be said
+   that way, so it is said on the other edge. */
+.pm-dragover-after {
+    box-shadow: inset 0 -3px 0 0 var(--pm-accent);
+}
+
+/* The type on an ink block, made opaque.
+
+   --pm-on-mass is SillyTavern'''s blur tint, and a blur tint is usually an rgba
+   with real alpha in it: it is authored to sit OVER something. Used as a text
+   colour it does exactly that, and what it sits over is --pm-mass, the very ink
+   the letters are knocked out of, so on a theme with a low alpha the header and
+   the tab band fade toward unreadable. Every other use of it is a background or
+   a border, where translucency is fine and sometimes the point.
+
+   The colour the theme chose is kept; only the alpha goes. Behind @supports
+   because relative colour syntax is what drops it, so a build without that
+   feature keeps exactly what it has today rather than losing the token. */
+@supports (color: rgb(from white r g b)) {
+    .pm-panel,
+    .pm-quickbar-panel,
+    .pm-manager-panel,
+    .pm-settings {
+        /* The alpha is written out, because relative colour syntax keeps the
+           origin colour'''s alpha when the slot is left off - measured in Chromium,
+           where omitting it left rgba(27,27,31,0.7) exactly as translucent as it
+           started. */
+        --pm-on-mass: rgb(from var(--SmartThemeBlurTintColor) r g b / 1);
+    }
+}

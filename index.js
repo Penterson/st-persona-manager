@@ -4,7 +4,7 @@ import { initPrecise, refresh, refreshAssets, getState, resetState } from './mod
 import { freshContext } from './modules/ctx.js';
 import {
     resolveFolderKey, renderInElement, registerAssetMacros, unregisterAssetMacros,
-    listAssets, assetLookup, labelOf, resetAssetProbes,
+    listAssets, assetLookup, lookupLabel, resetAssetProbes,
 } from './modules/assets.js';
 // cancelAutoName is not imported here: unmountQuickbar already calls it, and an
 // import nothing calls reads like a teardown step somebody forgot to wire.
@@ -45,7 +45,7 @@ function resolvePathFactory(el) {
         // for the user to see and fix.
         if (!folderKey || folderKey === own) {
             if (!own) return null;
-            return s.assetPaths?.get(labelOf(filename)) ?? null;
+            return lookupLabel(s.assetPaths, filename);
         }
         const hit = assetLookup(folders, folderKey, filename);
         if (hit.fetch) {
@@ -227,7 +227,20 @@ async function init() {
     on('PERSONA_RENAMED', onPersona);
     on('PERSONA_CREATED', onPersona);
     on('PERSONA_DELETED', onPersona);
-    on('CHAT_CHANGED', async () => { await onPersona(); renderAll(); onChatText(); });
+    on('CHAT_CHANGED', async () => {
+        // A folder whose listing failed is remembered as an empty listing, on
+        // purpose: retrying it inside a render sweep would put one request per tag
+        // per frame on the wire. But nothing ever cleared it either, so a single
+        // failure - a server restarting, a phone that lost its connection for a
+        // second - left every tag naming that folder as raw text for the rest of
+        // the session. Opening a chat is a moment the user chose, it happens once,
+        // and it is not inside a render loop, so it is where the answers are asked
+        // for again.
+        folders.clear();
+        await onPersona();
+        renderAll();
+        onChatText();
+    });
     on('USER_MESSAGE_RENDERED', i => renderOne(i));
     on('CHARACTER_MESSAGE_RENDERED', i => { renderOne(i); onChatText(); });
     on('MESSAGE_UPDATED', i => renderOne(i));

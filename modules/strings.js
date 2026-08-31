@@ -205,6 +205,7 @@ export const STRINGS = deepFreeze({
         bulkTagRemovePrompt: '삭제할 태그',
         bulkTagAdded: n => `페르소나 ${n}개에 태그 추가`,
         bulkTagRemoved: n => `페르소나 ${n}개에서 태그 삭제`,
+        bulkGrouped: (name, n) => `${name}에 ${n}개 넣었다`,
         bulkTagNoChange: '바뀐 페르소나 없음',
         confirmBulkDelete: n => `페르소나 ${n}개의 관리 데이터 삭제 (복구 불가, SillyTavern 페르소나는 유지)`,
         bulkDeleted: n => `페르소나 ${n}개 관리 데이터 삭제 완료`,
@@ -307,6 +308,10 @@ export const STRINGS = deepFreeze({
         // the writing rule three rounds running (이력 …정리됨 / …되돌림 / 가져옴).
         logDetails: {
             evicted: n => `총량 상한으로 이력 ${n}건 정리`,
+            // The kind beside it already reads 이력 기간 만료, so the detail says the
+            // number and not the cause a second time. It used to borrow the line
+            // above, which named the wrong reason.
+            expired: n => `${n}건 정리`,
             restored: n => `${n}번째 이력으로 복원`,
             imported: '기존 설명문에서 가져오기',
         },

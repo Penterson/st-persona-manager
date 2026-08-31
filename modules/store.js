@@ -108,7 +108,12 @@ export function migrate(root) {
     for (const persona of Object.values(root.personas)) {
         if (!persona || typeof persona !== 'object') continue;
         if (!Array.isArray(persona.tags)) persona.tags = [];
-        for (const version of persona.versions ?? []) {
+        // Array.isArray and not `?? []`: a versions key holding an object or a
+        // number is not iterable, for..of throws, and migrate is called from
+        // getRoot - so one malformed record took down every screen at once, and
+        // 설정 가져오기 on a truncated file ended with nothing on screen at all.
+        if (!Array.isArray(persona.versions)) persona.versions = [];
+        for (const version of persona.versions) {
             if (version && typeof version === 'object' && !Array.isArray(version.tags)) version.tags = [];
         }
     }
@@ -123,7 +128,9 @@ export function migrate(root) {
         if (persona.avatarWritten !== null && typeof persona.avatarWritten !== 'string') persona.avatarWritten = null;
         const backup = persona.avatarBackup;
         if (backup !== null && (typeof backup !== 'object' || typeof backup?.label !== 'string')) persona.avatarBackup = null;
-        for (const version of persona.versions ?? []) {
+        // Guaranteed an array by the backfill above, which runs before the
+        // read-only return and therefore before this.
+        for (const version of persona.versions) {
             if (!version || typeof version !== 'object') continue;
             if (version.avatarAsset !== null && typeof version.avatarAsset !== 'string') version.avatarAsset = null;
         }
@@ -216,6 +223,16 @@ export function isEmptyPersona(p) {
     if (Object.keys(p.assets ?? {}).length) return false;
     if ((p.versions ?? []).length) return false;
     if ((p.log ?? []).length) return false;
+    /* Two records the user made deliberately and that live nowhere else.
+
+       The birth log line normally keeps every entry we created out of this
+       function's reach, which is why these were never missed - until [변경 기록
+       일괄 삭제] on the history tab, which empties that log on request. A
+       persona whose log has been cleared and whose only content is its 언어별
+       이름 or its tags then read as an empty shell, and [빈 페르소나 정리]
+       deleted both without a word. */
+    if ((p.tags ?? []).length) return false;
+    if (Object.values(p.names ?? {}).some(name => String(name ?? '').trim())) return false;
     // Count actual history entries, not variant keys: a key holding an empty
     // array must not count as history content.
     for (const list of Object.values(p.history ?? {})) {
