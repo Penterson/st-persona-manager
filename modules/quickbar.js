@@ -151,11 +151,21 @@ export function isComposingKey(e) {
 
    A token in the query string, changed once per replacement, makes exactly one
    reload happen and leaves every other draw as cheap as it was. Not a timestamp
-   per call: that is the cache buster this function measures for and refuses. */
-let thumbToken = 0;
+   per call: that is the cache buster this function measures for and refuses.
 
-export function bumpThumbnails() {
-    thumbToken++;
+   Per avatar, because the replacement is per avatar: one global token changed
+   every URL and made one 이미지 변경 refetch all thirty thumbnails on the next
+   draw. Only the address whose picture actually changed needs to change. */
+const thumbBumps = new Map();
+
+// The browser locale and numeric: true, and nothing else. Built once: the locale
+// cannot change inside a session, and fillRosterList runs once per frame while
+// the user types in the search box.
+const LIST_COLLATOR = new Intl.Collator(undefined, { numeric: true });
+
+export function bumpThumbnails(avatarId) {
+    if (!avatarId) return;
+    thumbBumps.set(avatarId, (thumbBumps.get(avatarId) ?? 0) + 1);
 }
 
 export function thumbnailUrl(ctx, avatarId) {
@@ -172,8 +182,9 @@ export function thumbnailUrl(ctx, avatarId) {
             ? ctx.getThumbnailUrl('persona', avatarId)
             : ctx.getThumbnailUrl('persona', avatarId, true);
     } catch { return null; }
-    if (!url || !thumbToken) return url ?? null;
-    return `${url}${url.includes('?') ? '&' : '?'}pmv=${thumbToken}`;
+    const bump = thumbBumps.get(avatarId);
+    if (!url || !bump) return url ?? null;
+    return `${url}${url.includes('?') ? '&' : '?'}pmv=${bump}`;
 }
 
 // Every redraw this module asks for goes through here, never straight to drawPanel.
@@ -2000,9 +2011,8 @@ function fillRosterList(container, prebuilt) {
     container.replaceChildren();
     if (!s) return;
     const writable = !s.ambiguous && !s.readOnly;
-    const collator = new Intl.Collator(undefined, { numeric: true });
     const view = prebuilt
-        ?? buildRosterView({ personas: personaNames(ctx), name1: ctx?.name1 }, s.root, collator);
+        ?? buildRosterView({ personas: personaNames(ctx), name1: ctx?.name1 }, s.root, LIST_COLLATOR);
 
     // An open label editor belongs to a row. Once a chip filters that row out of the
     // list, the editor has nothing to sit under, and keeping the avatar means it
@@ -2156,8 +2166,7 @@ function rosterGroup(ctx, s, writable) {
     // in case or accent compare equal, which is not what a list of proper names
     // wants; roster.js still has an avatar id tie break for the pairs that really
     // are equal.
-    const collator = new Intl.Collator(undefined, { numeric: true });
-    const view = buildRosterView({ personas: personaNames(ctx), name1: ctx?.name1 }, s.root, collator);
+    const view = buildRosterView({ personas: personaNames(ctx), name1: ctx?.name1 }, s.root, LIST_COLLATOR);
 
     // The other half: the fallback buildRosterView computed is only
     // persisted when writing is allowed right now. The corrected view still renders
@@ -2398,7 +2407,7 @@ export function unmountQuickbar() {
     popupNeedsDrop = false;
     thumbMeasured = false;
     thumbBusts = false;
-    thumbToken = 0;
+    thumbBumps.clear();
     // A frame already queued would call drawPanel after teardown. It finds no panel
     // and returns, but the id must not be left looking like a live schedule.
     if (drawFrame && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(drawFrame);

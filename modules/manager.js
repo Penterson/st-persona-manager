@@ -2675,7 +2675,7 @@ async function changeTargetImage(file) {
     // send box kept the old picture until the persona was switched away and back,
     // because that node is never rebuilt and its src never changed (device
     // report). SillyTavern's own screens are its business.
-    bumpThumbnails();
+    bumpThumbnails(startAvatar);
     scheduleDraw();
 }
 
@@ -2686,6 +2686,11 @@ async function changeTargetImage(file) {
    diffing the persona map. Exactly one new key is the copy; anything else is
    reported rather than guessed at. */
 const DUPLICATE_COMMANDS = Object.freeze(['persona-duplicate']);
+
+// The browser locale and numeric: true, and nothing else. Built once per load:
+// the picker sorts thirty rows on every draw, and the locale cannot change
+// inside a session.
+const PICKER_COLLATOR = new Intl.Collator(undefined, { numeric: true });
 
 // The two flows below mint through the same measured command and verify the
 // result the same way, and all three flows under this line end on the same
@@ -2814,7 +2819,8 @@ async function createTargetPersona() {
        description while claiming to be new. The blank composition is owed to the
        persona that now exists, whatever happened to the one it was minted from. */
     const root = getRoot();
-    if (root && !root.readOnly) {
+    const seeded = !!root && !root.readOnly;
+    if (seeded) {
         // A blank default composition, not a copy: that is the difference between
         // this button and the one beside it. The birth log line is what keeps the
         // pruner off an entry whose variants are all deliberately empty.
@@ -2826,7 +2832,12 @@ async function createTargetPersona() {
     freshContext()?.saveSettingsDebounced?.();
     // Onto the new persona, exactly as the duplicate lands on its copy.
     landOnPersona(destAvatar);
-    if (renamed?.ok) {
+    if (!seeded) {
+        // The root went away or turned read only between the confirm and now. The
+        // persona exists but still carries the copied description, and a refusal
+        // that says nothing is the failure mode this project exists to avoid.
+        notify('warning', refusalMessage(destAvatar));
+    } else if (renamed?.ok) {
         notify('info', STRINGS.manager.createDone(name));
     } else {
         const stName = freshContext()?.powerUserSettings?.personas?.[destAvatar] ?? destAvatar;
@@ -4156,9 +4167,8 @@ function fillPickerList(container, ctx) {
     // The collator, same arguments as the quick panel's list. The
     // avatar id breaks the ties so two same named personas do not swap places
     // between draws.
-    const collator = new Intl.Collator(undefined, { numeric: true });
     entries.sort((a, b) => {
-        const byName = collator.compare(String(a[1] ?? ''), String(b[1] ?? ''));
+        const byName = PICKER_COLLATOR.compare(String(a[1] ?? ''), String(b[1] ?? ''));
         if (byName !== 0) return byName;
         return a[0] < b[0] ? -1 : (a[0] > b[0] ? 1 : 0);
     });
@@ -4291,14 +4301,24 @@ function paintDragOver(sectionId) {
 
 // A drag that reaches the edge of the scroller has to keep going, or a 13 item
 // list cannot be reordered end to end on a phone that shows six of them.
+//
+// One geometry pass per frame (device jank), the same rule the visualViewport
+// handler and the revise popup follow: pointermove only records the finger, and
+// this frame does the row rects, the highlight and the scroll together, reads
+// before writes. It also keeps the drop target honest while the list scrolls
+// under a stationary finger, which per-move handling never saw.
 function startAutoScroll(getY) {
     if (dragAutoScroll) return;
     const step = () => {
         const host = document.getElementById(PANEL_ID);
         const scroller = host?.querySelector('.pm-scroll');
         if (!scroller || dragSectionId === null) { dragAutoScroll = 0; return; }
-        const r = scroller.getBoundingClientRect();
         const y = getY();
+        // Reads first: every row rect, then the scroller's own box.
+        dragOverSection = dropTargetAt(y);
+        const r = scroller.getBoundingClientRect();
+        // Writes after: the highlight classes, then the scroll position.
+        paintDragOver(dragOverSection);
         const margin = 48;
         if (y < r.top + margin) scroller.scrollTop -= Math.ceil((r.top + margin - y) / 4);
         else if (y > r.bottom - margin) scroller.scrollTop += Math.ceil((y - (r.bottom - margin)) / 4);
@@ -4335,9 +4355,11 @@ function dragHandle(sectionId, writable, reason) {
     handle.addEventListener('pointermove', e => {
         if (dragSectionId === null) return;
         e.preventDefault();
+        // Only the finger position. pointermove outruns frames on the device, and
+        // the row rects it used to read here forced a layout per event against
+        // the classes and scrollTop being written around it; startAutoScroll's
+        // frame owns all of that now, in read-then-write order.
         lastY = e.clientY;
-        dragOverSection = dropTargetAt(e.clientY);
-        paintDragOver(dragOverSection);
     });
     const finish = () => {
         if (dragSectionId === null) return;
