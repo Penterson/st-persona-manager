@@ -590,7 +590,7 @@ export const STRINGS = deepFreeze({
         imageRestore: '원본 되돌리기',
         imageNoBackup: '보관된 원본 없음',
         confirmRestoreImage: '보관된 원본 이미지로 되돌리기',
-        imageRestored: '원본 이미지로 되돌림',
+        imageRestored: '원본 이미지 복원 완료',
         confirmOverwriteVersion: name => `버전 "${name}" 덮어쓰기 (이전 내용 복구 불가)`,
         confirmDropVersion: name => `버전 "${name}" 삭제`,
         overwrite: '덮어쓰기',

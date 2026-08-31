@@ -818,7 +818,8 @@ export async function askConfirm(message) {
    Two groups may share a name, so the caller cannot resolve the answer by name
    without silently picking the first of a pair - and the caller that knew this
    worked around it by numbering its own options before handing them over, which
-   this function then numbered again: the user read "1. 1. 그룹A". One numbering,
+   this function then numbered again: the user read 1. 1. 그룹A at the top of the
+   list. One numbering,
    done here, and the index is what comes back. -1 is a cancel or no match. */
 export async function askChoiceIndex(message, options) {
     const list = (options ?? []).filter(o => typeof o === 'string' && o.length);

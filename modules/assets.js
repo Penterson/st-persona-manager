@@ -86,7 +86,7 @@ export function labelOf(filename) {
 
    The tag was resolved through labelOf alone, which strips everything after the
    last dot, and a sprite label is free to contain one: an asset the server calls
-   "포즈 1.5" was looked up as "포즈 1", found nothing, and the tag stayed as raw
+   포즈 1.5 was looked up as 포즈 1, found nothing, and the tag stayed as raw
    text forever with no way for the user to work out why. The name as written is
    what the user typed and what the picker showed them, so it is tried first;
    stripping is the fallback that lets somebody write the file name with its
