@@ -44,7 +44,7 @@ export function resolveFolderKey(root, avatarId) {
     const base = sanitizeKey(avatarId);
     const taken = new Set();
     for (const [id, p] of Object.entries(root?.personas ?? {})) {
-        if (id !== avatarId && p.assetFolderKey) taken.add(p.assetFolderKey);
+        if (id !== avatarId && p?.assetFolderKey) taken.add(p.assetFolderKey);
     }
     // Two different avatars can sanitize to the same string. Sharing a folder would
     // mix their assets and make deleting one wipe the other.
@@ -174,6 +174,17 @@ export async function listAssets(ctx, folderKey) {
    needs. The first entry is what this extension has always sent. */
 const SPRITE_FILE_FIELDS = Object.freeze(['file', 'avatar', 'spriteFile', 'image']);
 let spriteFileField = null;
+/* Set when a full round of the list failed on its own terms - every field name
+   tried and every one rejected for a reason that was ABOUT the field. That is an
+   answer about the server, not about the file, so the next file does not ask it
+   again: five photos chosen at once put twenty uploads of the same bytes onto
+   the wire from a phone to a Termux server and answered with five failures.
+
+   Deliberately not set when the loop broke early. A 401, or a server that is not
+   there, says nothing about field names, and the next attempt has to start the
+   list from the top - which is the same reason spriteFileField is forgotten on
+   failure a few lines below. */
+let spriteFieldsExhausted = false;
 
 function spriteBody(field, folderKey, file) {
     const body = new FormData();
@@ -184,8 +195,14 @@ function spriteBody(field, folderKey, file) {
 }
 
 export async function uploadAsset(ctx, folderKey, file) {
-    const fields = spriteFileField ? [spriteFileField] : SPRITE_FILE_FIELDS;
+    const fields = spriteFileField ? [spriteFileField]
+        // One field, not four, once the list has been through and failed. The
+        // first entry is what this extension has always sent, so the message the
+        // user gets is still about the request they would have made anyway.
+        : spriteFieldsExhausted ? [SPRITE_FILE_FIELDS[0]]
+            : SPRITE_FILE_FIELDS;
     let lastStatus = 0;
+    let ranOut = true;
     for (const field of fields) {
         const res = await fetch('/api/sprites/upload', {
             method: 'POST',
@@ -196,6 +213,7 @@ export async function uploadAsset(ctx, folderKey, file) {
             // Remembered only on a real success, so a build that answers 200 to
             // the first field never pays for the rest of the list again.
             spriteFileField = field;
+            spriteFieldsExhausted = false;
             return field;
         }
         lastStatus = res.status;
@@ -203,11 +221,14 @@ export async function uploadAsset(ctx, folderKey, file) {
         // actually saw; both are worth another field name. Anything else (a 401,
         // a server that is not there) is not about the field, so the loop stops
         // rather than throwing three more uploads at it.
-        if (res.status !== 400 && res.status !== 422 && res.status < 500) break;
+        if (res.status !== 400 && res.status !== 422 && res.status < 500) { ranOut = false; break; }
     }
     // If a remembered field stopped working, forget it, so the next call starts
     // the list again instead of repeating one that has begun to fail.
     spriteFileField = null;
+    // Every name tried, every one rejected over the name itself. Recorded so the
+    // next file in the same selection asks once instead of four times.
+    if (ranOut && fields.length > 1) spriteFieldsExhausted = true;
     // The folder goes in the message. Every field name failing means the problem
     // is not the field, and the next thing anybody would ask is what folder the
     // server was asked to write into. A failure the user can screenshot is worth
@@ -245,10 +266,20 @@ export function findTags(text) {
     return hits;
 }
 
+// One place decides the class, because two callers now build the same picture:
+// the settings drawer, which needs an HTML STRING because SillyTavern's regex
+// replacement takes one, and the chat renderer, which needs an element.
+export function assetClass(style) {
+    return `pm-asset pm-asset-${String(style || 'plain').replace(/[^a-z]/gi, '')}`;
+}
+
+/* Still here, and still escaping, for the settings drawer's replaceString. That
+   one really does hand a string to somebody else's regex machinery. The chat
+   renderer used to come through here too and no longer does: see renderInElement.
+*/
 export function buildImgHtml(path, style) {
     const safe = String(path).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const cls = `pm-asset pm-asset-${String(style || 'plain').replace(/[^a-z]/gi, '')}`;
-    return `<img class="${cls}" src="${safe}" loading="lazy" alt="" />`;
+    return `<img class="${assetClass(style)}" src="${safe}" loading="lazy" alt="" />`;
 }
 
 // What one text node should become, decided without touching the DOM so a node test
@@ -277,11 +308,11 @@ export function planRender(text, resolvePath) {
 
 export function renderInElement(el, resolvePath, style) {
     if (!el) return 0;
-    const DOMPurify = globalThis.SillyTavern?.libs?.DOMPurify;
-    // Without a sanitiser we inject nothing and leave every tag as text. Consuming
-    // the tag and rendering an empty span instead would delete the image and the
-    // source text together, leaving the user with no way to see what was lost.
-    if (!DOMPurify) return 0;
+    /* The sanitiser check that used to stand here went with the string it was
+       guarding. Nothing on this path builds markup any more, so refusing to
+       render when SillyTavern happens not to expose DOMPurify would be refusing
+       over a library this function no longer calls. buildImgHtml still escapes,
+       for the settings drawer, which still needs a string. */
 
     // No "already processed" flag. SillyTavern replaces .mes_text innerHTML when a
     // message is edited, which brings the raw tags back on the same element, so a
@@ -307,9 +338,23 @@ export function renderInElement(el, resolvePath, style) {
                 if (part.text) frag.append(part.text);
                 continue;
             }
-            const holder = document.createElement('span');
-            holder.innerHTML = DOMPurify.sanitize(buildImgHtml(part.path, style));
-            frag.append(holder);
+            /* Built as an element, not parsed out of a string. This runs again
+               for every message SillyTavern empties and refills as the chat is
+               scrolled, so on a long flick it is the one piece of our code on the
+               path repeatedly - and it was serialising a path into HTML, handing
+               that to DOMPurify, and having the parser build the node back.
+
+               Nothing is lost by dropping the sanitiser: the path comes from the
+               server's own listing and it is ASSIGNED to a property here rather
+               than spliced into markup, so there is no string for anything to
+               escape out of. That is the same reason the manager's own asset row
+               builds its thumbnail this way. */
+            const img = document.createElement('img');
+            img.className = assetClass(style);
+            img.src = part.path;
+            img.loading = 'lazy';
+            img.alt = '';
+            frag.append(img);
         }
         node.replaceWith(frag);
         replaced += plan.resolved;

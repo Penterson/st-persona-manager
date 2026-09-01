@@ -228,6 +228,7 @@ export const STRINGS = deepFreeze({
         ambiguous: '이름이 같은 페르소나가 여럿이라 대상 판별 불가. 편집 잠금',
         divergedBanner: '외부에서 설명문 직접 수정. 관리자 내용과 불일치',
         absorbNoItem: '가져올 항목 없음',
+        absorbNotOnly: '다른 항목에 본문이 있어 가져오기 불가. 되돌리기 또는 직접 편집',
         switchAmbiguous: name => `${name}${iRaneun(name)} 이름이 여럿이라 전환 대상 확정 불가`,
         noSwitchCommand: '현재 빌드에 페르소나 전환 슬래시 커맨드 없음',
         switchFailed: name => `${name}${euRo(name)} 페르소나 전환 실패`,
@@ -668,6 +669,9 @@ export const STRINGS = deepFreeze({
         assetUploadedLog: n => `${n}개`,
         assetDeleteFailed: error => `지우기 실패: ${error}`,
         confirmDropAsset: label => `에셋 "${label}" 삭제 (서버 파일 삭제)`,
+        // The count is the part the user cannot see from the asset row, so it
+        // leads the bracket. What follows it is the same warning as above.
+        confirmDropAssetBound: (label, n) => `에셋 "${label}" 삭제 (버전 ${n}개 그림 해제 · 서버 파일 삭제)`,
         targetMovedNotDeleted: '대상 페르소나 변경으로 삭제 취소',
         assetInsert: '채팅에 넣기',
         assetInsertTitle: '입력창 커서 자리에 태그 삽입 후 현재 화면 닫기',
@@ -675,6 +679,7 @@ export const STRINGS = deepFreeze({
         assetSelectionAll: '에셋: 전체',
         assetSelectionSome: n => `에셋: ${n}개 선택`,
         assetOpenTabFirst: '에셋 탭에서 목록 먼저 열기',
+        assetListLoading: '에셋 목록 준비 중',
         assetNoneForPersona: '해당 페르소나에 등록된 에셋 없음',
         sendBoxMissing: '입력창 찾기 실패',
         sendBoxInserted: '입력창에 삽입 완료',
@@ -773,8 +778,6 @@ export const STRINGS = deepFreeze({
             none: '판별 불가',
         },
         identifyLine: (how, detail) => `페르소나 식별: ${how}${detail ? ` · ${detail}` : ''}`,
-        identifySafe: '같은 이름 페르소나가 여럿이어도 편집 가능',
-        identifyRisky: '같은 이름 페르소나가 여럿이면 편집 잠금',
         identifyTiles: (n, classes) => `아바타 칸 ${n}개 · ${classes}`,
         identifyNoTiles: '아바타 목록 미발견',
         usage: '저장 사용량',
@@ -844,6 +847,16 @@ export const STRINGS = deepFreeze({
         clearHistoryLog: n => `이력 ${n}건 삭제`,
         clearHistoryDone: n => `이력 ${n}건 삭제 완료`,
         clearHistoryNothing: '지울 이력 없음',
+        /* The CHANGE LOG, which is a different list from the edit history above
+           and the only one no budget could ever reach. Measured: 30 personas at
+           the 200 line cap come to 461KB on their own, past the 512KB the usage
+           figure turns red at, and the eviction the budget runs only ever drops
+           snapshots. So the warning was true and there was nothing on any screen
+           that could act on it. */
+        clearLogs: '변경 기록 전체 비우기',
+        confirmClearLogs: '모든 페르소나의 변경 기록 삭제 (복구 불가)',
+        clearLogsDone: n => `변경 기록 ${n}줄 삭제 완료`,
+        clearLogsNothing: '지울 변경 기록 없음',
         openManager: '관리자 열기',
         openManagerFailed: '관리자 화면 열기 실패',
         exportRegex: '정규식으로 내보내기',

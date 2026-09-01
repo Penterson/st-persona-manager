@@ -38,6 +38,10 @@ export function historyBytes(root) {
     const encoder = new TextEncoder();
     let total = 0;
     for (const persona of Object.values(root.personas ?? {})) {
+        // Same guard expireOldHistory carries, for the same reason one line down:
+        // a null under personas out of a hand edited settings.json threw here,
+        // inside the save path, on data the user is about to lose.
+        if (!persona || typeof persona !== 'object') continue;
         for (const list of Object.values(persona.history ?? {})) {
             // expireOldHistory a few lines down checks this and these two did not,
             // so a history value that is not an array threw here instead - which is
@@ -100,6 +104,8 @@ export function enforceGlobalBudget(root, settings, now = Date.now()) {
     // Flatten every snapshot with its location so we can evict globally oldest first.
     const all = [];
     for (const persona of Object.values(root.personas ?? {})) {
+        // The guard historyBytes and expireOldHistory both carry.
+        if (!persona || typeof persona !== 'object') continue;
         for (const [variantId, list] of Object.entries(persona.history ?? {})) {
             if (!Array.isArray(list)) continue;
             list.forEach(entry => all.push({ persona, variantId, at: entry?.at }));

@@ -78,7 +78,14 @@ export function resolveAvatar({ preciseAvatar, domAvatar, lockedAvatar, name1, p
     // Guessing here would overwrite the wrong persona's description.
     if (duplicated) return { avatar: null, source: 'none', ambiguous: true };
 
-    if (satisfiesInvariant(defaultPersona, name1, p)) return settle(defaultPersona, 'default');
+    /* The default persona used to be consulted here and could never answer. To
+       reach this line matches has to be empty, and satisfiesInvariant is true only
+       when p[defaultPersona] equals name1 - which would have put defaultPersona in
+       matches. The one input that got past that was a personas object with a
+       non-enumerable key, which Object.hasOwn sees and Object.keys does not, and
+       nothing in SillyTavern makes one. It also named a source with no Korean word
+       behind it, so on the one path it could have taken the settings drawer would
+       have printed the bare token 'default'. */
     return { avatar: null, source: 'none', ambiguous: false };
 }
 

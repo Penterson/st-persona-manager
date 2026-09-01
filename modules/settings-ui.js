@@ -196,7 +196,14 @@ function numberField(key, labelText, hint) {
     // that the rule has no exceptions to remember.
     input.addEventListener('keydown', e => {
         if (isComposingKey(e)) return;
-        if (e.key === 'Enter') { e.preventDefault(); apply(); input.blur(); }
+        // blur only, and never apply() beside it. apply() stops at an await on
+        // the confirmation, control comes back here, and the blur that followed
+        // fired change and started a SECOND apply against a root the first one
+        // had not written yet: two questions about the same edit, both live, and
+        // cancelling one did not undo confirming the other. The blur alone raises
+        // change exactly once, which is the path this field already takes when
+        // the user taps elsewhere.
+        if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
     });
     return rowOf(labelText, input, hint);
 }
@@ -385,6 +392,39 @@ async function doClearHistory() {
     save();
     refreshSettings();
     notify('info', cleared ? STRINGS.settings.clearHistoryDone(cleared) : STRINGS.settings.clearHistoryNothing);
+}
+
+/* The sibling of doClearHistory, for the list it cannot reach.
+
+   enforceGlobalBudget evicts snapshots and nothing else, and historyBytes counts
+   snapshots and nothing else, so the change log grew under both of them: the
+   usage figure went red over bytes no control in the extension could remove. The
+   manager clears one persona's log from its 변경 기록 tab; with thirty personas
+   that is thirty trips. This is that button, once, for all of them.
+
+   No log line is written about the clearing. doClearHistory writes one because
+   the log survives it; here the line would be the only thing left in the list
+   the user just asked to empty, and it would also make every persona non-empty
+   and put the whole roster out of the pruner's reach. */
+async function doClearLogs() {
+    const root = getRoot();
+    if (!root || root.readOnly) { notify('error', STRINGS.settings.clearHistoryReadOnly); return; }
+    if (!(await askConfirm(STRINGS.settings.confirmClearLogs))) return;
+    // Read again on the other side of the question, the same as doClearHistory:
+    // an import can replace the whole root while the popup is up.
+    const after = getRoot();
+    if (!after || after.readOnly) { notify('error', STRINGS.settings.clearHistoryReadOnly); return; }
+    let cleared = 0;
+    for (const persona of Object.values(after.personas ?? {})) {
+        if (!persona || typeof persona !== 'object') continue;
+        const had = (persona.log ?? []).length;
+        if (!had) continue;
+        persona.log = [];
+        cleared += had;
+    }
+    save();
+    refreshSettings();
+    notify('info', cleared ? STRINGS.settings.clearLogsDone(cleared) : STRINGS.settings.clearLogsNothing);
 }
 
 function openManagerScreen() {
@@ -728,6 +768,7 @@ function buildPanel() {
     actions.append(buttonOf(STRINGS.settings.refreshUsage, () => refreshSettings(), false));
     actions.append(buttonOf(STRINGS.settings.pruneEmpty, () => doPrune(), true));
     actions.append(buttonOf(STRINGS.settings.clearHistory, () => doClearHistory(), true));
+    actions.append(buttonOf(STRINGS.settings.clearLogs, () => doClearLogs(), true));
     // The three owed controls. Exporting writes nothing here, so both
     // export buttons stay available on a read only root; importing replaces
     // everything, so it goes dead with the rest.

@@ -112,8 +112,44 @@ function runCleanups(list) {
 // outcome that is forbidden.
 export function notify(kind, message) {
     const t = globalThis.toastr;
-    if (t && typeof t[kind] === 'function') t[kind](message);
+    if (t && typeof t[kind] === 'function') { t[kind](message); liftToasts(); }
     else console.warn(`[${MODULE_NAME}] ${message}`);
+}
+
+/* SillyTavern's toast container hangs off body. Our screens are dialogs opened
+   with showModal, which puts them in the TOP LAYER: above everything in body and
+   making all of it inert. So a message raised from an open screen was drawn
+   underneath that screen and could not be tapped either - [+ 태그] on a name the
+   persona already has reported the refusal into a layer with nobody in it, and
+   from the user's side the button simply did nothing.
+
+   The container is borrowed for as long as one of our screens is up, and handed
+   straight back when it comes down. Handing it back is not optional: closeManager
+   REMOVES its host, and a container still inside it would leave the document with
+   SillyTavern's toasts. */
+let toastHome = null;
+
+function toastContainer() {
+    if (typeof document === 'undefined') return null;
+    return document.getElementById('toast-container');
+}
+
+function liftToasts() {
+    const host = ourOpenHost();
+    const box = toastContainer();
+    if (!host || !box || box.parentElement === host) return;
+    if (!toastHome) toastHome = box.parentElement ?? document.body;
+    host.append(box);
+}
+
+// Called before any of our hosts is closed, dropped or removed. Puts the
+// container back where SillyTavern keeps it; the next notify lifts it again into
+// whichever of our screens is still standing.
+export function releaseToasts() {
+    const box = toastContainer();
+    if (!box || !toastHome) return;
+    if (box.parentElement !== toastHome) toastHome.append(box);
+    toastHome = null;
 }
 
 export function el(tag, className, text) {
@@ -531,6 +567,7 @@ export function isPanelOpen() {
 
 export function closePanel() {
     runCleanups(panelCleanups);
+    releaseToasts();
     const host = document.getElementById(HOST_ID);
     if (host) {
         try { if (typeof host.close === 'function') host.close(); } catch { /* already closed */ }
@@ -676,6 +713,9 @@ function ourOpenHost() {
 function dropHost(host) {
     // Closing lifts the inertness the top layer imposes on everything else, which
     // is what lets a div popup receive a tap at all.
+    // The toast container goes back to body first, or it would be sitting inside
+    // a dialog that is no longer being painted.
+    releaseToasts();
     if (!host || !host.isConnected || typeof host.close !== 'function') return false;
     try { host.close(); return true; } catch { return false; }
 }
@@ -1042,6 +1082,22 @@ function absorbOutsideEdit() {
     const variantId = last ? s.persona.activePicks?.[last.id] : null;
     const variant = last ? (s.persona.variants?.[last.id] ?? []).find(v => v.id === variantId) : null;
     if (!variant) { notify('error', STRINGS.quick.absorbNoItem); return; }
+    /* Absorbing puts the WHOLE description into one item, and the description is
+       the concatenation of every item. So it is only lossless when that item is
+       the only one carrying text: with anything else filled, what those items
+       hold is now written twice and every prompt from here on carries it twice.
+
+       Refused rather than absorbed-and-deduplicated, because there is no honest
+       way to tell which part of an edit made outside belongs to which item. The
+       banner keeps [되돌리기] and the manager is one tap away, so the user still
+       has two ways out. */
+    const doubled = sections.some(sec => {
+        if (sec.id === last.id) return false;
+        const pick = s.persona.activePicks?.[sec.id];
+        const body = (s.persona.variants?.[sec.id] ?? []).find(v => v.id === pick);
+        return !!(body?.text ?? '').trim();
+    });
+    if (doubled) { notify('warning', STRINGS.quick.absorbNotOnly); return; }
     const now = Date.now();
     // The text we are about to overwrite goes into history first, so absorbing is
     // never the operation that loses something.
@@ -1132,6 +1188,10 @@ function createLabel(name, avatarId) {
 // closeOnDone is false for the automatic rename: that one can land while the user
 // has the panel open and is reading it, and a panel that shuts by itself because
 // a message arrived is a worse surprise than the rename it is reporting.
+// Bumped by every switchPersona call. A call whose number is no longer the
+// current one has been overtaken and stops talking.
+let switchSeq = 0;
+
 /* quiet is for the automatic rename and for nothing else.
 
    That rule is documented as "this one happens by itself and has to stay quiet",
@@ -1141,14 +1201,31 @@ function createLabel(name, avatarId) {
    failure on screen after character messages the user had not acted on at all.
    The result is still returned, and the caller still decides what to say. */
 export async function switchPersona(avatar, name, { closeOnDone = true, quiet = false } = {}) {
+    /* Who started last wins. Nothing here lands in one frame - every path is an
+       await on a slash command followed by a poll - and the panel stays open with
+       no sign that anything is happening, so a switch that feels slow gets tapped
+       again. Two of these then ran side by side: the second landed, and the first,
+       still polling for a name that had stopped being current, ran its retry and
+       pulled the user back to the persona they had just left. A superseded call
+       stops where it stands. It does not retry, does not report a failure that
+       belongs to nobody, and does not close a panel the live switch is using. */
+    const my = ++switchSeq;
+    const current = () => my === switchSeq;
     const say = (kind, message) => { if (!quiet) notify(kind, message); };
+    /* Read now, not taken from the argument. The name in a row's handler is the
+       one that row was DRAWN with, and a draw deferred behind a focused search
+       field can outlive a rename: the row then asks to land on a name nobody
+       carries any more, waits three turns for it, and calls a switch that worked
+       a failure. The argument stays as the fallback for a persona the map has
+       forgotten, which is the case where there is nothing fresher to read. */
+    const wanted = freshContext()?.powerUserSettings?.personas?.[avatar] ?? name;
     // Every name1 read below is a new context. The old snapshot comment here said the
     // same thing as a local rule; the rule is now the structure of the whole module.
     // closeOnDone is honoured here too. It used to close unconditionally, so the
     // automatic rename - which calls this with closeOnDone false, through the
     // rename path - could shut the panel the user was reading whenever the name
     // happened to have landed already.
-    if (freshContext()?.name1 === name && (getState()?.avatar ?? null) === avatar) {
+    if (freshContext()?.name1 === wanted && (getState()?.avatar ?? null) === avatar) {
         if (closeOnDone) closePanel();
         return true;
     }
@@ -1157,8 +1234,12 @@ export async function switchPersona(avatar, name, { closeOnDone = true, quiet = 
         // Verified by name only. With duplicate names the invariant in ctx.js still
         // cannot say which avatar we landed on, so we say that rather than imply
         // more certainty than we have.
-        if ((getState()?.duplicateNames ?? []).includes(name)) {
-            say('warning', STRINGS.quick.switchAmbiguous(name));
+        // Landed, and that much is observed however this call ended up. What a
+        // superseded call must not do is talk about it or close the panel the
+        // switch that overtook it is still working in.
+        if (!current()) return true;
+        if ((getState()?.duplicateNames ?? []).includes(wanted)) {
+            say('warning', STRINGS.quick.switchAmbiguous(wanted));
         }
         if (closeOnDone) closePanel();
         return true;
@@ -1168,7 +1249,7 @@ export async function switchPersona(avatar, name, { closeOnDone = true, quiet = 
     // the await. SillyTavern finishes the swap after the command resolves, so the
     // synchronous read reports a failure that did not happen, and the retry it
     // triggers is the mode argument whose allowed values were never measured.
-    const landed = () => waitFor(() => freshContext()?.name1 === name);
+    const landed = () => waitFor(() => freshContext()?.name1 === wanted);
 
     /* The precise path is a bonus, and it stayed a bonus only
        because the import was looking one directory too high. 0.1.6 corrected the
@@ -1186,6 +1267,7 @@ export async function switchPersona(avatar, name, { closeOnDone = true, quiet = 
     if (api && typeof api.setUserAvatar === 'function') {
         try { await api.setUserAvatar(avatar); } catch (e) { console.warn(`[${MODULE_NAME}] setUserAvatar failed`, e); }
         if (await landed()) return finish();
+        if (!current()) return false;
     }
 
     // The command name is discovered, never hardcoded: the plan
@@ -1205,14 +1287,16 @@ export async function switchPersona(avatar, name, { closeOnDone = true, quiet = 
 
     // The allowed values of the named mode argument were never measured, so the
     // first attempt omits it and the result is checked instead of assumed.
-    await run(`/${command} ${quoteArg(name)}`);
+    await run(`/${command} ${quoteArg(wanted)}`);
     if (await landed()) return finish();
-    await run(`/${command} mode=lookup ${quoteArg(name)}`);
+    if (!current()) return false;
+    await run(`/${command} mode=lookup ${quoteArg(wanted)}`);
     if (await landed()) return finish();
+    if (!current()) return false;
 
     // Never report a success we did not observe, and never report a failure we did
     // not observe either: both waits above have expired by the time we get here.
-    say('error', STRINGS.quick.switchFailed(name));
+    say('error', STRINGS.quick.switchFailed(wanted));
     return false;
 }
 
@@ -1260,6 +1344,14 @@ async function renameThroughSillyTavern(avatar, from, to, toChat, quiet) {
     // with it. Should is not a measurement, so it is checked, and the switch is
     // only run when it did not.
     if (await waitFor(() => freshContext()?.name1 === to)) return { ok: true, reason: 'applied' };
+    /* The rename itself is done and the map carries the new name. All that is
+       left is making the chat follow, and the only way to do that is a persona
+       switch - so it must not run for a persona the user has meanwhile moved off.
+       The automatic rename reaches this line by itself, quietly, on a timer after
+       a character message: without this check it took a user who had just chosen
+       another persona and put them back on the previous one with nothing on
+       screen to say why. Nothing is owed to a persona that is no longer playing. */
+    if ((getState()?.avatar ?? null) !== avatar) return { ok: true, reason: 'listed' };
     return (await switchPersona(avatar, to, { closeOnDone: false, quiet }))
         ? { ok: true, reason: 'applied' }
         : { ok: false, reason: 'switch-failed' };
@@ -1300,6 +1392,9 @@ export async function applyPersonaName(avatar, name, { closeOnDone = true, toCha
     // what this function used to do to anybody who renamed a background persona
     // from the manager: they asked for a name and got a persona switch.
     if (!toChat) return { ok: true, reason: 'listed', previous };
+    // The check renameThroughSillyTavern makes, on the path that reaches the same
+    // switch without going through it.
+    if ((getState()?.avatar ?? null) !== avatar) return { ok: true, reason: 'listed', previous };
     const landed = await switchPersona(avatar, name, { closeOnDone, quiet });
     if (landed) return { ok: true, reason: 'applied', previous };
     // Put it back. A map that says one thing while the chat says another is worse
@@ -1319,6 +1414,8 @@ export async function applyPersonaName(avatar, name, { closeOnDone = true, toCha
    persona update all arrive within a beat of each other, and this ends in a
    persona switch. Off unless the user turned it on. */
 let autoNameTimer = 0;
+// Bumped by cancelAutoName. A run holding an older number has been called off.
+let autoNameGen = 0;
 
 export function scheduleAutoName() {
     if (!getRoot()?.settings?.autoLocalName) return;
@@ -1329,6 +1426,13 @@ export function scheduleAutoName() {
 export function cancelAutoName() {
     if (autoNameTimer) clearTimeout(autoNameTimer);
     autoNameTimer = 0;
+    /* And the run already under way. Clearing the timer only ever cancelled a
+       rename that had not started; one that was inside its slash command carried
+       on past a teardown and came back to log a line and toast into a panel that
+       no longer existed. The work cannot be recalled once the command is out, but
+       everything after it - the log line, the save, the message - belongs to a
+       feature that has been switched off, and none of it is written now. */
+    autoNameGen += 1;
 }
 
 // One at a time. This awaits a persona switch, and the events that schedule it
@@ -1359,6 +1463,7 @@ async function runAutoName() {
     // so it declines. The screen says so where the names are.
     if (nameCollides({ name, characterName: ctx?.name2, chat: ctx?.chat })) return;
     const avatar = s.avatar;
+    const gen = autoNameGen;
     autoNameRunning = true;
     let result;
     try {
@@ -1369,6 +1474,8 @@ async function runAutoName() {
         autoNameRunning = false;
     }
     if (!result?.ok) return;
+    // Called off while the command was out. See cancelAutoName.
+    if (gen !== autoNameGen) return;
     // Something changed the persona, so the log says what and why.
     // A rename nobody asked for and nothing recorded is the shape of a bug report
     // that cannot be answered.
@@ -1415,8 +1522,12 @@ function emptyBlock(text) {
     return box;
 }
 
+// pm-mass, because a banner IS a filled ink block: it already draws --pm-mass
+// under --pm-on-mass type. The inversion that keeps a control readable on such a
+// block is scoped to that class, and without it in the markup the banner's own
+// buttons drew ink on ink and disappeared.
 function bannerOf(className, message) {
-    const box = el('div', `pm-quickbar-banner ${className}`);
+    const box = el('div', `pm-quickbar-banner pm-mass ${className}`);
     box.append(el('div', 'pm-quickbar-banner-text', message));
     return box;
 }
@@ -1583,7 +1694,26 @@ function toggleAutoName() {
    language, and every one of them is written to the log. The one case that does
    ask is a name the chat already has somebody else using, because that is the
    thing the user cannot see from here and cannot undo by tapping. */
+/* One at a time, the way runAutoName already guards itself. These rows sit in a
+   list under 언어별 이름 and each one takes a slash command and two polls to
+   finish, with nothing on the panel to say a tap was received. A second row
+   tapped in that gap renamed the same persona twice over, and the first call -
+   still waiting for the name IT asked for - then went looking for a name the
+   second had already replaced.
+
+   The flag is taken here rather than inside, because the confirmation for a
+   clashing name is an await too and the gap it opens is the longest of them. In
+   a finally, so a throw does not switch the rows off for the rest of the
+   session. */
+let nameApplyRunning = false;
+
 async function applyLocalName(lang, name) {
+    if (nameApplyRunning) return;
+    nameApplyRunning = true;
+    try { await applyLocalNameNow(lang, name); } finally { nameApplyRunning = false; }
+}
+
+async function applyLocalNameNow(lang, name) {
     const s = getState();
     if (!s || !s.avatar) { notify('error', STRINGS.common.personaChanged); return; }
     if (!rosterWritable(s)) { notify('error', STRINGS.quick.namesNeedWritable); return; }

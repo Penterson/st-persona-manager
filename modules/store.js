@@ -241,6 +241,27 @@ export function isEmptyPersona(p) {
     for (const list of Object.values(p.variants ?? {})) {
         for (const v of list) if (v.text && v.text.trim()) return false;
     }
+    /* Structure is content even while every body is still blank. Renaming an
+       item, adding one, or adding a second choice is work that lives nowhere but
+       here, and a user who lays out their template before writing into it had all
+       of it deleted by [빈 페르소나 정리] once the birth log line was gone.
+
+       Compared against what makeDefaultPersona builds, not against emptiness: a
+       record still carrying exactly the default items under their default names,
+       one default choice each, is the untouched shell this function is for.
+
+       A record with NO sections stays prunable. That is the shell the settings
+       drawer names as the reason this button exists, and a length check alone
+       would have turned it into the one thing that can never be cleaned up. */
+    const sections = p.sections ?? [];
+    if (sections.length) {
+        if (sections.length !== DEFAULT_SECTION_NAMES.length) return false;
+        if (sections.some((sec, i) => sec?.name !== DEFAULT_SECTION_NAMES[i])) return false;
+        for (const list of Object.values(p.variants ?? {})) {
+            if ((list ?? []).length !== 1) return false;
+            if (list[0]?.label !== STRINGS.manager.defaultChoiceLabel) return false;
+        }
+    }
     return true;
 }
 

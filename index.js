@@ -61,7 +61,14 @@ function resolvePathFactory(el) {
                 // A folder we cannot list stays an empty listing, so its tags remain
                 // plain text and we never retry in a render loop.
                 .catch(() => folders.set(folderKey, new Map()))
-                .then(() => renderInElement(el, resolvePathFactory(el), styleNow()));
+                // Every message naming this folder, not just the one whose render
+                // happened to issue the request. The marker above is what makes a
+                // sweep over a chat send ONE listing, and the cost of that is that
+                // every later element saw fetch:false with no listing to use yet
+                // and left its tags as raw text. They are redrawn here, where the
+                // listing finally exists. No new request can come of it: the key
+                // now holds a Map, so assetLookup answers from it.
+                .then(() => renderAll());
         }
         return hit.path;
     };
@@ -256,6 +263,13 @@ async function init() {
         // for again.
         folders.clear();
         await onPersona();
+        // Our OWN folder's listing gets the same second chance. onPersona only
+        // refetches when the persona changed, so a sprites request that failed
+        // during a switch - a Termux server restarting, a phone off the network
+        // for a second - left this persona's own tags as raw text with no way
+        // back but switching away and switching back. Opening a chat is a moment
+        // the user chose, it happens once, and it is not inside a render loop.
+        if (getState()?.assetError) await refreshAssets();
         renderAll();
         onChatText();
     });

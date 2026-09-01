@@ -88,7 +88,13 @@
        The drips below are made of the same variable, so they cannot drift. */
     --pm-mass: var(--SmartThemeBodyColor);
     --pm-on-mass: var(--SmartThemeBlurTintColor);
-    --pm-mass-muted: color-mix(in srgb, var(--SmartThemeBlurTintColor) 68%, var(--SmartThemeBodyColor));
+    /* Built from the two mass tokens, not from the raw theme variables they are
+       made of. A translucent BlurTintColor drags its alpha through the mix, and
+       the @supports block near the end of this file strips that alpha from
+       --pm-on-mass only, so this one stayed translucent and the caption over an
+       ink block measured 2.88:1 where its sibling measured 5.11:1. Named
+       through the tokens, it inherits that correction instead of missing it. */
+    --pm-mass-muted: color-mix(in srgb, var(--pm-on-mass) 68%, var(--pm-mass));
     /* Secondary text. NOT --SmartThemeEmColor: that value belongs to whoever wrote
        the theme, and measured across four of them it fell to 4.04:1 on the sepia
        one, under the 4.5:1 floor for body text. Deriving it from the body colour
@@ -497,12 +503,15 @@
 /* The row is a checkbox plus one line of text, which came out around
    30px tall. 40px is the floor for anything a thumb has to hit, and the content stays
    centred in it rather than the row growing a gap at the bottom. */
+/* 44px on the box for the reason .pm-settings-label carries it there: these rows
+   butt against each other under a hairline, so there is no gap for a reach to
+   take and the height is the only place the floor can live. */
 .pm-quickbar-labelrow {
     display: flex;
     align-items: center;
     gap: 8px;
     box-sizing: border-box;
-    min-height: 40px;
+    min-height: 44px;
     padding: 7px 0;
     cursor: pointer;
 }
@@ -535,7 +544,8 @@
 .pm-quickbar-newlabel-input {
     flex: 1 1 auto;
     box-sizing: border-box;
-    min-height: 40px;
+    /* The floor on the box, for the reason .pm-search-input carries it there. */
+    min-height: 44px;
     background: color-mix(in srgb, currentColor 8%, transparent);
     color: var(--SmartThemeBodyColor);
     border: var(--pm-rule);
@@ -724,6 +734,7 @@
 /* 40px is the floor for anything a thumb has to hit, and the
    three tabs share the width evenly so none of them is a small target. */
 .pm-manager-tab {
+    position: relative;
     flex: 1 1 0;
     box-sizing: border-box;
     min-height: 40px;
@@ -740,6 +751,16 @@
 /* Filled, not outlined. In the reference the current choice in a pill row is a
    solid block and the rest are outlines, which survives a glance on a phone in a
    way a coloured border does not. */
+/* Vertical only. The band above these is 34px of padding and the description
+   under them is not a target, so 2px each way costs nothing and takes the row
+   from 40px to the 44px floor. Horizontally the tabs sit 6px apart and each
+   already fills its share of the width, so no reach is needed there. */
+.pm-manager-tab::before {
+    content: '';
+    position: absolute;
+    inset: -2px 0;
+}
+
 .pm-manager-tab-active {
     border-color: var(--pm-accent-edge);
     background: var(--pm-accent-wash);
@@ -810,6 +831,7 @@
    actually wants. */
 .pm-manager-rowname {
     display: block;
+    position: relative;
     flex: 1 1 auto;
     min-width: 0;
     box-sizing: border-box;
@@ -822,6 +844,18 @@
     text-align: left;
     cursor: pointer;
     -webkit-tap-highlight-color: transparent;
+}
+
+/* The reach the buttons beside it have had all along. This is the biggest and
+   most-pressed target on the screen and it was the only one still measuring 40px
+   while the small ⋯ next to it measured 46px. Vertical only, and 2px of it: the
+   row carries 2px above and below, so two stacked names meet exactly rather than
+   overlapping, which is the same half-the-gap rule the button rows follow.
+   The box stays 40px so a list of 30 personas does not grow. */
+.pm-manager-rowname::before {
+    content: '';
+    position: absolute;
+    inset: -2px 0;
 }
 
 .pm-manager-rowname:active {
@@ -882,8 +916,16 @@
 
 /* Rule 5: the destructive button is last and separated. 12px plus the rule above
    it is more than the 8px asked for, and the line is what makes the
-   separation visible rather than merely present. */
-.pm-manager-danger {
+   separation visible rather than merely present.
+
+   Compound on purpose. This is geometry for the STACK that holds a destructive
+   button, not for the button, and the quick panel's bulk bar puts the same class
+   on a bare [삭제] standing in a horizontal row of five. Unscoped, that button
+   took a 12px margin and a top rule of its own: it sat 12px lower than the four
+   beside it, stretched the row to 52px, and drew a hairline across nothing. The
+   inking further down stays on the plain class, which is the part that button
+   actually wants. */
+.pm-manager-stack.pm-manager-danger {
     margin-top: 12px;
     padding-top: 10px;
     border-top: 1px solid color-mix(in srgb, currentColor 14%, transparent);
@@ -1084,6 +1126,7 @@
    is pointed at, and the whole strip is the control that changes it. */
 .pm-manager-target {
     display: flex;
+    position: relative;
     align-items: center;
     gap: 6px;
     flex: 1 1 auto;
@@ -1102,6 +1145,15 @@
 
 @media (hover: hover) {
     .pm-manager-target:hover { background: color-mix(in srgb, currentColor 14%, transparent); }
+}
+
+/* The same 2px the tabs under it take, and for the same reason: this strip is
+   the control that changes which persona is being edited, and it was the last
+   40px target left in the header while [닫기] beside it measured 46px. */
+.pm-manager-target::before {
+    content: '';
+    position: absolute;
+    inset: -2px 0;
 }
 
 .pm-manager-targetimg {
@@ -1300,13 +1352,19 @@
     border-bottom: 1px solid color-mix(in srgb, currentColor 10%, transparent);
 }
 
+/* 44px on the box, not a reach. The rows that hold a number box or a select
+   already stand 44px tall because those controls carry the floor themselves; the
+   five rows whose only control is a 24px checkbox stopped at 40px, so the toggles
+   were the smallest targets in a drawer where everything else cleared the floor.
+   The row's own 6px of padding sits outside this label and takes no taps, which
+   is why the height has to be here. */
 .pm-settings-label {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 8px;
     box-sizing: border-box;
-    min-height: 40px;
+    min-height: 44px;
     cursor: pointer;
 }
 
@@ -1492,18 +1550,19 @@
     -webkit-user-select: text;
 }
 
-/* The 40px floor even for a floating control, and the editor footer's
-   stacked tint trick for the same reason: text sits underneath it. */
+/* The floor on the box. This is a button the finger has to land on with the
+   selection toolbar already crowding the same patch of screen, and it floats out
+   of the flow, so the extra 4px pushes nothing.
+
+   The stacked tint that used to be declared here was dead: the ink treatment
+   further down sets `background` as a shorthand, which resets both the colour and
+   the image every time. The comment that described the trick went with it. */
 .pm-revise-popup {
     position: absolute;
     z-index: 3;
-    min-height: 40px;
+    min-height: 44px;
     padding: 8px 14px;
     border: var(--pm-rule);
-    background-color: var(--SmartThemeBlurTintColor);
-    background-image:
-        linear-gradient(var(--SmartThemeBlurTintColor), var(--SmartThemeBlurTintColor)),
-        linear-gradient(var(--SmartThemeBlurTintColor), var(--SmartThemeBlurTintColor));
     color: var(--SmartThemeBodyColor);
     font-weight: 600;
 }
@@ -1610,6 +1669,13 @@
    taller than the heads beside it. */
 .pm-quickbar-foldhead {
     position: relative;
+    box-sizing: border-box;
+    /* The height is on the box now. It used to be a 30px head with a 7px reach
+       each way, which cleared 44px but ran 2px into the head standing 5px below
+       it: measured on the device, a tap on the bottom edge of 버전 opened
+       언어별 이름 instead. A reach can only ever take half the gap, and half of
+       5px is not 7px, so the box carries the difference. */
+    min-height: 40px;
     /* Room for the mark, which is out of the flow at the right edge. */
     padding-right: 30px;
     cursor: pointer;
@@ -1617,13 +1683,12 @@
     -webkit-tap-highlight-color: transparent;
 }
 
-/* The whole line is the target, and the head is only 30px tall, so it is grown
-   the way every other control here is grown rather than by making the line
-   taller than the head beside it. */
+/* Half the 5px that separates two collapsed heads, which is the rule every other
+   control here follows. 40 + 2 + 2 = 44. */
 .pm-quickbar-foldhead::before {
     content: '';
     position: absolute;
-    inset: -7px 0;
+    inset: -2px 0;
 }
 
 .pm-quickbar-foldmark {
@@ -1729,7 +1794,9 @@
 .pm-search-input {
     box-sizing: border-box;
     width: 100%;
-    min-height: 40px;
+    /* An input generates no pseudo box to borrow a reach from, so the floor has
+       to be the border box itself, the same as the selects above. */
+    min-height: 44px;
     padding: 8px 10px;
     border: var(--pm-rule);
     background: color-mix(in srgb, currentColor 8%, transparent);
@@ -2944,8 +3011,18 @@
    the 6px row gap, so the entire gap belongs to the chip on the lower line and a
    tap under a chip lands on the one below it. On a tag row that means offering to
    delete a tag the finger never touched. Half the gap, exactly as the horizontal
-   reach already takes half of its own. 34px plus 3px each side still clears the
-   floor. The scrolling chip rows are single line and keep their full reach. */
+   reach already takes half of its own. The scrolling chip rows are single line
+   and keep their full reach.
+
+   The sentence that used to end this comment said 34px plus 3px each side still
+   cleared the floor. It does not: that is 40px, and it was measured at 40px on
+   the device. Half the gap is the right rule, so the missing 4px is taken on the
+   box instead - 38 + 3 + 3 = 44 - and only in the two rows that wrap. */
+.pm-filter-chips .pm-quickbar-chip,
+.pm-tag-chips .pm-quickbar-chip {
+    min-height: 38px;
+}
+
 .pm-filter-chips .pm-quickbar-chip::before,
 .pm-tag-chips .pm-quickbar-chip::before {
     inset: -3px;
@@ -3021,6 +3098,12 @@
            where omitting it left rgba(27,27,31,0.7) exactly as translucent as it
            started. */
         --pm-on-mass: rgb(from var(--SmartThemeBlurTintColor) r g b / 1);
+        /* Redeclared here, not left to inherit. A custom property substitutes its
+           var() references on the element that declares it, so the :root copy of
+           this one had already resolved against the :root --pm-on-mass and would
+           carry the alpha down past this correction. Declared on the same element
+           as the line above, it resolves against the corrected value. */
+        --pm-mass-muted: color-mix(in srgb, var(--pm-on-mass) 68%, var(--pm-mass));
     }
 }
 

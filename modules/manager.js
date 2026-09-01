@@ -37,7 +37,7 @@ import {
     closePanel, openPanel, isPanelOpen, notify, askConfirm, askChoice, askText, blockDrawerClose,
     isComposingKey, makeRowActivatable, el, thumbnailUrl, markedText, pagerRow, applyShapeClass,
     applyPersonaName, bumpThumbnails, runBoundImageWrite,
-    scheduleAutoName, cancelAutoName } from './quickbar.js';
+    scheduleAutoName, cancelAutoName, releaseToasts } from './quickbar.js';
 // Matching, language detection and paging.
 import { rankOf, textContains, detectLanguage, chatLanguage, pageOf } from './search-pure.js';
 import {
@@ -54,7 +54,7 @@ import {
     addTag, removeTag, missingDefaultSections, fillDefaultSections,
     planFullTextSave, readSelectOptions, parseDepth, copyPersonaOnto,
     setLocalName, localName, countSize,
-    boundAsset, bindAsset, versionImageState,
+    boundAsset, bindAsset, versionImageState, versionsBindingAsset,
 } from './manager-pure.js';
 // Every sentence the user reads on this screen comes from there,
 // including the tab names and the line under each of them. The stored log kinds,
@@ -369,10 +369,18 @@ async function requestClose() {
             : second > 0 ? askSecond(second)
                 : STRINGS.manager.confirmCloseDirty;
         const ok = await askConfirm(message);
-        closeAsked = false;
         // Re-checked rather than assumed: the screen may have been closed while
         // the question was on screen.
-        if (!ok || !document.getElementById(HOST_ID)) return;
+        if (!ok || !document.getElementById(HOST_ID)) { closeAsked = false; return; }
+        // Both screens can be dirty at once, and closeManager resets both. Asking
+        // about one of them and then discarding the other is the silent loss this
+        // whole path exists to prevent, so the second one gets its own question -
+        // the same shape selectTarget uses when it has two things to ask about.
+        if (first > 0 && second > 0) {
+            const okSecond = await askConfirm(askSecond(second));
+            if (!okSecond || !document.getElementById(HOST_ID)) { closeAsked = false; return; }
+        }
+        closeAsked = false;
     }
     closeManager();
 }
@@ -390,6 +398,10 @@ function closeManager(reopenPanel = true) {
     const returnToPanel = reopenPanel && fromQuickPanel;
     fromQuickPanel = false;
     runCleanups(screenCleanups);
+    // Before the host goes. While this screen is up it holds SillyTavern's toast
+    // container, and removing the host with the container still inside it would
+    // take every toast in the app down with this panel.
+    releaseToasts();
     const host = document.getElementById(HOST_ID);
     if (host) {
         try { if (typeof host.close === 'function') host.close(); } catch { /* already closed */ }
@@ -948,6 +960,13 @@ async function restoreSnapshot(variantId, index) {
     historyIndex = null;
     // The editor may be sitting on the body that just changed underneath it.
     if (openVariant?.variantId === variantId) { openVariant = null; editorDirty = false; }
+    // And so may a draft. Restoring writes the body, exactly as saveVariantText
+    // and saveFullText do, and both of those take the draft away afterwards for
+    // the reason that applies here too: a draft left behind is restored over the
+    // text that was just written, so reopening the choice would offer the old
+    // typing back and [저장] would undo the restore.
+    const found = findVariant(after.persona, variantId);
+    if (found) takeDraft(startAvatar, found.section.id, variantId);
     // restore wrote its own log line, so this call only has to save.
     commit(null, '', startAvatar);
 }
@@ -1017,7 +1036,16 @@ async function dropAsset(label) {
     if (!s) return;
     if (s.readOnly || s.ambiguous) { notify('error', refusalMessage(targetAvatar)); return; }
     const startAvatar = targetAvatar;
-    if (!(await askConfirm(STRINGS.manager.confirmDropAsset(label)))) return;
+    /* What the removal costs, said before it happens. A version that pointed at
+       this file keeps pointing at it, and the next time that version is opened
+       the row reads 지정된 그림 없음 - which is a sentence about a file the user
+       deleted on purpose two screens ago and has no reason to connect to this.
+       versionsBindingAsset was written for this and had never been called. */
+    const bound = versionsBindingAsset(s.persona, label);
+    const question = bound.length
+        ? STRINGS.manager.confirmDropAssetBound(label, bound.length)
+        : STRINGS.manager.confirmDropAsset(label);
+    if (!(await askConfirm(question))) return;
     if (startAvatar !== targetAvatar) { notify('error', STRINGS.manager.targetMovedNotDeleted); return; }
     const root = getRoot();
     if (!root) { notify('error', refusalMessage(startAvatar)); return; }
@@ -1381,8 +1409,11 @@ function rowHead() {
     return el('div', 'pm-manager-rowhead');
 }
 
+// pm-mass for the reason the quick panel's banner carries it: the block is
+// already ink, and the inversion that keeps its buttons visible hangs off that
+// class rather than off the banner's own name.
 function bannerOf(className, message) {
-    const box = el('div', `pm-manager-banner ${className}`);
+    const box = el('div', `pm-manager-banner pm-mass ${className}`);
     box.append(el('div', 'pm-manager-banner-text', message));
     return box;
 }
@@ -1887,13 +1918,24 @@ async function doFillDefaults() {
    and been wrong three times. So the counter is SillyTavern's own, the NAME of
    it is treated as unverified, and the line simply omits tokens when the probe
    does not answer a number. */
+/* The probe's answer, remembered for the session. Whether getTokenCount returns
+   a number is a fact about the build, not about the moment, and asking it again
+   per call meant every size line cost TWO counts: one throwaway on the letter a
+   and one on the body. Cleared by nothing, because a build does not change under
+   a running page - and the counter itself is still read fresh per call below,
+   which is the part that is about the moment. */
+let tokenProbe = null;
+
 function tokenCounter() {
     const probeCtx = freshContext();
     if (typeof probeCtx?.getTokenCount !== 'function') return null;
-    try {
-        const probe = probeCtx.getTokenCount('a');
-        if (!Number.isFinite(probe) || probe < 0) return null;
-    } catch { return null; }
+    if (tokenProbe === null) {
+        try {
+            const probe = probeCtx.getTokenCount('a');
+            tokenProbe = Number.isFinite(probe) && probe >= 0;
+        } catch { tokenProbe = false; }
+    }
+    if (!tokenProbe) return null;
     // Asked again per call rather than closed over: a context is only true for
     // the instant it was read, which is the rule at the top of this file. The
     // count is optional either way, so a call that stops answering just drops
@@ -1901,11 +1943,25 @@ function tokenCounter() {
     return text => freshContext()?.getTokenCount?.(text);
 }
 
+/* One slot, the same memo diffPartsFor keeps a few hundred lines down and for the
+   same reason: this is called from inside a draw, and a draw runs for reasons
+   that have nothing to do with the body - a settings save in the background, a
+   persona event, a tab the user came back to. Every one of those re-encoded a
+   few thousand characters and asked SillyTavern's tokenizer about them again to
+   arrive at the line already on screen. The body is the whole of the input, so
+   the body is the whole of the key. */
+let sizeMemoText = null;
+let sizeMemoLine = '';
+
 function sizeTextOf(text) {
-    const size = countSize(text, tokenCounter());
-    return size.tokens === null
+    const key = String(text ?? '');
+    if (sizeMemoText === key) return sizeMemoLine;
+    const size = countSize(key, tokenCounter());
+    sizeMemoLine = size.tokens === null
         ? STRINGS.manager.sizeLine(size.chars, size.bytes)
         : STRINGS.manager.sizeLineTokens(size.chars, size.bytes, size.tokens);
+    sizeMemoText = key;
+    return sizeMemoLine;
 }
 
 // A trailing timer, not a redraw. Two reasons: a redraw mid composition throws
@@ -2815,10 +2871,22 @@ async function changeTargetImage(file) {
    a screen: which persona and version were tapped, and what the user is told
    about each way it can end. A picture that failed to move never rolls back the
    version that was already applied, so every branch below reports and stops. */
+/* A listing still in flight is not an answer. loadAssets sets its avatar
+   synchronously before it awaits, so between the version tab's first draw and the
+   sprites round trip landing there is a window where assetState names the right
+   persona and holds an empty list. Everything that reads the list has to ask the
+   same question, which is why it is asked in one place. */
+function listingReady(avatarId) {
+    return assetState.avatar === avatarId && !assetState.error && !assetState.loading;
+}
+
 async function runBoundImage(avatarId, versionId, force) {
     // The listing this screen already holds, when it is the right persona's.
     // Saves one of the three round trips a version tap would otherwise make.
-    const known = (assetState.avatar === avatarId && !assetState.error) ? assetState.list : null;
+    // An empty list from a load still running would be taken for a complete
+    // answer downstream, and a version bound to a file that exists would be
+    // reported as 지정된 에셋 없음. null sends applyBoundImage to fetch its own.
+    const known = listingReady(avatarId) ? assetState.list : null;
     const result = await runBoundImageWrite(avatarId, versionId, force, known);
     if (!result || result.skipped) return;
     // This screen has its own draw. The shared writer redraws the quick panel,
@@ -2842,6 +2910,10 @@ async function pickBoundAsset(versionId) {
     if (!s) return;
     const startAvatar = targetAvatar;
     if (assetState.avatar !== targetAvatar || assetState.error) { notify('warning', STRINGS.manager.assetOpenTabFirst); return; }
+    // Asked before the emptiness below, because a list that has not arrived is
+    // empty for a reason that has nothing to do with the persona, and telling
+    // the user there are no assets sends them looking for files that are there.
+    if (!listingReady(targetAvatar)) { notify('info', STRINGS.manager.assetListLoading); return; }
     const labels = assetLabels();
     if (!labels.length) { notify('info', STRINGS.manager.assetNoneForPersona); return; }
     const choice = await askChoice(STRINGS.manager.versionImagePick, labels);
@@ -2871,7 +2943,7 @@ function versionImageBlock(version, writable, reason) {
     // list was still empty and the block reported a perfectly good binding as
     // "the file is gone" - which is the one sentence that sends a user looking
     // for a file nothing deleted.
-    const listingOk = assetState.avatar === targetAvatar && !assetState.error && !assetState.loading;
+    const listingOk = listingReady(targetAvatar);
     const view = versionImageState(version, assetLabels(), listingOk);
     const head = view.state === 'none' ? STRINGS.manager.versionImageNone
         : view.state === 'ok' ? view.label
