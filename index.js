@@ -207,7 +207,25 @@ async function init() {
     const onPersona = async () => {
         refresh();
         const avatar = getState()?.avatar ?? null;
-        if (avatar !== lastAvatar) { lastAvatar = avatar; await refreshAssets(); }
+        if (avatar !== lastAvatar) {
+            lastAvatar = avatar;
+            /* The screen first, the listing after. refreshAssets is a round trip
+               to the sprites API, and everything that reacts to pm:changed - the
+               icon beside the send box, an open panel, an open manager - was
+               queued behind it: on a phone talking to a Termux server the icon
+               kept the previous persona's picture for as long as that request
+               took, and for the whole session when it failed. Nothing in that
+               repaint reads the asset list. */
+            document.dispatchEvent(new CustomEvent('pm:changed'));
+            await refreshAssets();
+            /* And the messages already on screen. The per message events only fire
+               for new ones, so a {{pimg::}} tag that resolved to nothing under the
+               previous persona - which is every tag naming a file in THIS
+               persona's folder - stayed as raw text until the chat was reopened.
+               renderInElement writes nothing when no tag resolves, so a sweep that
+               finds nothing costs one pass and changes no node. */
+            renderAll();
+        }
         document.dispatchEvent(new CustomEvent('pm:changed'));
     };
     // 언어별 이름 자동 적용 (user request). The chat is what decides, so the

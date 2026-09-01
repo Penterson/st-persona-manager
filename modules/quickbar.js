@@ -935,7 +935,27 @@ export async function runBoundImageWrite(avatarId, versionId, force, known) {
     const result = await applyBoundImage({
         ctx, root: before, persona: first, avatarId, label, force, known, now,
     });
-    if (!result.ok) return result;
+    if (!result.ok) {
+        /* A failure that still took a backup. The file is ON THE SERVER by then -
+           applyBoundImage copies the picture out of the way before it overwrites
+           anything, and only the steps after that can fail - so the record has to
+           be written here or the picture becomes unreachable: avatarBackup stays
+           null so [원본 되돌리기] answers 보관된 원본 없음, and withoutBackups
+           hides the file from the asset list, the picker and the prompt. Worse, a
+           later apply in a new session finds no record, takes ANOTHER backup, and
+           that one holds the picture the first attempt had already replaced.
+
+           avatarWritten is deliberately not touched: nothing was written to the
+           avatar file, and claiming otherwise would make the next apply skip. */
+        const failed = getRoot();
+        const kept = failed && !failed.readOnly ? getPersona(failed, avatarId) : null;
+        if (result.backup && kept && !kept.avatarBackup) {
+            kept.avatarBackup = result.backup;
+            addLog(kept, 'image-apply', result.backup.label, Date.now());
+            freshContext()?.saveSettingsDebounced?.();
+        }
+        return result;
+    }
     // The address holds a different picture whatever happens next, so the token
     // is bumped before any of the bookkeeping below can return early.
     bumpThumbnails(avatarId);
@@ -1800,11 +1820,19 @@ async function bulkGroup(view) {
     // with its position baked in and resolved back by INDEX. Matching on the name
     // afterwards always found the first of a duplicate pair, and the whole
     // selection went into a group the user did not pick.
-    // Answered by position, which is the only thing that separates two groups
-    // sharing a name, and numbered once rather than twice.
-    const picked = await askChoiceIndex(STRINGS.quick.bulkGroupPrompt, labels.map(l => l.name ?? ''));
+    /* Answered by position, which is the only thing that separates two groups
+       sharing a name, and numbered once rather than twice.
+
+       The list handed over is the one the index counts. askChoiceIndex drops
+       entries that are empty strings, so an unnamed group earlier in the list
+       shifted every later answer by one and the selection went into the group
+       under the one the user read. Filtering here, with the ids alongside, is
+       what makes the index mean the same thing on both sides. */
+    const named = labels.filter(l => String(l.name ?? '').length);
+    if (!named.length) { notify('info', STRINGS.manager.groupsEmpty); return; }
+    const picked = await askChoiceIndex(STRINGS.quick.bulkGroupPrompt, named.map(l => l.name));
     if (picked < 0) return;
-    const pickedId = labels[picked]?.id;
+    const pickedId = named[picked]?.id;
     const after = getRoot();
     if (!after || after.readOnly) return;
     const label = (after.labels ?? []).find(l => l.id === pickedId);
@@ -1824,7 +1852,10 @@ async function bulkDelete() {
     const root = bulkWritableRoot();
     if (!root) return;
     const count = selectedAvatars.filter(a => getPersona(root, a)).length;
-    if (!count) { notify('info', STRINGS.quick.bulkNothing); return; }
+    // Not "nothing selected": the bar directly above says 3개 선택 and means it.
+    // What is missing is managed DATA, which is the normal state for a persona
+    // nobody has pressed 관리 시작 on, and most of a 30 persona roster is that.
+    if (!count) { notify('info', STRINGS.quick.bulkNoManaged(selectedAvatars.length)); return; }
     if (!await askConfirm(STRINGS.quick.confirmBulkDelete(count))) return;
     const after = getRoot();
     if (!after || after.readOnly) return;
@@ -1860,12 +1891,24 @@ function bulkBar(view, writable) {
         everyVisiblePicked() ? STRINGS.quick.selectNone : STRINGS.quick.selectAll);
     pickAll.type = 'button';
     pickAll.dataset.pmPickall = '1';
+    // Nothing on screen is nothing to select. The assignment below would read
+    // that as "select none" and clear a selection made on another page.
+    if (!rosterVisible.length) { pickAll.disabled = true; pickAll.classList.add('pm-disabled'); }
     pickAll.addEventListener('click', () => {
-        // Scoped to what is on screen, which is what the user can see they are
-        // choosing. A filter, a search and the page cut are all part of the
-        // question they asked, and all three are applied by the time the list
-        // publishes what it drew.
-        selectedAvatars = everyVisiblePicked() ? [] : [...rosterVisible];
+        /* Scoped to what is on screen, which is what the user can see they are
+           choosing: a filter, a search and the page cut are all part of the
+           question they asked, and all three are applied by the time the list
+           publishes what it drew.
+
+           A union and a difference, not an assignment. The assignment was scoped
+           correctly and still wrong in the other direction: it dropped everything
+           picked on a page or a search the user had since left, silently, at the
+           moment they asked for MORE. Selecting three on page one and pressing
+           this on page two left four selected rather than seven. */
+        if (!rosterVisible.length) return;
+        selectedAvatars = everyVisiblePicked()
+            ? selectedAvatars.filter(avatar => !rosterVisible.includes(avatar))
+            : [...new Set([...selectedAvatars, ...rosterVisible])];
         scheduleDraw();
     });
     row.append(pickAll);
@@ -2179,7 +2222,13 @@ function personaLanguage(root, avatar) {
 function publishVisible(avatars) {
     rosterVisible = avatars;
     const pickAll = document.getElementById(PANEL_ID)?.querySelector('[data-pm-pickall]');
-    if (pickAll) pickAll.textContent = everyVisiblePicked() ? STRINGS.quick.selectNone : STRINGS.quick.selectAll;
+    if (!pickAll) return;
+    pickAll.textContent = everyVisiblePicked() ? STRINGS.quick.selectNone : STRINGS.quick.selectAll;
+    // The dead state travels with the label. A keystroke repaints the LIST alone,
+    // so a bar built while rows were on screen kept a live button over an empty
+    // one - and the handler behind it is the one that must never run there.
+    pickAll.disabled = !rosterVisible.length;
+    pickAll.classList.toggle('pm-disabled', !rosterVisible.length);
 }
 
 function fillRosterList(container, prebuilt) {

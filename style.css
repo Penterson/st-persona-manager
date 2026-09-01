@@ -3023,3 +3023,36 @@
         --pm-on-mass: rgb(from var(--SmartThemeBlurTintColor) r g b / 1);
     }
 }
+
+/* ── 2회차 보정 ─────────────────────────────────────────────────────────────
+   같은 규칙: 앞에 선 규칙이 여전히 의도를 말하고, 여기서는 캐스케이드만 바로잡는다. */
+
+/* 위 보정 블록이 스스로 만든 구멍. .pm-manager-target 의 누름 상태(.pm-manager-target:active)
+   와 잉크 블록 위 반전(.pm-mass .pm-manager-target)은 특이도가 같고 반전이 뒤에 있어서
+   background 를 가져간다. 그런데 이 버튼은 항상 .pm-manager-header.pm-mass 안에 있으므로,
+   누름 표시를 주려고 넣은 규칙이 그 대상이 실제로 존재하는 유일한 자리에서만 무효였다.
+   탭 하이라이트도 꺼져 있어 관리자 헤더의 페르소나 버튼만 눌러도 아무 반응이 없었다. */
+.pm-mass .pm-manager-target:active {
+    background: color-mix(in srgb, var(--pm-on-mass) 28%, transparent);
+}
+
+@media (hover: hover) {
+    .pm-mass .pm-manager-target:hover {
+        background: color-mix(in srgb, var(--pm-on-mass) 22%, transparent);
+    }
+}
+
+/* min-width: 40px 는 플렉스 항목의 자동 최소 크기(min-width: auto)를 대체한다. 그래서
+   40px 바닥을 세우는 대신 버튼이 자기 글자보다 좁아질 수 있게 만들었고, 라벨은
+   white-space: nowrap 이라 상자 밖으로 삐져나왔다. 줄은 이미 wrap 하므로, 줄이는 대신
+   줄을 넘기는 것이 이 행이 원래 하기로 한 일이다. */
+.pm-manager-btn {
+    flex-shrink: 0;
+}
+
+/* 언어별 이름 행: 이름이 길면 [목록]과 [채팅]이 서로 다른 줄로 찢어져, 한 쌍으로 읽어야
+   하는 두 버튼이 다른 것에 딸린 것처럼 보였다. 이름 부분이 항상 자기 줄을 차지하면
+   두 버튼은 반드시 같은 줄에 남는다. 행 자체는 이미 wrap 한다. */
+.pm-manager-valuerow .pm-manager-nameedit {
+    flex: 1 1 100%;
+}

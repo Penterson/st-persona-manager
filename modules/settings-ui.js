@@ -62,21 +62,42 @@ function panel() {
    only moment it can grow, so there is no sweep of its own over there. Lowering
    the number is the other moment it can be exceeded, and it happens here. Drops
    from the FRONT, exactly as snapshot() does, so the oldest go first. */
-function trimPerVariant(root, settings) {
+function trimPerVariant(root, settings, now = Date.now()) {
     const cap = Number(settings?.historyPerVariant ?? 0);
     if (!Number.isFinite(cap) || cap < 0) return 0;
     let dropped = 0;
     for (const persona of Object.values(root?.personas ?? {})) {
         const history = persona?.history;
         if (!history || typeof history !== 'object') continue;
+        let mine = 0;
         for (const [variantId, list] of Object.entries(history)) {
             if (!Array.isArray(list) || list.length <= cap) continue;
-            dropped += list.length - cap;
+            mine += list.length - cap;
             if (cap === 0) delete history[variantId];
             else list.splice(0, list.length - cap);
         }
+        /* The rule history.js states where its own two sweeps obey it: history
+           that vanishes without a line is indistinguishable from data loss. This
+           sweep arrived without one, which made it the only way to delete stored
+           history and leave the 변경 기록 list saying nothing happened. */
+        if (mine) addLog(persona, 'history-expired', STRINGS.manager.logDetails.expired(mine), now);
+        dropped += mine;
     }
     return dropped;
+}
+
+/* Whether a new value for one of the three history caps can DESTROY what is
+   already stored. Raising a cap never can, and 0 means "never expire" for the age
+   cap, so there 0 is the loosest value rather than the tightest. */
+const HISTORY_CAPS = new Set(['historyMaxBytes', 'historyMaxDays', 'historyPerVariant']);
+
+function tightensCap(key, previous, next) {
+    if (!HISTORY_CAPS.has(key) || typeof previous !== 'number') return false;
+    if (key === 'historyMaxDays') {
+        if (next === 0) return false;
+        return previous === 0 || next < previous;
+    }
+    return next < previous;
 }
 
 /* Field builders */
@@ -127,28 +148,47 @@ function numberField(key, labelText, hint) {
     input.step = String(range.step);
     input.inputMode = 'numeric';
     input.dataset.pmKey = key;
-    const apply = () => {
+    const apply = async () => {
         const root = getRoot();
         if (!root || root.readOnly) { syncFields(); return; }
         const value = clampSetting(key, input.value);
-        root.settings[key] = value;
+        const previous = root.settings[key];
+        if (value === previous) { input.value = String(value); return; }
         /* A lowered cap that only applies to snapshots taken from now on is a
            control that does nothing for the person who went looking for it: the
-           reason to lower it is the history that is already there. Both passes are
-           the same ones every save runs, so this adds no new rule, only the moment
-           the user asked for it. Run for the two caps that bound stored history and
-           for nothing else. */
-        if (key === 'historyMaxBytes' || key === 'historyMaxDays' || key === 'historyPerVariant') {
+           reason to lower it is the history that is already there. But it is also
+           a delete, and it used to happen on the change event with no question and
+           no trace - including when the box was merely EMPTIED, because an empty
+           box clamps to the shipped default and the shipped default is lower than
+           what most people raise these to. So the question is asked first, and
+           what went is said afterwards. */
+        const destructive = tightensCap(key, previous, value);
+        if (destructive && !(await askConfirm(STRINGS.settings.confirmTightenCap))) {
+            // Nothing written. The field goes back to what is still stored.
+            syncFields();
+            return;
+        }
+        // Re-read: the question above is an await, and an import can replace the
+        // whole root while it is on screen.
+        const after = getRoot();
+        if (!after || after.readOnly) { syncFields(); return; }
+        after.settings[key] = value;
+        let dropped = 0;
+        if (destructive) {
             const now = Date.now();
-            expireOldHistory(root, root.settings, now);
-            trimPerVariant(root, root.settings);
-            enforceGlobalBudget(root, root.settings, now);
+            dropped = expireOldHistory(after, after.settings, now)
+                + trimPerVariant(after, after.settings, now)
+                + enforceGlobalBudget(after, after.settings, now);
         }
         // Written back into the field so the user sees what was actually stored
         // rather than the out of range number they typed.
         input.value = String(value);
         save();
-        syncFields();
+        if (dropped) notify('info', STRINGS.settings.historyTrimmed(dropped));
+        // The usage figure sits directly above these fields and has just stopped
+        // being true. refreshSettings recomputes it; syncFields alone does not.
+        if (dropped) refreshSettings();
+        else syncFields();
     };
     input.addEventListener('change', apply);
     // There is nothing to compose in a numeric field on most

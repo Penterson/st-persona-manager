@@ -534,10 +534,17 @@ export function registerAssetMacros(ctx, getState) {
         // template with an empty list where the filenames should be.
         if (!active.length) return '';
         const names = active.join(', ');
+        /* A macro runs while SillyTavern is building a prompt, and a throw there
+           takes the whole generation with it. On a root written by a NEWER build
+           migrate returns before it backfills defaults, so this setting is
+           undefined and calling replace on it threw - the one state where nothing
+           on screen would explain why sending a message stopped working. */
+        const template = s.settings.assetPromptTemplate;
+        if (typeof template !== 'string') return '';
         // A string pattern replaces the first occurrence only, and a filename holding
         // $& or a dollar sequence would be read as a replacement directive. A function
         // replacement is taken literally.
-        return s.settings.assetPromptTemplate.replace(/\{\{persona_assets\}\}/g, () => names);
+        return template.replace(/\{\{persona_assets\}\}/g, () => names);
     });
 }
 

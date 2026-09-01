@@ -2047,13 +2047,31 @@ function saveFullText() {
     // saves and composes.
     if (!commit(null, '', startAvatar)) return;
     notify('info', STRINGS.manager.fullTextSaved(plan.writes.length));
-    // The screen's baseline is what is now stored. Without this the dirty count
-    // would keep asking about edits that have already been saved, and a body that
-    // was emptied would keep a textarea that the prompt no longer carries.
-    const after = getPersona(getRoot(), startAvatar);
-    if (after) {
-        fullBlocks = buildReplaceBlocks(after, true);
-        fullTexts = fullBlocks.map(block => block.text);
+    /* The screen's baseline is what is now stored, for the bodies that were
+       actually written. Without this the dirty count would keep asking about
+       edits that have already been saved, and a body that was emptied would keep
+       a textarea the prompt no longer carries.
+
+       Only those, and each block keeps the (item, choice) it was DRAWN from.
+       Rebuilding every block from the persona re-pointed them at whichever choice
+       is active NOW, and a version applied on another tab moves exactly that. The
+       block then named a different choice while the textarea still held the
+       typing meant for the old one, planFullTextSave's picked !== variantId guard
+       stopped refusing it, and the second [전체 저장] wrote one choice's text into
+       another - silently, because the first save had already reported the skip.
+       Reproduced in jsdom before this was written.
+
+       A block whose choice moved therefore keeps being skipped and keeps saying
+       so on every save, which is the honest answer: the target it was typed for
+       is not on screen any more. */
+    const written = new Map(plan.writes.map(write => [write.variantId, write.after]));
+    if (written.size) {
+        fullBlocks = fullBlocks.map(block => (written.has(block.variantId)
+            ? { ...block, text: written.get(block.variantId) }
+            : block));
+        fullTexts = fullBlocks.map((block, index) => (written.has(block.variantId)
+            ? block.text
+            : (fullTexts?.[index] ?? block.text)));
     }
 }
 
@@ -4715,6 +4733,12 @@ function tabsRow() {
             // kept under this variant's key rather than dropped. A confirmation
             // here would be a question the user has to answer to change tab.
             stashDraft();
+            // The picker covers the whole body and returns before the tab content
+            // is ever built, so pressing a tab underneath it moved the underline
+            // and left the same picker on screen - in copy mode, still armed to
+            // copy onto whatever row was tapped next.
+            pickerOpen = false;
+            pickerMode = 'target';
             managerTab = key;
             // The open row belongs to the tab being left, and every tab keys its
             // rows differently, so it has nothing to reopen on the new one.

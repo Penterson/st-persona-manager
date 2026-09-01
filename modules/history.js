@@ -15,7 +15,13 @@ export function snapshot(persona, variantId, previousText, now, settings) {
     if (cap <= 0) return false;
 
     if (!persona.history) persona.history = {};
-    const list = persona.history[variantId] ?? [];
+    // Array.isArray and not `?? []`: the two sweeps below this one already check,
+    // and this one did not - so a history value of the wrong shape out of a hand
+    // edited settings.json threw on the push, inside the save path, which is the
+    // one moment the user's edit exists nowhere else. A value nothing can read is
+    // replaced rather than pushed onto.
+    const stored = persona.history[variantId];
+    const list = Array.isArray(stored) ? stored : [];
     const last = list[list.length - 1];
 
     if (last && last.text === previousText) return false;
