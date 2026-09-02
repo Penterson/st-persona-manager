@@ -2353,7 +2353,9 @@ async function editLorebook(current) {
 // One label, one value and the control that changes it, on a line the thumb can
 // reach. Used for the two placement fields that are not enums.
 function valueRow(label, value, buttonLabel, onClick, enabled, reason) {
-    const row = el('div', 'pm-row pm-manager-valuerow');
+    // Tight for the reason the name rows are: a long lorebook name used to grow
+    // this row and push [연결] onto a line of its own, so one form read as two.
+    const row = el('div', 'pm-row pm-manager-valuerow pm-manager-tightrow');
     row.append(el('span', 'pm-manager-picklabel', label));
     row.append(el('span', 'pm-manager-value', value));
     row.append(actionButton(buttonLabel, onClick, enabled, '', reason));
@@ -2616,22 +2618,34 @@ function nameScopeButtons(name, writable, reason, onList, onChat) {
     return [list, chat];
 }
 
+/* [목록] and [채팅] as one object.
+
+   They were appended loose into a wrapping row, so when the value beside them
+   grew the row broke BETWEEN them and the two halves of one choice ended up on
+   different lines, reading as if each belonged to something else. 0.1.17 chased
+   this by giving the value its own full-width line, which cost every row three
+   lines whether it needed them or not. Held in one box, the pair either fits
+   beside the value or leaves the line together. */
+function scopePair(buttons) {
+    const box = el('div', 'pm-manager-namescope');
+    for (const button of buttons) box.append(button);
+    return box;
+}
+
 function personaBox(ctx, s, writable, reason) {
     const name = ctx?.powerUserSettings?.personas?.[s.avatar] ?? s.avatar ?? '';
     const box = foldBox('pm-manager-fold', STRINGS.manager.personaHead, name, personaOpen,
         () => { personaOpen = !personaOpen; scheduleDraw(); });
     if (!personaOpen) return box;
 
-    const nameRow = el('div', 'pm-row pm-manager-valuerow');
+    const nameRow = el('div', 'pm-row pm-manager-valuerow pm-manager-tightrow');
     nameRow.append(el('span', 'pm-manager-picklabel', STRINGS.manager.renamePersona));
     nameRow.append(el('span', 'pm-manager-value', name));
     // Both buttons ask for the new name first; they differ only in how far it
     // reaches. The dead one carries the reason, which is how this screen teaches
     // the difference instead of explaining it in a paragraph.
-    for (const button of nameScopeButtons(name, writable, reason,
-        () => renameTargetPersona(false), () => renameTargetPersona(true))) {
-        nameRow.append(button);
-    }
+    nameRow.append(scopePair(nameScopeButtons(name, writable, reason,
+        () => renameTargetPersona(false), () => renameTargetPersona(true))));
     box.append(nameRow);
 
     // The file input lives in the tree rather than being made on demand, the same
@@ -2715,7 +2729,9 @@ function localNamesBox(ctx, s, writable, reason) {
     // glyph and not a colour (no colour-only state).
     const current = chatLanguage(freshContext()?.chat);
     for (const lang of NAME_LANGUAGES) {
-        const row = el('div', 'pm-row pm-manager-valuerow');
+        // A tight row: the value truncates rather than growing the row, and the
+        // two buttons beside it move as one.
+        const row = el('div', 'pm-row pm-manager-valuerow pm-manager-tightrow');
         row.append(checkMark(lang === current));
         // The language and its name are one button, the way every other row on
         // this screen puts its identity in one: three buttons do not fit a 411px
@@ -2734,10 +2750,8 @@ function localNamesBox(ctx, s, writable, reason) {
         // Click only. A button needs no keydown of its own.
         if (writable) edit.addEventListener('click', () => editLocalName(lang));
         row.append(edit);
-        for (const button of nameScopeButtons(stored[lang], writable, reason,
-            () => applyLocalName(lang, false), () => applyLocalName(lang, true))) {
-            row.append(button);
-        }
+        row.append(scopePair(nameScopeButtons(stored[lang], writable, reason,
+            () => applyLocalName(lang, false), () => applyLocalName(lang, true))));
         box.append(row);
     }
     // Always drawn, including when it answers nothing: an automatic rule that did
