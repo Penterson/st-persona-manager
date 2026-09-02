@@ -2723,16 +2723,35 @@ function localNamesBox(ctx, s, writable, reason) {
     if (!namesOpen) return box;
     const base = ctx?.powerUserSettings?.personas?.[s.avatar] ?? '';
     if (base) box.append(noteOf(STRINGS.manager.localNameBase(base)));
-    // The CHAT's language, not the description's: that is what the automatic rule
-    // acts on, so the check has to mark the row that rule would use. The mark is
-    // the same one every other current-state row on this screen uses, so it is a
-    // glyph and not a colour (no colour-only state).
+    /* The check marks the name that is IN EFFECT, which is what the same glyph
+       under the same heading means in the quick panel (quickbar.js namesGroup:
+       `entry.name === current`, current being SillyTavern's own name for this
+       persona). It used to mark the CHAT's language here instead, so with a
+       Korean list name and a Japanese chat the two screens ticked different rows
+       at the same moment and nothing on either screen said which fact it was
+       showing. The chat language is still reported, in its own sentence below.
+
+       The emptiness guard is needed here and not there: the quick panel lists
+       only languages that have a name, this screen lists all four including
+       없음, and without it a persona whose list name is blank would tick every
+       unregistered row at once.
+
+       Trimmed on OUR side only, which is exactly what the panel does: it trims
+       the names we store and compares them to SillyTavern's raw. Trimming both
+       looked tidier and broke the very thing this is here for - a list name
+       carrying a trailing space, which only SillyTavern's own rename can
+       produce, made this screen tick a row the panel left blank. */
+    const appliedName = String(base ?? '');
+    const isApplied = lang => {
+        const name = String(stored[lang] ?? '').trim();
+        return !!name && name === appliedName;
+    };
     const current = chatLanguage(freshContext()?.chat);
     for (const lang of NAME_LANGUAGES) {
         // A tight row: the value truncates rather than growing the row, and the
         // two buttons beside it move as one.
         const row = el('div', 'pm-row pm-manager-valuerow pm-manager-tightrow');
-        row.append(checkMark(lang === current));
+        row.append(checkMark(isApplied(lang)));
         // The language and its name are one button, the way every other row on
         // this screen puts its identity in one: three buttons do not fit a 411px
         // row and the third would have been 수정, which edits OUR record rather
@@ -2754,6 +2773,10 @@ function localNamesBox(ctx, s, writable, reason) {
             () => applyLocalName(lang, false), () => applyLocalName(lang, true))));
         box.append(row);
     }
+    // What the glyph on the language rows means. Said on the screen because this
+    // box draws TWO kinds of check: these, and the switch state on the 자동 적용
+    // row below. The sentence names which rows it is about for that reason.
+    box.append(noteOf(STRINGS.manager.localNameAppliedHint));
     // Always drawn, including when it answers nothing: an automatic rule that did
     // not fire is indistinguishable from one that is broken unless the screen
     // says what it read.
@@ -2774,10 +2797,17 @@ function localNamesBox(ctx, s, writable, reason) {
     autoRow.append(actionButton(auto ? STRINGS.manager.autoNameTurnOff : STRINGS.manager.autoNameTurnOn,
         () => toggleAutoName(), writable, '', reason));
     box.append(autoRow);
-    // Why the automatic rule is sitting still, when it is: the name it would
-    // apply is already somebody else's in this chat. Drawn only when it is true.
-    const wanted = current ? (stored[current] ?? '') : '';
-    const clash = wanted
+    /* Why the automatic rule is sitting still, when it is: the name it would
+       apply is already somebody else's in this chat. Drawn only when it is true.
+
+       A name that is ALREADY in force is not a candidate, so it cannot have been
+       skipped over a clash. pickAutoName says so first (quickbar-pure.js: `if
+       (map[avatar] === name) return null`) and never reaches the clash test. This
+       line did reach it, and with the check now marking the applied name the two
+       statements met on one screen: a tick saying 적용됨 and a sentence under it
+       saying 동명이라 건너뜀, about the same name. */
+    const wanted = current ? String(stored[current] ?? '').trim() : '';
+    const clash = (wanted && wanted !== appliedName)
         ? nameCollides({ name: wanted, characterName: ctx?.name2, chat: ctx?.chat })
         : null;
     if (clash) box.append(noteOf(STRINGS.manager.autoNameClashSkipped(wanted, clash)));

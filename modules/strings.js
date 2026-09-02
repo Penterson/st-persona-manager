@@ -466,6 +466,17 @@ export const STRINGS = deepFreeze({
         localNamePrompt: lang => `${lang} 이름 (빈 칸은 삭제)`,
         localNameSaved: '이름 저장 완료',
         localNameRemoved: '이름 삭제 완료',
+        /* What the check on the LANGUAGE rows means, and it has to say which rows:
+           the same box draws a second check, on 자동 적용, that means a switch is
+           on. autoLocalName ships true and chatLanguage answers nothing under 40
+           characters, so a new chat routinely shows no ticked language row at all
+           and the only check on screen is that switch.
+
+           Named as the SillyTavern name rather than 현재 적용된 이름, because the
+           manager can be pointed at a persona that is not the one playing: there
+           '적용' would be read against the chat, and the chat is somebody else's.
+           It also borrows the wording localNameBase already prints two rows up. */
+        localNameAppliedHint: '언어 행의 체크 표시는 SillyTavern 이름',
         localNameCurrent: '현재 채팅 언어',
         // A silent no-op is the failure mode this feature can have: the chat is
         // too short, or this build hands us no chat at all, and nothing happens
