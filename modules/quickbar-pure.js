@@ -219,15 +219,33 @@ export function pickApplicable(persona, sectionId, variantId) {
 // A pick that names a deleted variant fails too: applying it would put a pick in the
 // live combination that no longer selects anything, and the section it belongs to
 // would drop out of the composed description.
+//
+// A pick for a SECTION deleted since the version was saved is skipped. removeSection
+// leaves the key in every version on purpose (nothing is silently rewritten), and
+// compose reads only sections that exist, so the key selects nothing either way.
+// Failing on it made every version saved before a section delete unappliable for
+// good, with a reason pointing at a [⋯] whose detail has no row for a section that
+// is gone - nothing on screen could repair it.
 export function versionApplicable(persona, versionId) {
-    const version = (persona?.versions ?? []).find(v => v.id === versionId);
+    const version = (persona?.versions ?? []).find(v => v?.id === versionId);
     if (!version) return false;
+    const living = new Set((persona.sections ?? []).map(section => section?.id));
     // Own enumerable keys only, which is what a picks object saved into settings.json
     // carries; nothing reachable through Object.prototype is treated as a pick.
     for (const [sectionId, variantId] of Object.entries(version.picks ?? {})) {
+        if (!living.has(sectionId)) continue;
         if (!pickApplicable(persona, sectionId, variantId)) return false;
     }
     return true;
+}
+
+// The version is the one marked active and the live combination still equals it,
+// so applying it again would write the same text, log the same line and queue the
+// same picture upload a second time (a double tap did exactly that).
+export function versionAlreadyApplied(persona, versionId) {
+    if (!persona || persona.activeVersionId !== versionId) return false;
+    const version = (persona.versions ?? []).find(v => v?.id === versionId);
+    return !!version && picksEqual(persona.activePicks, version.picks);
 }
 
 function picksEqual(a, b) {

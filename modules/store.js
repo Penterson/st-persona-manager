@@ -1,9 +1,29 @@
 // Data model, defaults, migration and size accounting.
 // Pure: no DOM, no getContext. Everything is passed in.
 import { STRINGS } from './strings.js';
+import { validCrop } from './framing.js';
 
 export const MODULE_NAME = 'persona-manager';
-export const SCHEMA_VERSION = 1;
+/* 2 (0.1.24): lastComposed, a full copy of the composed description per persona,
+   became composedSig, a fingerprint of it. A build on 1 reading a 2 root would
+   find no baseline and call every persona's description an outside edit, so it
+   is kept off this root the way every older build is kept off a newer one. */
+export const SCHEMA_VERSION = 2;
+
+/* What this extension last gave SillyTavern, as a fingerprint rather than a copy.
+   The copy was a fifth of everything this extension stores (measured 21% of an
+   18.9MB tree), and every SillyTavern save serializes all of it, on every tap
+   that writes. The only question ever asked of it is whether SillyTavern's text
+   is still that text, and a length plus a 32 bit FNV-1a hash answers that. */
+export function textSignature(text) {
+    const s = String(text ?? '');
+    let h = 0x811c9dc5;
+    for (let i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i);
+        h = Math.imul(h, 0x01000193);
+    }
+    return `${s.length}:${(h >>> 0).toString(36)}`;
+}
 
 // There is deliberately no master "enabled" flag. One was defined here and read
 // nowhere, and honouring it would have been the wrong repair: SillyTavern's extension
@@ -30,6 +50,9 @@ export const DEFAULT_SETTINGS = Object.freeze({
     // names, so the switch does nothing for them whichever way it is set.
     autoLocalName: true,
     defaultHeadingFormat: 'none',
+    // 가져오기 자동 분류 (user request, 2026-10-24). On: it only acts when the
+    // description has titles naming items, and otherwise adopting is unchanged.
+    splitOnAdopt: true,
     assetStyle: 'plain',
     // The words live in strings.js, this names which ones.
     assetPromptTemplate: STRINGS.settings.assetPromptDefault,
@@ -123,9 +146,21 @@ export function migrate(root) {
        them in: a shape we do not recognise under a key we own is worth clearing,
        but only on a root this build is allowed to write. Readers still go through
        boundAsset, so a hand edited file cannot reach them either way. */
+    // Schema 1 to 2: the full copy becomes its fingerprint (see textSignature).
+    for (const persona of Object.values(root.personas)) {
+        if (!persona || typeof persona !== 'object' || !('lastComposed' in persona)) continue;
+        if (typeof persona.composedSig !== 'string') {
+            persona.composedSig = typeof persona.lastComposed === 'string' ? textSignature(persona.lastComposed) : null;
+        }
+        delete persona.lastComposed;
+    }
+    root.schemaVersion = SCHEMA_VERSION;
     for (const persona of Object.values(root.personas)) {
         if (!persona || typeof persona !== 'object') continue;
         if (persona.avatarWritten !== null && typeof persona.avatarWritten !== 'string') persona.avatarWritten = null;
+        for (const version of Array.isArray(persona.versions) ? persona.versions : []) {
+            if (version && typeof version === 'object' && 'avatarCrop' in version) version.avatarCrop = validCrop(version.avatarCrop);
+        }
         const backup = persona.avatarBackup;
         if (backup !== null && (typeof backup !== 'object' || typeof backup?.label !== 'string')) persona.avatarBackup = null;
         // Guaranteed an array by the backfill above, which runs before the
@@ -183,7 +218,8 @@ export function makeDefaultPersona(makeIdFn, headingFormat) {
         headingFormat: HEADING_FORMATS.includes(headingFormat) ? headingFormat : 'none',
         history: {}, log: [], assets: {},
         assetFolderKey: null,
-        lastComposed: '',
+        // The fingerprint of what SillyTavern was last given; null is the empty text.
+        composedSig: null,
         tags: [],
         /* Replacing a persona picture OVERWRITES SillyTavern's avatar file, so
            the first time a bound image is written the picture that was there is
@@ -233,6 +269,11 @@ export function isEmptyPersona(p) {
        deleted both without a word. */
     if ((p.tags ?? []).length) return false;
     if (Object.values(p.names ?? {}).some(name => String(name ?? '').trim())) return false;
+    // The same hole, for pictures. The folder key points at sprites the user
+    // uploaded, and the backup names the copy of the original avatar taken before
+    // the first overwrite; both live on the server, and this record is the only
+    // way back to them.
+    if (p.assetFolderKey || p.avatarBackup) return false;
     // Count actual history entries, not variant keys: a key holding an empty
     // array must not count as history content.
     for (const list of Object.values(p.history ?? {})) {

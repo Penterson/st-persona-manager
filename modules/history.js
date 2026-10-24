@@ -4,13 +4,30 @@ import { STRINGS } from './strings.js';
 
 const LOG_CAP = 200;
 
+// Lines the extension writes about itself rather than about something the user
+// did. compose-missing came back on every save while any pick was dead, and
+// history-evicted on every save once the budget was full, so the 200 line cap
+// filled with copies of one line and pushed the user's own record out. The same
+// line as the last one only moves that line's time.
+const REPEATING_KINDS = new Set(['compose-missing', 'history-evicted', 'history-expired']);
+
 export function addLog(persona, kind, detail, now) {
-    if (!persona.log) persona.log = [];
+    // A value of the wrong shape out of a hand edited settings.json threw on the
+    // push, inside the save path.
+    if (!Array.isArray(persona.log)) persona.log = [];
+    const last = persona.log[persona.log.length - 1];
+    if (REPEATING_KINDS.has(kind) && last?.kind === kind && last.detail === detail) {
+        last.at = now;
+        return;
+    }
     persona.log.push({ at: now, kind, detail });
     if (persona.log.length > LOG_CAP) persona.log.splice(0, persona.log.length - LOG_CAP);
 }
 
-export function snapshot(persona, variantId, previousText, now, settings) {
+// force skips the merge window and nothing else: a write that moves text out of
+// a body (제목별 분류) has to leave the body it replaced in history even when the
+// last save was a minute ago, because its success message promises exactly that.
+export function snapshot(persona, variantId, previousText, now, settings, { force = false } = {}) {
     const cap = settings.historyPerVariant ?? 0;
     if (cap <= 0) return false;
 
@@ -26,7 +43,7 @@ export function snapshot(persona, variantId, previousText, now, settings) {
 
     if (last && last.text === previousText) return false;
     const windowMs = (settings.historyCoalesceMinutes ?? 0) * 60_000;
-    if (last && now - last.at < windowMs) return false;
+    if (!force && last && now - last.at < windowMs) return false;
 
     list.push({ at: now, text: previousText });
     if (list.length > cap) list.splice(0, list.length - cap);
@@ -198,13 +215,33 @@ function lcsTable(a, b) {
     return table;
 }
 
+/* The tokens both sides open and close with. A snapshot is an earlier copy of the
+   same body, so most of it is shared and the change sits somewhere in the middle;
+   the table only has to cover that middle. Without this a 3,300 character body
+   built a 1.2 million cell table (4.7MB, about 6ms on the desktop and an
+   estimated 60 to 120ms on the phone) inside the tap that opens a snapshot, to
+   find a change of a few words. Shared ends are part of every longest common
+   subsequence, so the result is still a longest one. */
+function commonEnds(a, b) {
+    let start = 0;
+    while (start < a.length && start < b.length && a[start] === b[start]) start++;
+    let endA = a.length;
+    let endB = b.length;
+    while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) { endA--; endB--; }
+    return { start, endA, endB };
+}
+
 function fitsTable(a, b) {
-    return (a.length + 1) * (b.length + 1) <= MAX_DIFF_CELLS;
+    const { start, endA, endB } = commonEnds(a, b);
+    return (endA - start + 1) * (endB - start + 1) <= MAX_DIFF_CELLS;
 }
 
 // The LCS walk itself, over whatever tokens it was handed.
 function lcsParts(a, b) {
-    const table = lcsTable(a, b);
+    const { start, endA, endB } = commonEnds(a, b);
+    const ma = a.slice(start, endA);
+    const mb = b.slice(start, endB);
+    const table = lcsTable(ma, mb);
 
     const parts = [];
     const push = (type, text) => {
@@ -213,15 +250,17 @@ function lcsParts(a, b) {
         else parts.push({ type, text });
     };
 
+    for (let k = 0; k < start; k++) push('same', a[k]);
     let i = 0;
     let j = 0;
-    while (i < a.length && j < b.length) {
-        if (a[i] === b[j]) { push('same', a[i]); i++; j++; }
-        else if (table[i + 1][j] >= table[i][j + 1]) { push('del', a[i]); i++; }
-        else { push('add', b[j]); j++; }
+    while (i < ma.length && j < mb.length) {
+        if (ma[i] === mb[j]) { push('same', ma[i]); i++; j++; }
+        else if (table[i + 1][j] >= table[i][j + 1]) { push('del', ma[i]); i++; }
+        else { push('add', mb[j]); j++; }
     }
-    while (i < a.length) push('del', a[i++]);
-    while (j < b.length) push('add', b[j++]);
+    while (i < ma.length) push('del', ma[i++]);
+    while (j < mb.length) push('add', mb[j++]);
+    for (let k = endA; k < a.length; k++) push('same', a[k]);
     return parts;
 }
 

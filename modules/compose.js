@@ -5,6 +5,22 @@
 // adds none. Exported because the 전문 screen shows the composed text the way the
 // prompt receives it, and a second copy of this rule over there would be free to
 // drift away from the one the prompt actually uses.
+import { textSignature } from './store.js';
+
+// The fingerprint a persona's description is compared against. A record from
+// before schema 2 that still holds the copy is read through it until migrate
+// converts it.
+export function baselineSignature(persona) {
+    if (typeof persona?.composedSig === 'string') return persona.composedSig;
+    if (typeof persona?.lastComposed === 'string') return textSignature(persona.lastComposed);
+    return textSignature('');
+}
+
+export function markComposed(persona, text) {
+    persona.composedSig = textSignature(text);
+    delete persona.lastComposed;
+}
+
 export function headingLine(format, name) {
     if (format === 'plain') return `${name}:`;
     if (format === 'markdown') return `## ${name}`;
@@ -146,7 +162,7 @@ export function writeDescription(ctx, avatarId, persona, activeAvatar) {
 
     // Update our baseline BEFORE emitting, so the event we are about to fire
     // cannot be mistaken for an outside edit. Idempotence, not a flag.
-    persona.lastComposed = result.text;
+    markComposed(persona, result.text);
 
     ctx.saveSettingsDebounced();
     ctx.eventSource.emit(ctx.event_types.PERSONA_UPDATED, avatarId);
@@ -160,5 +176,5 @@ export function writeDescription(ctx, avatarId, persona, activeAvatar) {
 export function hasDiverged(ctx, avatarId, persona) {
     const descriptor = ctx.powerUserSettings?.persona_descriptions?.[avatarId];
     if (!descriptor) return false;
-    return (descriptor.description ?? '') !== (persona.lastComposed ?? '');
+    return textSignature(descriptor.description ?? '') !== baselineSignature(persona);
 }

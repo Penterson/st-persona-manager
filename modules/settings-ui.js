@@ -622,12 +622,25 @@ function refreshIdentify() {
 // only place that asks for it. It stringifies the whole tree, so it runs when the
 // drawer is opened, when the user asks again, and after the two buttons that
 // change how much is stored. Never on an event.
+/* The usage line serializes and encodes the whole root, which was measured at
+   6.6ms for 1.8MB on the desktop and is several MB on the phone. It ran inside
+   the tap that opens the drawer, so the drawer did not open until it was done.
+   The number now follows a frame later; the line keeps its last value meanwhile,
+   and a burst of refreshes (a prune followed by its save) computes once. */
+let usageTimer = 0;
+
 function refreshSettings() {
     const box = panel();
     if (!box) return;
     syncFields();
     refreshIdentify();
-    const usage = box.querySelector('.pm-settings-usage');
+    if (!box.querySelector('.pm-settings-usage')) return;
+    if (usageTimer) return;
+    usageTimer = setTimeout(() => { usageTimer = 0; paintUsage(); }, 50);
+}
+
+function paintUsage() {
+    const usage = panel()?.querySelector('.pm-settings-usage');
     if (!usage) return;
     const bytes = readUsageBytes();
     const warnBytes = getRoot()?.settings?.warnBytes;
@@ -753,6 +766,7 @@ function buildPanel() {
     // switches rather than with the asset ones: it changes what the persona is
     // called, which is what the roster and the chat show.
     content.append(toggleField('autoLocalName', STRINGS.settings.autoLocalName, STRINGS.settings.autoLocalNameHint));
+    content.append(toggleField('splitOnAdopt', STRINGS.settings.splitOnAdopt, STRINGS.settings.splitOnAdoptHint));
     content.append(toggleField('injectAssetMacros', STRINGS.settings.injectAssetMacros, STRINGS.settings.injectAssetMacrosHint));
     content.append(headingFormatField());
     content.append(templateField());
@@ -819,6 +833,8 @@ export function mountSettings() {
 
 export function unmountSettings() {
     runCleanups(cleanups);
+    if (usageTimer) clearTimeout(usageTimer);
+    usageTimer = 0;
     if (typeof document !== 'undefined') document.getElementById(PANEL_ID)?.remove();
     mounted = false;
 }

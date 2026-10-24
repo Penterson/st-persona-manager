@@ -4,6 +4,7 @@
 import { addLog } from './history.js';
 import { DEFAULT_SETTINGS, DEFAULT_SECTION_NAMES, SCHEMA_VERSION, makeId, migrate } from './store.js';
 import { STRINGS } from './strings.js';
+import { validCrop, writtenKey } from './framing.js';
 
 // What a version's slot reads when its pick names nothing that still exists.
 // The slot says 없음 and is never filled in for the user.
@@ -153,6 +154,88 @@ export function versionSummaryLine(persona, version) {
     return versionSummary(persona, version)
         .map(row => `${row.sectionName}: ${row.label}`)
         .join(STRINGS.common.dotSeparator);
+}
+
+/* Version writes, shared by the manager and the quick panel.
+
+   Both screens used to carry their own copy of each write, and the quick panel had
+   none of rename, duplicate, overwrite or delete at all. Each helper takes the
+   persona looked up AFTER the screen's await and the version id the row was drawn
+   with, so neither screen can act on an object it read before the question was
+   asked. A missing version answers null, and the caller says 삭제된 버전. */
+function findVersion(persona, versionId) {
+    const versions = persona?.versions;
+    if (!Array.isArray(versions)) return null;
+    return versions.find(entry => entry?.id === versionId) ?? null;
+}
+
+export function renameVersionIn(persona, versionId, name, now) {
+    const version = findVersion(persona, versionId);
+    const trimmed = typeof name === 'string' ? name.trim() : '';
+    if (!version || !trimmed) return null;
+    version.name = trimmed;
+    version.updatedAt = now;
+    return version;
+}
+
+// Next to the original, not at the end: a copy made to be edited is easier to
+// find beside what it came from. activeVersionId is deliberately left alone.
+// Tags and the bound picture travel with the copy; a duplicate that quietly drops
+// them applies somebody else's picture or none.
+export function duplicateVersionIn(persona, versionId, makeIdFn, now) {
+    const source = findVersion(persona, versionId);
+    if (!source) return null;
+    const copy = {
+        id: makeIdFn(),
+        name: STRINGS.common.copySuffix(source.name ?? ''),
+        // Copied by value. Sharing the object would make editing one version's
+        // combination silently edit the other's.
+        picks: { ...(source.picks ?? {}) },
+        assetSelection: Array.isArray(source.assetSelection) ? [...source.assetSelection] : null,
+        tags: Array.isArray(source.tags) ? [...source.tags] : [],
+        avatarAsset: typeof source.avatarAsset === 'string' ? source.avatarAsset : null,
+        avatarCrop: validCrop(source.avatarCrop),
+        updatedAt: now,
+    };
+    persona.versions.splice(persona.versions.indexOf(source) + 1, 0, copy);
+    return copy;
+}
+
+// The live combination replaces the saved one. Nothing is snapshotted: history
+// covers variant text, and a version holds no text of its own.
+export function overwriteVersionPicks(persona, versionId, now) {
+    const version = findVersion(persona, versionId);
+    if (!version) return null;
+    version.picks = { ...(persona.activePicks ?? {}) };
+    version.updatedAt = now;
+    return version;
+}
+
+// The picks are the live combination and belong to the persona, not to the
+// version. Deleting the version drops the label, and the combination the user is
+// actually running stays exactly as it is.
+export function dropVersionFrom(persona, versionId) {
+    const versions = persona?.versions;
+    if (!Array.isArray(versions)) return null;
+    const index = versions.findIndex(entry => entry?.id === versionId);
+    if (index === -1) return null;
+    const [removed] = versions.splice(index, 1);
+    if (persona.activeVersionId === versionId) persona.activeVersionId = null;
+    return removed;
+}
+
+// The order versions are listed in, nothing more: no prompt reads it. Same
+// contract as moveSection, a refusal at either end is a no-op.
+export function moveVersion(persona, versionId, delta) {
+    const versions = persona?.versions;
+    if (!Array.isArray(versions)) return false;
+    const from = versions.findIndex(entry => entry?.id === versionId);
+    if (from === -1) return false;
+    const to = from + delta;
+    if (to < 0 || to >= versions.length) return false;
+    const [moved] = versions.splice(from, 1);
+    versions.splice(to, 0, moved);
+    return true;
 }
 
 /* Row expansion keys */
@@ -394,7 +477,17 @@ export function parseImportedRoot(text) {
     // migrate backfills the containers and the shipped defaults, so a file written
     // by an older build, or one a user hand edited down to the parts they cared
     // about, arrives complete rather than half missing.
-    return { ok: true, root: migrate(parsed) };
+    const root = migrate(parsed);
+    // migrate backfills a missing number and keeps a present one as it is. The
+    // drawer clamps what the user types, and an imported file skipped that gate:
+    // historyMaxBytes 0 (or "abc") is a number the budget reads as "evict every
+    // snapshot", and the next save did exactly that.
+    if (root.settings && typeof root.settings === 'object') {
+        for (const key of Object.keys(SETTING_RANGES)) {
+            if (Object.hasOwn(root.settings, key)) root.settings[key] = clampSetting(key, root.settings[key]);
+        }
+    }
+    return { ok: true, root };
 }
 
 /* 고쳐서 새 버전 */
@@ -539,6 +632,17 @@ export function copyPersonaOnto(root, sourceAvatar, destAvatar, makeIdFn, now, d
     if (!source) return null;
     const copy = duplicatePersona(source, makeIdFn);
     if (!copy) return null;
+    // What describes the destination's own PICTURE stays with the destination:
+    // its sprite folder, the backup of its original avatar, and which asset is
+    // currently written over it. The copy replaces the persona's text, not its
+    // image file, and dropping the backup record left the original hidden on the
+    // server while the next image apply backed up an already replaced picture.
+    const dest = root.personas[destAvatar];
+    if (dest && typeof dest === 'object') {
+        if (dest.assetFolderKey) copy.assetFolderKey = dest.assetFolderKey;
+        if (dest.avatarBackup) copy.avatarBackup = dest.avatarBackup;
+        if (typeof dest.avatarWritten === 'string') copy.avatarWritten = dest.avatarWritten;
+    }
     // On the COPY, not on the source: the source did not have anything happen to
     // it, and the destination's own log is gone with the record it belonged to.
     addLog(copy, 'persona-copy', detail ?? '', now);
@@ -635,6 +739,35 @@ export function makeReplaceVersion(persona, blocks, workingTexts, name, makeIdFn
     return { version, changed, skipped };
 }
 
+// What makeReplaceVersion is about to change, read before it runs, so a save
+// that is refused can take all of it back. Without this the new choices, the
+// moved picks and the version stayed in the live settings, the screen kept its
+// working copies for a retry, and the retry made a second set of everything.
+export function replaceVersionUndo(persona) {
+    return {
+        // A copy: makeReplaceVersion writes into the picks object in place.
+        activePicks: persona?.activePicks ? { ...persona.activePicks } : persona?.activePicks,
+        activeVersionId: persona?.activeVersionId ?? null,
+        log: Array.isArray(persona?.log) ? persona.log.slice() : persona?.log,
+    };
+}
+
+export function undoReplaceVersion(persona, result, undo) {
+    if (!persona || !result) return;
+    const versions = Array.isArray(persona.versions) ? persona.versions : [];
+    const at = versions.indexOf(result.version);
+    if (at !== -1) versions.splice(at, 1);
+    for (const { sectionId, variantId } of result.changed ?? []) {
+        const list = persona.variants?.[sectionId];
+        if (!Array.isArray(list)) continue;
+        const index = list.findIndex(variant => variant?.id === variantId);
+        if (index !== -1) list.splice(index, 1);
+    }
+    persona.activePicks = undo.activePicks;
+    persona.activeVersionId = undo.activeVersionId;
+    persona.log = undo.log;
+}
+
 /* ── 버전별 페르소나 이미지 (user request) ───────────────────────────────────
    A version can name one asset to become the persona's picture when it is
    applied. Reads go through boundAsset rather than touching the field, for the
@@ -652,6 +785,9 @@ export function bindAsset(version, label, now) {
     const next = typeof label === 'string' && label.trim() ? label.trim() : null;
     if (boundAsset(version) === next) return false;
     version.avatarAsset = next;
+    // A framing belongs to the picture it was made on. Kept across a change of
+    // picture it would cut the new one where the old face was.
+    version.avatarCrop = null;
     version.updatedAt = now;
     return true;
 }
@@ -663,6 +799,16 @@ export function bindAsset(version, label, now) {
    screen that nobody measured. The version tab does not fetch the asset list on
    its own, so 'unknown' is the honest answer whenever that list is not loaded
    for this persona. */
+// Whether the version's picture is the one on the avatar file: no picture bound,
+// or the label and framing last written match. A tap on the version already
+// applied is skipped only when this holds, so a picture that failed to write can
+// be retried by tapping the version again.
+export function pictureSettled(persona, versionId) {
+    const version = (persona?.versions ?? []).find(entry => entry?.id === versionId);
+    const label = boundAsset(version);
+    return !label || persona?.avatarWritten === writtenKey(label, validCrop(version?.avatarCrop));
+}
+
 export function versionImageState(version, assetLabels, listingOk) {
     const label = boundAsset(version);
     if (!label) return { label: null, state: 'none' };
@@ -808,7 +954,7 @@ export function duplicatePersona(source, makeIdFn) {
         log: [],
         assets: {},
         assetFolderKey: null,
-        lastComposed: '',
+        composedSig: null,
         tags: [...(source.tags ?? [])],
         names: { ...(source.names ?? {}) },
     };

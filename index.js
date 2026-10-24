@@ -32,6 +32,13 @@ function on(typeName, fn) {
     listeners.push([type, fn]);
 }
 
+// One part failing to mount must not take the rest down with it. init is async
+// and a throw here rejected it before a single event listener was registered:
+// an icon on screen that never refreshed, and no destroy hook to recover with.
+function safely(label, fn) {
+    try { fn(); } catch (e) { console.error(`[${MODULE_NAME}] ${label} failed to mount`, e); }
+}
+
 function styleNow() { return getState()?.settings.assetStyle; }
 
 function resolvePathFactory(el) {
@@ -164,17 +171,17 @@ async function init() {
     // so it appeared seconds after the send form did. This first refresh has no
     // precise api yet, which only costs the precise path a moment, and paintButton
     // handles a state with no avatar in it.
-    mountQuickbar();
+    safely('quickbar', mountQuickbar);
     // Listens for the quick panel footer's pm:open-manager and nothing else, so
     // it costs nothing until the user opens it. Mounted here rather than after the
     // awaits below for the same reason the icon is: a screen that cannot be opened
     // for the first seconds of a session looks broken.
-    mountManager();
+    safely('manager', mountManager);
     // Mounted before the awaits for the same reason: the drawer is
     // built once into a host SillyTavern has already laid out, and an extension
     // whose settings row appears seconds late reads as one that failed to load.
     // It draws from getRoot() at open time, so it needs nothing that comes later.
-    mountSettings();
+    safely('settings', mountSettings);
 
     await initPrecise();
     // The precise api can name a persona that name1 alone cannot (two personas with
@@ -200,7 +207,7 @@ async function init() {
         if (typeof ctx.registerMacro !== 'function') {
             notify('warning', STRINGS.common.noRegisterMacro);
         }
-        registerAssetMacros(ctx, getState);
+        safely('macros', () => registerAssetMacros(ctx, getState));
     }
 
     // writeDescription emits PERSONA_UPDATED, so this runs on every version switch.
@@ -211,7 +218,33 @@ async function init() {
     // null makes the first event of the session, which is usually the settings save
     // this very init triggers, fetch the same list a second time.
     let lastAvatar = assetsAvatar;
-    const onPersona = async () => {
+    /* SETTINGS_UPDATED arrives after every settings save, ours included: each
+       write already redrew from its own commit, then PERSONA_UPDATED redrew again,
+       and a second or so later the save's own echo redrew a third time - landing
+       on whatever the thumb was doing by then, a fling through the list or an
+       open sort menu, because a redraw replaces the scroll box. An echo that
+       changes nothing a screen can show is dropped. What a screen shows of
+       SillyTavern's own data is listed here; our own data only changes through our
+       own writes, and every one of those redraws on its own. Compared by identity,
+       so an unchanged description costs a pointer check, not a text compare. */
+    let lastView = null;
+    const viewChanged = () => {
+        const ctx = freshContext();
+        const pu = ctx?.powerUserSettings ?? {};
+        const s = getState();
+        const view = [s?.avatar ?? null, s?.source ?? null, !!s?.ambiguous, !!s?.readOnly,
+            s?.persona ?? null, s?.root ?? null, ctx?.name1, pu.persona_description, pu.default_persona];
+        const descriptors = pu.persona_descriptions ?? {};
+        for (const [avatar, name] of Object.entries(pu.personas ?? {})) {
+            const d = descriptors[avatar];
+            view.push(avatar, name, d?.description, d?.lorebook, d?.position, d?.depth, d?.role, d?.title);
+        }
+        const same = lastView !== null && lastView.length === view.length
+            && view.every((value, i) => Object.is(value, lastView[i]));
+        lastView = view;
+        return !same;
+    };
+    const onPersona = async origin => {
         refresh();
         const avatar = getState()?.avatar ?? null;
         if (avatar !== lastAvatar) {
@@ -233,6 +266,7 @@ async function init() {
                finds nothing costs one pass and changes no node. */
             renderAll();
         }
+        if (!viewChanged() && origin === 'settings') return;
         document.dispatchEvent(new CustomEvent('pm:changed'));
     };
     // 언어별 이름 자동 적용 (user request). The chat is what decides, so the
@@ -247,7 +281,7 @@ async function init() {
     // of the turn, which is when it is safe to act on.
     const onChatText = () => scheduleAutoName();
     on('PERSONA_CHANGED', onPersona);
-    on('SETTINGS_UPDATED', onPersona);
+    on('SETTINGS_UPDATED', () => onPersona('settings'));
     on('PERSONA_UPDATED', onPersona);
     on('PERSONA_RENAMED', onPersona);
     on('PERSONA_CREATED', onPersona);
@@ -284,7 +318,13 @@ async function init() {
     // state resolved without the precise api and before the sprite listing, so its
     // label can name a persona the precise path has since resolved differently. One
     // event repaints it through the listener mounted above.
-    document.dispatchEvent(new CustomEvent('pm:changed'));
+    //
+    // Through onPersona rather than a bare event: the listeners above were
+    // registered after two awaits, and a persona switch inside that window was
+    // heard by nobody, so the cache and the asset listing stayed on the persona
+    // the page loaded with until the next event. onPersona refreshes, refetches
+    // the listing only if the persona moved, and sends the event.
+    void onPersona();
     globalThis.__personaManagerDestroy = destroy;
 }
 

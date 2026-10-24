@@ -1,15 +1,17 @@
 // The quick switch bar: one icon in #leftSendForm and a panel on body.
 // Everything that touches the DOM lives here; the logic worth
 // testing is in quickbar-pure.js, which the node tests import instead.
-import { MODULE_NAME, getPersona, TILE_SHAPES } from './store.js';
-import { getState, saveAndCompose, adopt, getPreciseApi, getRoot, adoptFor, refresh } from './state.js';
+import { MODULE_NAME, getPersona, TILE_SHAPES, makeId } from './store.js';
+import {
+    getState, saveAndCompose, adopt, getPreciseApi, getRoot, adoptFor, refresh, KEEP_DESCRIPTION_KINDS,
+} from './state.js';
 import { freshContext } from './ctx.js';
 import { compose } from './compose.js';
 import { addLog, snapshot, enforceGlobalBudget, expireOldHistory } from './history.js';
 import { toggleMember, SORT_KEYS, livingLabels } from './roster.js';
 import {
     pickPersonaCommand, quoteArg, describeSelection, waitFor, schedulerTurn, divergedActions,
-    buildRosterView, sortLabel, isTextEntry, versionApplicable,
+    buildRosterView, sortLabel, isTextEntry, versionApplicable, versionAlreadyApplied,
     popupVerdict, shouldSelfCorrect, POPUP_STUCK_MS, POPUP_STUCK_CHECKS, rosterVersionLine,
     pickAutoName, nameCollides,
 } from './quickbar-pure.js';
@@ -18,9 +20,14 @@ import { STRINGS } from './strings.js';
 // One helper, not the screen: manager-pure.js holds no DOM and importing it here
 // keeps both screens comparing the empty section set the same way. A second copy
 // of the rule would be a second chance to get it wrong.
-import { missingSignature, addTag, removeTag, tagsAcross, boundAsset } from './manager-pure.js';
+import {
+    missingSignature, addTag, removeTag, tagsAcross, boundAsset, pictureSettled,
+    renameVersionIn, duplicateVersionIn, overwriteVersionPicks, dropVersionFrom, moveVersion,
+} from './manager-pure.js';
 // assets.js imports nothing at all, so reaching it from here adds no cycle.
 import { applyBoundImage } from './assets.js';
+import { validCrop, writtenKey } from './framing.js';
+import { itemsWithText } from './classify.js';
 // Matching, language detection and paging.
 import { rankOf, matchRanges, srcOf, detectLanguage, chatLanguage, pageOf } from './search-pure.js';
 
@@ -80,8 +87,6 @@ let lastMissing = null;
 // popup take the unmeasured path 96ms later.
 let probePromise = null;
 let popupNeedsDrop = false;
-let thumbMeasured = false;
-let thumbBusts = false;
 
 // No event handler in this file closes over a context. Handlers outlive the draw
 // that created them, and a context is only true for the instant it was read, so
@@ -207,10 +212,12 @@ export function makeRowActivatable(node, onActivate) {
 // the browser already has, and would defeat the "assign only when it differs" check
 // in paintButton because it always differs.
 //
-// This is a measurement, not an assumption: ask twice with the same arguments once
-// per session and compare the two answers. If they disagree the argument is a
-// buster and every later call omits it; if they agree nothing changes. Both calls
-// are cheap string building, and the verdict is remembered.
+// It was measured by asking twice and comparing, and the measurement could not
+// see it: SillyTavern builds the argument as &t=Date.now(), two calls in a row
+// land in the same millisecond, the answers agree, and the verdict said keep
+// passing it - so every draw asked for twenty pictures under a fresh address once
+// the clock ticked. The argument is never passed. A replaced picture gets its one
+// reload from thumbBumps below, which is the only reload this needs.
 /* Bumped when a persona's PICTURE has been replaced, and at no other time.
 
    The URL above is deliberately stable so that repaints do not re-request thirty
@@ -242,17 +249,9 @@ export function bumpThumbnails(avatarId) {
 
 export function thumbnailUrl(ctx, avatarId) {
     if (!avatarId || typeof ctx?.getThumbnailUrl !== 'function') return null;
-    if (!thumbMeasured) {
-        thumbMeasured = true;
-        try {
-            thumbBusts = ctx.getThumbnailUrl('persona', avatarId, true) !== ctx.getThumbnailUrl('persona', avatarId, true);
-        } catch { thumbBusts = false; }
-    }
     let url;
     try {
-        url = thumbBusts
-            ? ctx.getThumbnailUrl('persona', avatarId)
-            : ctx.getThumbnailUrl('persona', avatarId, true);
+        url = ctx.getThumbnailUrl('persona', avatarId);
     } catch { return null; }
     const bump = thumbBumps.get(avatarId);
     if (!url || !bump) return url ?? null;
@@ -585,6 +584,7 @@ export function closePanel() {
     rosterLang = null;
     rosterTags = [];
     rosterVisible = [];
+    versionToolsAt = null;
     // Removing a focused input does not reliably fire blur, so the one shot listener
     // may never run. It is registered with once and dies with its node; the flag is
     // the only thing that would outlive the panel.
@@ -611,7 +611,20 @@ function guardAvatar() {
         closePanel();
         return null;
     }
-    return s;
+    return writableOrSay(s);
+}
+
+/* The buttons are drawn disabled while the active persona is ambiguous or the
+   data belongs to a newer build, but a draw can be held back behind a focused
+   field, and a tap on a button drawn before the state changed still arrives.
+   Several writers change the persona before commit, and commit's refusal does
+   not undo that: the change stays in the live settings for SillyTavern's next
+   save. So the guards ask too. */
+function writableOrSay(s) {
+    if (rosterWritable(s)) return s;
+    notify('error', s.readOnly ? STRINGS.common.readOnly : STRINGS.quick.ambiguous);
+    scheduleDraw();
+    return null;
 }
 
 // The same question asked across an await, which guardAvatar cannot answer. Every
@@ -626,7 +639,7 @@ export function guardStartAvatar(startAvatar) {
         closePanel();
         return null;
     }
-    return s;
+    return writableOrSay(s);
 }
 
 function commit(kind, detail) {
@@ -636,7 +649,7 @@ function commit(kind, detail) {
     const persona = getState()?.persona ?? null;
     // Second line of defence: state.js refuses the write outright when the active
     // persona is no longer the one this panel was drawn for.
-    const result = saveAndCompose(panelAvatar);
+    const result = saveAndCompose(panelAvatar, { write: !KEEP_DESCRIPTION_KINDS.has(kind) });
     if (!result) { notify('error', STRINGS.common.cannotSaveNow); return false; }
     if (result.ok === false) {
         notify('error', STRINGS.common.personaChangedNotSaved);
@@ -648,6 +661,10 @@ function commit(kind, detail) {
         // writeDescription already saved, so this line needs a save of its own.
         freshContext()?.saveSettingsDebounced?.();
     }
+    // A kept description emits no PERSONA_UPDATED, and the icon beside the send
+    // box reads the version name from that event's pm:changed: rename or delete
+    // the version it shows and the icon went on showing the old name.
+    if (result.kept && typeof document !== 'undefined') document.dispatchEvent(new CustomEvent('pm:changed'));
     // The loss has to be visible, and the banner in the panel carries it
     // permanently. The toast is only for the moment the set CHANGES: a section the
     // user has decided to leave empty otherwise produced one toast per tap, which
@@ -925,6 +942,10 @@ async function applyVersion(versionId) {
         notify('error', STRINGS.common.versionNotApplicable);
         return;
     }
+    // A second tap on the row already applied: nothing to write, and the first
+    // tap's picture upload is still in flight. With an outside edit pending it
+    // is not a no-op, since applying puts the version's text back.
+    if (!s.diverged && versionAlreadyApplied(s.persona, versionId) && pictureSettled(s.persona, versionId)) return;
     // Switching version on top of an outside edit throws that edit
     // away, so ask once more instead of doing it quietly.
     if (s.diverged && !(await askConfirm(STRINGS.common.confirmVersionOverOutsideEdit))) return;
@@ -937,6 +958,10 @@ async function applyVersion(versionId) {
         return;
     }
     const version = (after.persona.versions ?? []).find(v => v.id === versionId);
+    // Kept so a refused write can be undone. Left in place, the new picks stayed in
+    // the live settings, showed the version as applied while the prompt still
+    // carried the old text, and went out with the next save of anything at all.
+    const previous = { id: after.persona.activeVersionId, picks: after.persona.activePicks };
     after.persona.activeVersionId = version.id;
     after.persona.activePicks = { ...(version.picks ?? {}) };
     // Only when the prompt write was accepted. commit answers false when state.js
@@ -945,7 +970,11 @@ async function applyVersion(versionId) {
     // version was NOT applied. Overwriting the avatar file anyway puts the
     // picture of a combination on a persona whose prompt does not carry it, and
     // it consumes the one backup that is taken before the first overwrite.
-    if (!commit('version-apply', version.name ?? '')) return;
+    if (!commit('version-apply', version.name ?? '')) {
+        after.persona.activeVersionId = previous.id;
+        after.persona.activePicks = previous.picks;
+        return;
+    }
     // Same rule as the manager's copy: the prompt is committed, the picture
     // follows on its own, and a picture that fails never undoes the version.
     void runBoundImageFromPanel(startAvatar, versionId);
@@ -969,11 +998,14 @@ export async function runBoundImageWrite(avatarId, versionId, force, known) {
     const version = (first?.versions ?? []).find(entry => entry.id === versionId);
     const label = boundAsset(version);
     if (!label) return null;
+    // The framing goes with the picture: a stored crop is cut by the server, and
+    // what the avatar file now holds is recorded as the label AND the crop.
+    const crop = validCrop(version?.avatarCrop);
     const ctx = freshContext();
     if (!ctx) return null;
     const now = Date.now();
     const result = await applyBoundImage({
-        ctx, root: before, persona: first, avatarId, label, force, known, now,
+        ctx, root: before, persona: first, avatarId, label, crop, force, known, now,
     });
     if (!result.ok) {
         /* A failure that still took a backup. The file is ON THE SERVER by then -
@@ -1013,7 +1045,7 @@ export async function runBoundImageWrite(avatarId, versionId, force, known) {
     // it every apply takes another, and the second holds the first one's
     // replacement rather than the picture that was there to begin with.
     if (result.backup && !persona.avatarBackup) persona.avatarBackup = result.backup;
-    persona.avatarWritten = label;
+    persona.avatarWritten = writtenKey(label, crop);
     // Stamped when the write FINISHED, not when the tap happened: the three
     // round trips above can take seconds on a phone, and an entry dated before
     // edits that actually happened earlier sorts wrongly in the history tab.
@@ -1034,6 +1066,7 @@ async function runBoundImageFromPanel(avatarId, versionId) {
     }
     if (result.error === 'missing') { notify('warning', STRINGS.manager.imageAssetMissing(result.detail)); return; }
     if (result.error === 'backup') { notify('error', STRINGS.manager.imageBackupFailed(result.detail)); return; }
+    if (result.error === 'decode') { notify('error', STRINGS.manager.framingDecodeFailed(result.detail)); return; }
     notify('error', STRINGS.manager.imageApplyFailed(result.detail ?? result.error));
 }
 
@@ -1157,9 +1190,44 @@ function toggleLabelMembership(labelId, avatarId) {
     const s = getState();
     if (!rosterWritable(s)) return;
     if (!Array.isArray(s.root.labels)) s.root.labels = [];
+    const known = personaNames(freshContext());
+    const living = label => (label?.members ?? []).filter(id => Object.hasOwn(known, id)).length;
+    const label = s.root.labels.find(entry => entry.id === labelId);
+    const before = living(label);
     toggleMember(s.root.labels, labelId, avatarId);
     freshContext()?.saveSettingsDebounced?.();
-    scheduleDraw();
+    /* The tapped checkbox already shows the new state, and no row shows its
+       groups. Only two things elsewhere depend on it: a list filtered by a group
+       (the persona may have to leave it), and a group's chip, which turns on with
+       its first living member and off with its last. Anything else drew the whole
+       panel to show one tick the browser had already drawn. */
+    const filtering = (s.root.settings?.activeLabelId ?? null) !== null;
+    if (filtering || (before === 0) !== (living(label) === 0)) scheduleDraw();
+}
+
+/* 그룹 편집: a row tap opens that persona's group ticks under it. The editor
+   moves from one row to another; nothing else changes. Text typed into the new
+   group field of the editor being closed goes through the full draw, which is the
+   path that carries typing across a rebuild. */
+function toggleEditRow(avatarId) {
+    expandedAvatar = expandedAvatar === avatarId ? null : avatarId;
+    if (!placeLabelEditor()) scheduleDraw();
+}
+
+function placeLabelEditor() {
+    if (!inPlaceAllowed()) return false;
+    const list = document.getElementById(PANEL_ID)?.querySelector('[data-pm-roster-list]');
+    if (!list) return false;
+    const old = list.querySelector('.pm-quickbar-labeleditor');
+    if (old?.querySelector('.pm-quickbar-newlabel-input')?.value) return false;
+    if (expandedAvatar === null) { old?.remove(); return true; }
+    const row = [...list.querySelectorAll('.pm-quickbar-row[data-pm-avatar]')]
+        .find(node => node.dataset.pmAvatar === expandedAvatar);
+    if (!row) return false;
+    const s = getState();
+    old?.remove();
+    row.after(labelEditor(s, expandedAvatar, rosterWritable(s)));
+    return true;
 }
 
 function createLabel(name, avatarId) {
@@ -1489,6 +1557,18 @@ async function runAutoName() {
 
 /* Panel content */
 
+// 관리 시작 from this panel. When the description was split into items by its
+// titles, that is said once: the panel shows no items, and a description that
+// went in as thirteen parts should not have to be discovered in the manager.
+function adoptHere() {
+    // A second tap, or a tap on a row drawn before the first one landed, finds the
+    // persona already managed: nothing was imported, so nothing is announced.
+    if (getState()?.persona) { scheduleDraw(); return; }
+    const s = adopt();
+    const count = itemsWithText(s?.persona);
+    if (count > 1) notify('success', STRINGS.common.adoptSplit(count));
+}
+
 function groupOf(title) {
     const box = el('div', 'pm-quickbar-group');
     box.append(el('div', 'pm-quickbar-head', title));
@@ -1586,6 +1666,54 @@ function versionOpen(s) {
     return !!s?.root?.settings?.quickVersionOpen;
 }
 
+/* ── One group or one row, redrawn in place (user request) ──────────────────
+   Folding a group, opening a version's [⋯] and ticking a persona in select mode
+   each change one part of the panel, and each rebuilt all of it: every group, the
+   twenty-row list and its pictures (measured 4 to 7ms per tap on the desktop,
+   an estimated four to eight times that on the phone). The fold and [⋯] now
+   rebuild their own group, and a tick changes the ticked row's mark and the count.
+   A full draw already queued, a field being typed in, or the active persona having
+   moved since the panel was drawn all take the full draw instead. */
+const groupNodes = new Map();
+
+function liveGroupArgs() {
+    const s = getState();
+    return [s, rosterWritable(s)];
+}
+
+function inPlaceAllowed() {
+    if (drawFrame || drawDeferred) return false;
+    const s = getState();
+    return !!s && s.avatar === panelAvatar;
+}
+
+function redrawGroup(name) {
+    if (!inPlaceAllowed()) return false;
+    const entry = groupNodes.get(name);
+    if (!entry || !entry.node.isConnected) return false;
+    const fresh = entry.build();
+    entry.node.replaceWith(fresh);
+    entry.node = fresh;
+    return true;
+}
+
+function markSelection(avatarId) {
+    if (!inPlaceAllowed()) return false;
+    const panel = document.getElementById(PANEL_ID);
+    const nodes = [...(panel?.querySelectorAll('[data-pm-avatar]') ?? [])].filter(node => node.dataset.pmAvatar === avatarId);
+    if (!nodes.length) return false;
+    const picked = selectedAvatars.includes(avatarId);
+    for (const node of nodes) {
+        node.classList.toggle('pm-picked', picked);
+        node.setAttribute('aria-checked', picked ? 'true' : 'false');
+    }
+    const count = panel.querySelector('.pm-quickbar-bulkcount');
+    if (count) count.textContent = STRINGS.quick.selectedCount(selectedAvatars.length);
+    // The 전체 선택 / 선택 해제 label follows what is picked on screen.
+    publishVisible(rosterVisible);
+    return true;
+}
+
 function toggleVersionOpen() {
     const s = getState();
     const next = !versionOpen(s);
@@ -1593,11 +1721,13 @@ function toggleVersionOpen() {
         s.root.settings.quickVersionOpen = next;
         // The setting is the truth again, so the override must not shadow it.
         versionOpenOverride = null;
-        freshContext()?.saveSettingsDebounced?.();
+        // No save of its own. A fold is a way of looking, and a save is every
+        // extension's settings serialized and posted (several MB here); the
+        // value rides along with the next save anything makes.
     } else {
         versionOpenOverride = next;
     }
-    scheduleDraw();
+    if (!redrawGroup('version')) scheduleDraw();
 }
 
 /* The same mark the manager folds with, so the two screens fold alike.
@@ -1630,18 +1760,155 @@ function versionGroup(s, writable) {
     box.append(foldHead(STRINGS.quick.headVersion, open, toggleVersionOpen));
     if (!open) return box;
     if (!s.persona) {
-        box.append(rowOf(STRINGS.quick.adoptRow, writable ? () => { adopt(); scheduleDraw(); } : null));
+        box.append(rowOf(STRINGS.quick.adoptRow, writable ? () => { adoptHere(); scheduleDraw(); } : null));
         return box;
     }
     const versions = s.persona.versions ?? [];
     if (!versions.length) box.append(emptyBlock(STRINGS.quick.noVersions));
-    for (const version of versions) {
-        const row = rowOf(version.name ?? '', writable ? () => applyVersion(version.id) : null);
+    versions.forEach((version, index) => {
+        if (!version || typeof version !== 'object') return;
+        const open = versionToolsOpen(s, version.id);
+        // The row and [⋯] are siblings, not a button inside a button: a keypress
+        // on the inner one would bubble into the row's Enter handler and apply
+        // the version the user only meant to open tools for.
+        const line = el('div', `pm-quickbar-vrow${open ? ' pm-quickbar-vrow-open' : ''}`);
+        const row = rowOf(version.name ?? '', writable ? () => { if (!rowTapTooSoon()) applyVersion(version.id); } : null);
         row.append(checkMark(version.id === s.persona.activeVersionId));
-        box.append(row);
-    }
+        line.append(row);
+        line.append(versionMoreButton(version, open, writable));
+        box.append(line);
+        if (open) box.append(versionTools(version, index, versions.length, writable));
+    });
     box.append(rowOf(STRINGS.quick.saveCurrentAsVersion, writable ? () => saveAsVersion() : null));
     return box;
+}
+
+/* ── 버전 이름 변경·삭제, 빠른 패널판 (user request) ─────────────────────────
+   The manager had every version write and this panel had only 적용 and 저장, so
+   renaming or deleting a version meant leaving the chat for the manager's 버전
+   tab. [⋯] on a row opens that row's tools in place, as real buttons under the
+   row: askChoiceIndex would ask for a typed digit, the slowest way to pick one of
+   six on a phone keyboard. One row at a time, and only on the persona it was
+   opened for, so a persona switch never shows tools for a stranger's version. */
+let versionToolsAt = null;
+
+/* 복제, 위로 이동 and 아래로 이동 redraw the list with the tools in a new place,
+   and the place the finger just tapped now holds another version's row. A quick
+   second tap - the double tap this user makes - applied that version. A row tap
+   that arrives this soon after a tool is taken as the tool's second tap.
+   Android's own double tap timeout is 300ms; 500 covers a slow second tap. */
+const TOOL_SETTLE_MS = 500;
+let toolTappedAt = 0;
+
+function rowTapTooSoon() {
+    return Date.now() - toolTappedAt < TOOL_SETTLE_MS;
+}
+
+function versionToolsOpen(s, versionId) {
+    return versionToolsAt !== null && versionToolsAt.avatar === s?.avatar && versionToolsAt.id === versionId;
+}
+
+function toggleVersionTools(versionId) {
+    const s = getState();
+    versionToolsAt = versionToolsOpen(s, versionId) ? null : { avatar: s?.avatar ?? null, id: versionId };
+    if (!redrawGroup('version')) scheduleDraw();
+}
+
+function versionMoreButton(version, open, writable) {
+    const btn = el('button', 'pm-quickbar-btn pm-quickbar-vmore', '⋯');
+    btn.type = 'button';
+    btn.setAttribute('aria-label', STRINGS.quick.versionToolsAria(version.name ?? ''));
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (writable) btn.addEventListener('click', () => toggleVersionTools(version.id));
+    else { btn.disabled = true; btn.classList.add('pm-disabled'); }
+    return btn;
+}
+
+function versionTools(version, index, count, writable) {
+    const bar = el('div', 'pm-manager-actions pm-quickbar-vtools');
+    const atTop = index === 0;
+    const atEnd = index === count - 1;
+    for (const [label, action, enabled, danger] of [
+        [STRINGS.common.rename, () => renameVersionFromPanel(version.id), true, false],
+        [STRINGS.manager.overwrite, () => overwriteVersionFromPanel(version.id), true, false],
+        [STRINGS.common.duplicate, () => duplicateVersionFromPanel(version.id), true, false],
+        [STRINGS.manager.moveUp, () => shiftVersionFromPanel(version.id, -1), !atTop, false],
+        [STRINGS.manager.moveDown, () => shiftVersionFromPanel(version.id, 1), !atEnd, false],
+        [STRINGS.common.remove, () => dropVersionFromPanel(version.id), true, true],
+    ]) {
+        const btn = el('button', `pm-quickbar-btn${danger ? ' pm-manager-danger' : ''}`, label);
+        btn.type = 'button';
+        const run = () => { toolTappedAt = Date.now(); action(); };
+        if (writable && enabled) btn.addEventListener('click', run);
+        else { btn.disabled = true; btn.classList.add('pm-disabled'); }
+        bar.append(btn);
+    }
+    return bar;
+}
+
+function versionNamed(persona, versionId) {
+    return (persona?.versions ?? []).find(entry => entry?.id === versionId) ?? null;
+}
+
+// Each write reads the version again on the persona that is active AFTER its
+// question, by the id the row was drawn with (see applyVersion below).
+async function renameVersionFromPanel(versionId) {
+    const s = guardAvatar();
+    if (!s?.persona) return;
+    const startAvatar = s.avatar;
+    const name = await askText(STRINGS.manager.versionName, versionNamed(s.persona, versionId)?.name ?? '');
+    if (!name || !name.trim()) return;
+    const after = guardStartAvatar(startAvatar);
+    if (!after?.persona) return;
+    const version = renameVersionIn(after.persona, versionId, name, Date.now());
+    if (!version) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
+    commit('version-rename', version.name);
+}
+
+async function overwriteVersionFromPanel(versionId) {
+    const s = guardAvatar();
+    if (!s?.persona) return;
+    const startAvatar = s.avatar;
+    const name = versionNamed(s.persona, versionId)?.name ?? '';
+    if (!(await askConfirm(STRINGS.manager.confirmOverwriteVersion(name)))) return;
+    const after = guardStartAvatar(startAvatar);
+    if (!after?.persona) return;
+    const version = overwriteVersionPicks(after.persona, versionId, Date.now());
+    if (!version) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
+    commit('version-overwrite', version.name ?? '');
+}
+
+function duplicateVersionFromPanel(versionId) {
+    const s = guardAvatar();
+    if (!s?.persona) return;
+    const uuid = freshContext()?.uuidv4;
+    const copy = duplicateVersionIn(s.persona, versionId, () => makeId(uuid), Date.now());
+    if (!copy) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
+    // The tools move to the copy: a duplicate is made to be renamed or changed,
+    // and that is the next tap.
+    versionToolsAt = { avatar: s.avatar, id: copy.id };
+    commit('version-duplicate', copy.name);
+}
+
+function shiftVersionFromPanel(versionId, delta) {
+    const s = guardAvatar();
+    if (!s?.persona) return;
+    const name = versionNamed(s.persona, versionId)?.name ?? '';
+    if (!moveVersion(s.persona, versionId, delta)) return;
+    commit('version-move', name);
+}
+
+async function dropVersionFromPanel(versionId) {
+    const s = guardAvatar();
+    if (!s?.persona) return;
+    const startAvatar = s.avatar;
+    const name = versionNamed(s.persona, versionId)?.name ?? '';
+    if (!(await askConfirm(STRINGS.manager.confirmDropVersion(name)))) return;
+    const after = guardStartAvatar(startAvatar);
+    if (!after?.persona) return;
+    if (!dropVersionFrom(after.persona, versionId)) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
+    versionToolsAt = null;
+    commit('version-delete', name);
 }
 
 /* ── 언어별 이름, 빠른 패널판 (user request) ─────────────────────────────────
@@ -1670,11 +1937,13 @@ function toggleNamesOpen() {
     if (rosterWritable(s)) {
         s.root.settings.quickNamesOpen = next;
         namesOpenOverride = null;
-        freshContext()?.saveSettingsDebounced?.();
+        // No save of its own. A fold is a way of looking, and a save is every
+        // extension's settings serialized and posted (several MB here); the
+        // value rides along with the next save anything makes.
     } else {
         namesOpenOverride = next;
     }
-    scheduleDraw();
+    if (!redrawGroup('names')) scheduleDraw();
 }
 
 function toggleAutoName() {
@@ -1756,7 +2025,7 @@ function namesGroup(s, writable) {
     box.append(foldHead(STRINGS.quick.headNames, open, toggleNamesOpen));
     if (!open) return box;
     if (!s.persona) {
-        box.append(rowOf(STRINGS.quick.adoptRow, writable ? () => { adopt(); scheduleDraw(); } : null));
+        box.append(rowOf(STRINGS.quick.adoptRow, writable ? () => { adoptHere(); scheduleDraw(); } : null));
         return box;
     }
     const current = freshContext()?.powerUserSettings?.personas?.[s.avatar] ?? '';
@@ -1842,8 +2111,13 @@ function chipsRow(view, writable) {
     if (!view.chips.length) return null;
     const row = el('div', 'pm-quickbar-chips');
     row.append(chipButton(STRINGS.quick.chipAll, view.activeLabelId == null, () => setActiveLabel(null), writable));
+    // A group whose members are all gone from SillyTavern is shown but not
+    // tappable: choosing it stored the id, the view fell back to everyone (an
+    // empty filter would hide the whole list), and the fallback was saved again -
+    // two saves for a tap that changed nothing on screen.
     for (const label of view.chips) {
-        row.append(chipButton(label.name ?? '', label.id === view.activeLabelId, () => setActiveLabel(label.id), writable));
+        row.append(chipButton(label.name ?? '', label.id === view.activeLabelId, () => setActiveLabel(label.id),
+            writable && label.members.length > 0));
     }
     return row;
 }
@@ -1989,21 +2263,23 @@ async function bulkDelete() {
     if (!await askConfirm(STRINGS.quick.confirmBulkDelete(count))) return;
     const after = getRoot();
     if (!after || after.readOnly) return;
-    let gone = 0;
+    const deleted = [];
     for (const avatar of selectedAvatars) {
         if (!after.personas?.[avatar]) continue;
         delete after.personas[avatar];
-        gone++;
+        deleted.push(avatar);
     }
     // A deleted persona must not stay a member of a group, or the group count
-    // keeps naming rows that no longer exist.
+    // keeps naming rows that no longer exist. Only the ones deleted: a persona
+    // nobody adopted can still be in a group (grouping does not adopt), it had no
+    // data to delete, and the confirm counted only the managed ones.
     for (const label of after.labels ?? []) {
         if (!Array.isArray(label.members)) continue;
-        label.members = label.members.filter(id => !selectedAvatars.includes(id));
+        label.members = label.members.filter(id => !deleted.includes(id));
     }
     selectedAvatars = [];
     selectMode = false;
-    notify('info', STRINGS.quick.bulkDeleted(gone));
+    notify('info', STRINGS.quick.bulkDeleted(deleted.length));
     bulkSave(after);
 }
 
@@ -2084,7 +2360,7 @@ function toggleSelected(avatarId) {
     const i = selectedAvatars.indexOf(avatarId);
     if (i === -1) selectedAvatars.push(avatarId);
     else selectedAvatars.splice(i, 1);
-    scheduleDraw();
+    if (!markSelection(avatarId)) scheduleDraw();
 }
 
 function editToggleButton(writable) {
@@ -2173,12 +2449,13 @@ function personaRow(ctx, entry, s, version) {
         // here would be the opposite of what the user turned the mode on to do.
         ? () => toggleSelected(entry.avatar)
         : editMode
-            ? () => { expandedAvatar = expandedAvatar === entry.avatar ? null : entry.avatar; scheduleDraw(); }
+            ? () => toggleEditRow(entry.avatar)
             // Switching persona stays enabled in the ambiguous state on purpose: it
             // is the action that gets the user out of it, and it writes none of our
             // data.
             : () => switchPersona(entry.avatar, entry.name);
     const row = el('div', `pm-row pm-quickbar-row${picked ? ' pm-picked' : ''}`);
+    row.dataset.pmAvatar = entry.avatar;
     if (selectMode) {
         row.setAttribute('role', 'checkbox');
         row.setAttribute('aria-checked', picked ? 'true' : 'false');
@@ -2193,14 +2470,7 @@ function personaRow(ctx, entry, s, version) {
     // the same question thirty times, inside a synchronous draw where the answer
     // cannot change between the first row and the last.
     const url = thumbnailUrl(ctx, entry.avatar);
-    if (url) {
-        const img = document.createElement('img');
-        img.className = 'pm-quickbar-rowimg';
-        img.loading = 'lazy';
-        img.alt = '';
-        img.src = url;
-        row.append(img);
-    }
+    if (url) row.append(thumbImage('pm-quickbar-rowimg', url));
     const text = el('div', 'pm-quickbar-rowtext');
     const top = el('div', 'pm-quickbar-rowtop');
     top.append(markedText('pm-quickbar-name', entry.name ?? '', rosterSearchOpen ? rosterQuery : ''));
@@ -2232,6 +2502,7 @@ function personaTile(ctx, entry, s, named) {
     // setting looked broken from every view but one.
     const picked = selectMode && selectedAvatars.includes(entry.avatar);
     const tile = el('button', `pm-quickbar-tile${named ? ' pm-quickbar-tile-named' : ''}${active ? ' pm-quickbar-tile-active' : ''}${picked ? ' pm-picked' : ''}`);
+    tile.dataset.pmAvatar = entry.avatar;
     if (selectMode) {
         tile.setAttribute('role', 'checkbox');
         tile.setAttribute('aria-checked', picked ? 'true' : 'false');
@@ -2245,14 +2516,7 @@ function personaTile(ctx, entry, s, named) {
     // whichever way the thumbnail fails.
     imgbox.append(markedText('pm-quickbar-tilename', entry.name ?? '', rosterSearchOpen ? rosterQuery : ''));
     const url = thumbnailUrl(ctx, entry.avatar);
-    if (url) {
-        const img = document.createElement('img');
-        img.className = 'pm-quickbar-tileimg';
-        img.loading = 'lazy';
-        img.alt = '';
-        img.src = url;
-        imgbox.append(img);
-    }
+    if (url) imgbox.append(thumbImage('pm-quickbar-tileimg', url));
     if (active) {
         // No check glyph. The accent ring around the image already says which
         // tile is current, and says it in thickness as well as colour, so it is
@@ -2321,21 +2585,56 @@ function redrawRosterList() {
 function fillRosterListNow() {
     const panel = document.getElementById(PANEL_ID);
     const container = panel?.querySelector('[data-pm-roster-list]');
-    if (container) fillRosterList(container);
+    if (!container) return;
+    harvestThumbs(container);
+    fillRosterList(container);
+    thumbPool.clear();
+}
+
+/* Persona pictures carried across a redraw. Every tap rebuilds the list, and each
+   rebuild made twenty new <img> for twenty pictures the panel was already showing:
+   each one decoded again, and drew as an empty box until it had (measured: 20 per
+   quick panel draw, 31 in the manager's picker). The old element is moved into the
+   new row instead, keyed by its class and address, so the picture never leaves
+   the screen. An address that changed (a replaced picture bumps its token) finds
+   nothing and gets a fresh element, which is the one reload that should happen. */
+const thumbPool = new Map();
+
+function harvestThumbs(node) {
+    for (const img of node?.querySelectorAll?.('img.pm-quickbar-rowimg, img.pm-quickbar-tileimg') ?? []) {
+        const key = `${img.className}|${img.getAttribute('src')}`;
+        if (!thumbPool.has(key)) thumbPool.set(key, img);
+    }
+}
+
+function thumbImage(className, url) {
+    const key = `${className}|${url}`;
+    const kept = thumbPool.get(key);
+    if (kept) { thumbPool.delete(key); return kept; }
+    const img = document.createElement('img');
+    img.className = className;
+    img.loading = 'lazy';
+    img.alt = '';
+    img.src = url;
+    return img;
 }
 
 // The persona language, judged from what the prompt actually carries (design
-// doc 26). null for personas this extension has no data for. lastComposed is
-// that text as of the last write (compose.js keeps it), so reading it skips a
-// full composition per persona per draw; personas from before the
-// field existed fall back to composing.
+// doc 26). null for personas this extension has no data for. It read the stored
+// copy of that text, which is now only a fingerprint; the answer is kept per
+// persona record and recomputed when the fingerprint moves, so a draw still does
+// not compose thirty personas.
+const languageMemo = new WeakMap();
+
 function personaLanguage(root, avatar) {
     const persona = getPersona(root, avatar);
     if (!persona) return null;
-    const text = typeof persona.lastComposed === 'string' && persona.lastComposed
-        ? persona.lastComposed
-        : compose(persona).text;
-    return detectLanguage(text);
+    const sig = persona.composedSig ?? null;
+    const memo = languageMemo.get(persona);
+    if (memo && memo.sig === sig) return memo.language;
+    const language = detectLanguage(compose(persona).text);
+    languageMemo.set(persona, { sig, language });
+    return language;
 }
 
 // Everything below the search row: filter chips, the rows or tiles, and the
@@ -2488,7 +2787,7 @@ function fillRosterList(container, prebuilt) {
         // A fixed column count when the user chose one, the
         // responsive auto fill otherwise.
         const columns = Number(s.root?.settings?.rosterTileColumns ?? 0);
-        if (columns >= 2) grid.style.gridTemplateColumns = `repeat(${columns}, 1fr)`;
+        if (columns >= 2) grid.style.gridTemplateColumns = `repeat(${columns}, minmax(0, 1fr))`;
         for (const entry of paged.slice) grid.append(personaTile(ctx, entry, s, viewMode === 'tilesNamed'));
         container.append(grid);
     } else {
@@ -2533,9 +2832,10 @@ function rosterGroup(ctx, s, writable) {
     // persisted when writing is allowed right now. The corrected view still renders
     // this time regardless, so the user is never shown a filter that hides everyone.
     const storedActiveLabelId = s.root?.settings?.activeLabelId ?? null;
+    // No save of its own: a filter is a way of looking, and the corrected value
+    // goes out with the next save anything makes.
     if (writable && s.root?.settings && view.activeLabelId !== storedActiveLabelId) {
         s.root.settings.activeLabelId = view.activeLabelId;
-        freshContext()?.saveSettingsDebounced?.();
     }
 
     const box = el('div', 'pm-quickbar-group');
@@ -2586,6 +2886,15 @@ function rosterGroup(ctx, s, writable) {
             rosterQuery = input.value;
             rosterPage = 1;
             redrawRosterList();
+        });
+        // The list filters as the user types, so the keyboard's 검색/이동 key has
+        // nothing left to submit; it puts the keyboard away instead, which is what
+        // a thumb pressing it on a phone is asking for. The blur also releases a
+        // redraw drawPanel deferred behind this field.
+        input.addEventListener('keydown', e => {
+            if (isComposingKey(e) || e.key !== 'Enter') return;
+            e.preventDefault();
+            input.blur();
         });
         // Marked here, acted on after the panel is assembled: this node is not in
         // the document yet, and focusing a detached input does nothing at all.
@@ -2682,8 +2991,16 @@ function drawPanel() {
     const typed = typing
         ? { value: typing.value, start: typing.selectionStart, end: typing.selectionEnd }
         : null;
-    const scroll = el('div', 'pm-scroll');
-    panel.replaceChildren(scroll);
+    /* The scrolling box is kept and only its contents are replaced. A new box per
+       draw took the scroller itself out from under the thumb: a fling in progress
+       stopped dead, and the delayed redraw after a save landed exactly while the
+       user was flinging through the list. Built and swapped in one synchronous
+       pass, the new content is in place before the next layout, so the offset is
+       never clamped and the restore below has nothing to do. */
+    const scroll = oldScroll ?? el('div', 'pm-scroll');
+    harvestThumbs(oldScroll);
+    if (oldScroll) scroll.replaceChildren();
+    else panel.replaceChildren(scroll);
 
     if (!s) {
         scroll.append(el('div', 'pm-quickbar-note', STRINGS.quick.stateUnread));
@@ -2697,15 +3014,35 @@ function drawPanel() {
         if (s.diverged && !bannerDismissed) scroll.append(divergedBanner(writable));
 
         // No section group here any more.
-        scroll.append(currentGroup(ctx, s), versionGroup(s, writable), namesGroup(s, writable),
-            rosterGroup(ctx, s, writable), footer());
+        //
+        // Each group on its own: one record a hand edit left in a shape a group
+        // cannot read threw out of drawPanel after the scroll box had been
+        // emptied, and the panel came up blank - persona list included, which is
+        // the one thing needed to get away from the broken persona.
+        groupNodes.clear();
+        for (const [name, build] of [
+            ['current', () => currentGroup(ctx, s)], ['version', () => versionGroup(s, writable)],
+            ['names', () => namesGroup(s, writable)], ['roster', () => rosterGroup(ctx, s, writable)],
+            ['footer', () => footer()],
+        ]) {
+            try {
+                const node = build();
+                scroll.append(node);
+                if (name === 'version') groupNodes.set(name, { node, build: () => versionGroup(...liveGroupArgs()) });
+                if (name === 'names') groupNodes.set(name, { node, build: () => namesGroup(...liveGroupArgs()) });
+            } catch (e) { console.error(`[${MODULE_NAME}] quick panel group`, e); }
+        }
     }
 
     // Writing scrollTop makes the browser lay the new content out then and there so
     // it can clamp the value. Zero is where a freshly filled panel already sits, so
     // the write buys nothing, and the openPanel path runs outside a frame where that
     // layout is on the critical path of the panel appearing.
-    if (scrollTop) scroll.scrollTop = scrollTop;
+    // Written only when it moved: a programmatic write stops a fling, and on the
+    // kept box the offset normally survives the swap untouched.
+    if (scrollTop && scroll.scrollTop !== scrollTop) scroll.scrollTop = scrollTop;
+    // Whatever was not claimed belongs to rows that are gone.
+    thumbPool.clear();
     const chips = panel.querySelector('.pm-quickbar-chips');
     if (chips) chips.scrollLeft = chipsLeft;
     // Restored into the rebuilt field, not the one that was read: that node is gone.
@@ -2772,8 +3109,6 @@ export function unmountQuickbar() {
     namesOpenOverride = null;
     focusRosterSearch = false;
     popupNeedsDrop = false;
-    thumbMeasured = false;
-    thumbBusts = false;
     thumbBumps.clear();
     // A frame already queued would call drawPanel after teardown. It finds no panel
     // and returns, but the id must not be left looking like a live schedule.

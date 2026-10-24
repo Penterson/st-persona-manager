@@ -108,6 +108,8 @@ export const STRINGS = deepFreeze({
         personaChangedNotSaved: '페르소나 변경으로 저장 취소',
         readOnly: '더 새로운 판이 만든 데이터라 읽기 전용',
         versionNotApplicable: '해당 버전은 현재 페르소나에 적용 불가',
+        // After 관리 시작 split the description by its titles.
+        adoptSplit: n => `기존 설명문을 항목 ${n}개로 나눠 가져오기 완료`,
         confirmVersionOverOutsideEdit: '버전 변경 (외부 수정분 소실)',
         newVersionName: '새 버전 이름',
         // A pick left naming a choice that was deleted. Never snapped to the first
@@ -185,6 +187,8 @@ export const STRINGS = deepFreeze({
         confirmNameClash: (name, who) => `이름 "${name}" 적용 (대화 속 "${who}"와 동명)`,
         namesNeedWritable: '현재 상태에서 이름 변경 불가',
         saveCurrentAsVersion: '+ 현재 구성을 버전으로 저장',
+        // [⋯] beside a version row: the screen reader hears which version's tools.
+        versionToolsAria: name => `버전 "${name}" 관리`,
         chipAll: '전체',
         // Named for what it opens: the checkboxes that put this persona in groups.
         // Plain 편집 would now read as the manager's 편집 tab.
@@ -283,6 +287,7 @@ export const STRINGS = deepFreeze({
             'version-overwrite': '버전 덮어쓰기',
             'version-repick': '버전 구성 수정',
             'version-delete': '버전 삭제',
+            'version-move': '버전 순서 변경',
             restore: '되돌리기',
             'history-evicted': '이력 정리',
             'history-expired': '이력 기간 만료',
@@ -296,6 +301,8 @@ export const STRINGS = deepFreeze({
             'asset-upload': '에셋 올리기',
             'asset-delete': '에셋 삭제',
             'asset-select': '버전 에셋 선택',
+            'image-crop': '이미지 위치 조절',
+            'split-headings': '제목별 분류',
             placement: '프롬프트 배치 변경',
             lorebook: '월드인포 연결',
             'name-local': '언어별 이름 변경',
@@ -316,6 +323,8 @@ export const STRINGS = deepFreeze({
             expired: n => `${n}건 정리`,
             restored: n => `${n}번째 이력으로 복원`,
             imported: '기존 설명문에서 가져오기',
+            importedSplit: n => `기존 설명문에서 가져오기 (항목 ${n}개로 분류)`,
+            resplit: n => `본문 ${n}개`,
         },
 
         /* Shell and guards */
@@ -360,6 +369,16 @@ export const STRINGS = deepFreeze({
         confirmFillDefaults: n => `기본 항목 ${n}개 추가`,
         fillDefaultsNothing: '추가할 기본 항목 없음',
         fillDefaultsDone: n => `항목 ${n}개 추가 완료`,
+        /* 제목별 분류 (user request): a description adopted whole, split by the
+           titles written inside it. */
+        resplit: '제목별 분류',
+        resplitTitle: '본문 속 제목 줄(## 외모, [외모], 외모:)을 기준으로 각 항목에 배치',
+        confirmResplit: (targets, created) => (created
+            ? `제목 기준 분류: 항목 ${targets}개, 새 항목 ${created}개 (기존 본문 뒤에 추가)`
+            : `제목 기준 분류: 항목 ${targets}개 (기존 본문 뒤에 추가)`),
+        resplitNothing: '나눌 제목 줄 없음',
+        resplitDraft: '저장하지 않은 본문 편집이 있어 분류 불가',
+        resplitDone: n => `본문 ${n}개 정리 완료. 이전 내용은 이력 탭에서 복구 가능`,
         newItemName: '새 항목 이름',
         itemName: '항목 이름',
         itemGone: '삭제된 항목',
@@ -585,6 +604,17 @@ export const STRINGS = deepFreeze({
         versionImageNow: '지금 적용',
         versionImageClear: '지정 해제',
         versionImageNoBinding: '지정된 이미지 없음',
+        /* 위치·크기 조절 (user request). The frame is the avatar's own 2:3 shape,
+           and the dashed square is the part every list and chat icon shows. */
+        versionImageFramed: label => `${label} · 위치 조절`,
+        versionImageFrame: '위치·크기 조절',
+        framingHint: '끌어서 위치 · 두 손가락이나 막대로 확대 → [저장]',
+        framingGuide: '점선 안: 목록과 채팅 아이콘에 보이는 범위',
+        framingZoom: '확대 배율',
+        framingReset: '처음 위치',
+        framingLoadFailed: '이미지 불러오기 실패',
+        framingSavedLater: '위치·크기 저장 완료. 해당 버전 적용 시 반영',
+        framingDecodeFailed: label => `이미지 크기 확인 실패로 교체 취소: ${label}`,
         // Replacing the picture overwrites SillyTavern's avatar file, so the one
         // that was there is copied into the asset folder first. Said out loud
         // because it happens once and silently changes what the folder holds.
@@ -605,7 +635,7 @@ export const STRINGS = deepFreeze({
         confirmRestoreImage: '보관된 원본 이미지로 되돌리기',
         imageRestored: '원본 이미지 복원 완료',
         confirmOverwriteVersion: name => `버전 "${name}" 덮어쓰기 (이전 내용 복구 불가)`,
-        confirmDropVersion: name => `버전 "${name}" 삭제`,
+        confirmDropVersion: name => `버전 "${name}" 삭제 (태그·이미지 지정 포함, 복구 불가)`,
         overwrite: '덮어쓰기',
         overwriteTitle: '현재 구성을 해당 버전에 덮어쓰기',
         // What a version's slot reads when its pick names nothing that still
@@ -748,6 +778,8 @@ export const STRINGS = deepFreeze({
         historyCoalesceMinutesHint: '설정 시간 안의 연속 편집은 이력 한 건으로 병합 (1~30)',
         defaultHeadingFormat: '새 페르소나의 항목 제목',
         defaultHeadingFormatHint: '관리를 새로 시작하는 페르소나가 쓸 형식. 이미 만든 페르소나는 편집 탭에서 각각 변경',
+        splitOnAdopt: '가져올 때 항목별 분류',
+        splitOnAdoptHint: '관리 시작 시 설명문의 제목 줄(## 외모, 외모:, [외모] 등)을 항목 이름과 맞춰 각 항목에 배치. 이름이 없는 제목은 새 항목. 끄면 설명문 전체를 첫 항목에 보관',
         autoLocalName: '언어별 이름 자동 적용',
         autoLocalNameHint: '채팅에 쓰인 언어를 보고 그 언어의 이름으로 페르소나 이름 자동 변경. 등록된 이름이 없거나 같은 이름의 페르소나가 있으면 그대로 유지',
         injectAssetMacros: '에셋 매크로 주입',
@@ -895,5 +927,29 @@ export const STRINGS = deepFreeze({
         importDone: '설정 가져오기 완료',
         regexHint: `[정규식으로 내보내기]는 현재 활성 페르소나의 폴더 하나에 고정된 표시 전용 정규식. ${APP_NAME}의 이미지 표시 기능과 병용 금지, 둘 중 하나만 사용. ST 정규식 화면에 넣은 뒤 확인 필요`,
         importHint: `[설정 가져오기]는 ${APP_NAME}가 저장한 내용을 통째로 교체. 먼저 [설정 내보내기]로 현재 상태 백업 권장`,
+    },
+
+    /* 가져오기 자동 분류 (classify.js). Words READ from a description, never shown:
+       the other names a title may use for each shipped item. Keyed by the shipped
+       item name exactly as store.js spells it. Spaces, case and & / · are ignored
+       when matching, so each word is written once. */
+    classify: {
+        titleAliases: {
+            '기본 정보': ['기본정보', '프로필', '개요', 'profile', 'basic info', 'basic information', 'basics', 'overview', 'info'],
+            '외모': ['외형', '외관', '생김새', 'appearance', 'looks', 'physical appearance', 'physical'],
+            '배경': ['배경 설정', '과거', '배경 이야기', '설정', 'background', 'backstory', 'history'],
+            '성격': ['personality', 'traits', 'personality traits'],
+            '버릇 & 습관': ['habits', 'quirks', 'mannerisms'],
+            '능력 & 기술': ['특기', 'skills', 'abilities'],
+            '관계': ['인간관계', '대인관계', 'relationships', 'relations'],
+            '숨겨진 욕망': ['욕망', 'desires', 'hidden desires', 'secret desires'],
+            '말투 & 대사': ['어투', 'speech', 'speech style', 'dialogue', 'voice'],
+            'NSFW 외모': ['nsfw appearance'],
+            // Only words that mean the sexual kind: 취향 and preferences also say
+            // 커피와 영화, and that text does not belong in this item.
+            '성적 취향': ['kinks', 'sexual preferences'],
+            'AI 가이드라인': ['가이드라인', 'guidelines', 'ai guidelines', 'ai notes'],
+            '캐릭터 노트': ['노트', '메모', 'notes', 'character notes'],
+        },
     },
 });

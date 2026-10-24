@@ -1,4 +1,5 @@
 // Persona image assets on top of SillyTavern's sprites API.
+import { validCrop, cropPixels, writtenKey, cropFromView, viewFromCrop } from './framing.js';
 
 const PREFIX = 'persona_';
 // sanitize-filename truncates to 255 bytes, and the string we hand the server is
@@ -147,9 +148,18 @@ function formHeaders(ctx) {
     return headers;
 }
 
+// A bound, not a measurement. fetch has no timeout of its own, and CHAT_CHANGED
+// awaits this listing before it renders the chat's image tags: a stalled server
+// (a Termux process restarting) held those tags as raw text for as long as the
+// browser kept the socket open. Ten seconds is past any listing that answers.
+const LISTING_TIMEOUT_MS = 10000;
+
 export async function listAssets(ctx, folderKey) {
+    const timeout = globalThis.AbortSignal?.timeout;
+    const signal = typeof timeout === 'function' ? timeout.call(globalThis.AbortSignal, LISTING_TIMEOUT_MS) : undefined;
     const res = await fetch(`/api/sprites/get?name=${encodeURIComponent(folderKey)}`, {
         headers: ctx.getRequestHeaders(),
+        signal,
     });
     if (!res.ok) throw new Error(`sprites/get ${res.status}`);
     const data = await res.json();
@@ -242,6 +252,8 @@ export function resetAssetProbes() {
     // load that a picture was kept when nothing was written down.
     backedUpThisSession.clear();
     spriteFileField = null;
+    spriteFieldsExhausted = false;
+    shownSizes.clear();
 }
 
 export async function deleteAsset(ctx, folderKey, label) {
@@ -306,6 +318,23 @@ export function planRender(text, resolvePath) {
     return { parts, resolved };
 }
 
+/* The size each chat picture turned out to be, by path. The sprite listing carries
+   no dimensions, so a picture's first appearance cannot reserve its height and the
+   text under it moves down when it loads. But SillyTavern empties and refills
+   messages as the chat scrolls, and every refill used to rebuild the picture at
+   zero height and shift the text again, under the thumb. Once a path has loaded
+   once, its width and height go on the element, and the browser keeps the space
+   from the first frame. One entry per picture the chat has shown. */
+const shownSizes = new Map();
+
+function rememberSize(img, path) {
+    // A property, not a listener: the element is ours and has no other handler.
+    img.onload = () => {
+        img.onload = null;
+        if (img.naturalWidth > 0) shownSizes.set(path, [img.naturalWidth, img.naturalHeight]);
+    };
+}
+
 export function renderInElement(el, resolvePath, style) {
     if (!el) return 0;
     /* The sanitiser check that used to stand here went with the string it was
@@ -351,6 +380,9 @@ export function renderInElement(el, resolvePath, style) {
                builds its thumbnail this way. */
             const img = document.createElement('img');
             img.className = assetClass(style);
+            const known = shownSizes.get(part.path);
+            if (known) { img.width = known[0]; img.height = known[1]; }
+            else rememberSize(img, part.path);
             img.src = part.path;
             img.loading = 'lazy';
             img.alt = '';
@@ -472,9 +504,35 @@ export async function restoreAvatarBackup({ ctx, root, avatarId, label }) {
     });
 }
 
-export async function applyBoundImage({ ctx, root, persona, avatarId, label, force, known, now }) {
+// A picture's pixel size, read from the file itself. The crop is stored as
+// fractions so it survives the file under its name being replaced, and the
+// endpoint wants pixels. null when the browser cannot decode it.
+export async function imageSize(file) {
+    try {
+        if (typeof globalThis.createImageBitmap === 'function') {
+            const bitmap = await globalThis.createImageBitmap(file);
+            const size = { width: bitmap.width, height: bitmap.height };
+            bitmap.close?.();
+            if (size.width > 0 && size.height > 0) return size;
+        }
+    } catch { /* falls through to the element */ }
+    if (typeof globalThis.Image !== 'function' || typeof URL?.createObjectURL !== 'function') return null;
+    const url = URL.createObjectURL(file);
+    try {
+        return await new Promise(resolve => {
+            const img = new globalThis.Image();
+            img.onload = () => resolve(img.naturalWidth > 0 ? { width: img.naturalWidth, height: img.naturalHeight } : null);
+            img.onerror = () => resolve(null);
+            img.src = url;
+        });
+    } finally { URL.revokeObjectURL(url); }
+}
+
+export async function applyBoundImage({ ctx, root, persona, avatarId, label, crop, force, known, now }) {
     if (!label) return { skipped: 'none' };
-    if (!force && persona?.avatarWritten === label) return { skipped: 'same' };
+    // The label alone said nothing about framing: the same picture framed anew
+    // has to be written again.
+    if (!force && persona?.avatarWritten === writtenKey(label, crop)) return { skipped: 'same' };
     return queueImageWrite(async () => {
         try {
             const key = resolveFolderKey(root, avatarId);
@@ -531,7 +589,22 @@ export async function applyBoundImage({ ctx, root, persona, avatarId, label, for
                well as invisible. */
             const file = await fetchAssetFile(hit.path, label);
             if (!file) return { error: 'fetch', detail: label, backup };
-            const wrote = await uploadPersonaAvatar(ctx, avatarId, file);
+            // A framed picture is cut by the server, from the pixels of THIS file.
+            // One that cannot be measured is not written whole instead: that is the
+            // picture the user framed away from.
+            let cropPx = null;
+            if (validCrop(crop)) {
+                const size = await imageSize(file);
+                // Fitted to THIS file first. The crop is stored as fractions of the
+                // picture it was made on; a file replaced under the same name with
+                // another shape turned those fractions into a sliver that the
+                // server's 2:3 cover then zoomed into. viewFromCrop keeps its centre
+                // and zoom, cropFromView gives the 2:3 frame on this picture.
+                const fitted = size ? cropFromView(size.width, size.height, viewFromCrop(size.width, size.height, crop)) : null;
+                cropPx = fitted ? cropPixels(fitted, size.width, size.height) : null;
+                if (!cropPx) return { error: 'decode', detail: label, backup };
+            }
+            const wrote = await uploadPersonaAvatar(ctx, avatarId, file, cropPx);
             if (!wrote.ok) return { error: 'upload', detail: wrote.detail ?? wrote.reason, backup };
             return { ok: true, backup };
         } catch (e) {
@@ -643,7 +716,13 @@ function bustPersonaImage(ctx, avatarId) {
 
    The endpoint answers the question directly instead. A 200 means the file is
    written; anything else carries a status worth putting on screen. */
-export async function uploadPersonaAvatar(ctx, avatarId, file) {
+/* crop is SillyTavern's own query, the one its crop dialog sends
+   (personas.js changeUserAvatar, src/endpoints/characters.js
+   applyAvatarCropResize, read 2026-10-24): whole pixels x, y, width, height, and
+   want_resize asking for the 512 x 768 cover. want_resize follows the user's own
+   never_resize_avatars, exactly as ST's dialog decides it. Without a crop the
+   server keeps the picture whole, which is what this sent before. */
+export async function uploadPersonaAvatar(ctx, avatarId, file, crop) {
     const body = new FormData();
     // The field names are SillyTavern's own form: avatar for the file, and
     // overwrite_name for the avatar being replaced. An empty overwrite_name
@@ -652,7 +731,10 @@ export async function uploadPersonaAvatar(ctx, avatarId, file) {
     body.append('overwrite_name', avatarId);
     let res;
     try {
-        res = await fetch('/api/avatars/upload', {
+        const query = crop
+            ? `?crop=${encodeURIComponent(JSON.stringify({ ...crop, want_resize: !ctx?.powerUserSettings?.never_resize_avatars }))}`
+            : '';
+        res = await fetch(`/api/avatars/upload${query}`, {
             method: 'POST',
             headers: formHeaders(ctx),
             cache: 'no-cache',
