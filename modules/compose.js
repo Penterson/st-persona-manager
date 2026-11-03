@@ -100,6 +100,11 @@ export function writePlacement(ctx, avatarId, patch, activeAvatar = null) {
         if (Object.hasOwn(patch, 'position')) pu.persona_description_position = patch.position;
         if (Object.hasOwn(patch, 'depth')) pu.persona_description_depth = patch.depth;
         if (Object.hasOwn(patch, 'role')) pu.persona_description_role = patch.role;
+        // SillyTavern mirrors the lorebook the same way (personas.js
+        // selectCurrentPersona), and world info reads the singular key. Without
+        // it a lorebook attached here reached the prompt only after the persona
+        // was selected again.
+        if (Object.hasOwn(patch, 'lorebook')) pu.persona_description_lorebook = patch.lorebook;
     }
     return true;
 }

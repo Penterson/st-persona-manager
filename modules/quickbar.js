@@ -6,14 +6,14 @@ import {
     getState, saveAndCompose, adopt, getPreciseApi, getRoot, adoptFor, refresh, KEEP_DESCRIPTION_KINDS,
 } from './state.js';
 import { freshContext } from './ctx.js';
-import { compose } from './compose.js';
+import { compose, headingLine } from './compose.js';
 import { addLog, snapshot, enforceGlobalBudget, expireOldHistory } from './history.js';
 import { toggleMember, SORT_KEYS, livingLabels } from './roster.js';
 import {
     pickPersonaCommand, quoteArg, describeSelection, waitFor, schedulerTurn, divergedActions,
     buildRosterView, sortLabel, isTextEntry, versionApplicable, versionAlreadyApplied,
     popupVerdict, shouldSelfCorrect, POPUP_STUCK_MS, POPUP_STUCK_CHECKS, rosterVersionLine,
-    pickAutoName, nameCollides,
+    pickAutoName, nameCollides, conversationLanguage,
 } from './quickbar-pure.js';
 // Every sentence the user reads on this panel comes from there.
 import { STRINGS } from './strings.js';
@@ -29,7 +29,7 @@ import { applyBoundImage } from './assets.js';
 import { validCrop, writtenKey } from './framing.js';
 import { itemsWithText } from './classify.js';
 // Matching, language detection and paging.
-import { rankOf, matchRanges, srcOf, detectLanguage, chatLanguage, pageOf } from './search-pure.js';
+import { rankOf, matchRanges, srcOf, detectLanguage, pageOf } from './search-pure.js';
 // DOM helpers shared with the manager and the settings drawer.
 import {
     el, track, runCleanups, blockDrawerClose, isComposingKey, makeRowActivatable,
@@ -186,9 +186,61 @@ const thumbBumps = new Map();
 // the user types in the search box.
 const LIST_COLLATOR = new Intl.Collator(undefined, { numeric: true });
 
+/* The token is the moment of the replacement, not a count. A count restarted at
+   1 every session, so the first replacement of a new session asked for the very
+   address the previous session's first replacement had cached, and the browser
+   answered with that older picture: the 이미지 교체 that "did nothing". */
 export function bumpThumbnails(avatarId) {
     if (!avatarId) return;
-    thumbBumps.set(avatarId, (thumbBumps.get(avatarId) ?? 0) + 1);
+    const previous = thumbBumps.get(avatarId) ?? 0;
+    thumbBumps.set(avatarId, Math.max(Date.now(), previous + 1));
+}
+
+/* Everything that draws a persona's picture, told at once that it changed.
+
+   A replacement used to bump the token and redraw only the screen that made it.
+   The icon beside the send box is painted on pm:changed, and an avatar upload
+   emits no SillyTavern event, so it kept the old picture until the next persona
+   switch; SillyTavern's own persona list and the avatars on chat messages kept
+   it until the page was reloaded (the toast even said so). Now: our icon and
+   panel repaint from the new token, the manager and the settings drawer hear
+   pm:changed, and every <img> of SillyTavern's that shows this persona is
+   pointed at the new picture. */
+export function personaImageChanged(avatarId) {
+    if (!avatarId) return;
+    bumpThumbnails(avatarId);
+    const ctx = freshContext();
+    const btn = document.getElementById(BUTTON_ID);
+    if (btn) paintButton(ctx, btn);
+    if (document.getElementById(PANEL_ID)) scheduleDraw();
+    refreshHostImages(ctx, avatarId, thumbBumps.get(avatarId));
+    document.dispatchEvent(new CustomEvent('pm:changed'));
+}
+
+function withoutToken(src) {
+    return String(src ?? '').replace(/([?&])pmv=\d+(&|$)/, (_, lead, tail) => (tail ? lead : '')).replace(/[?&]$/, '');
+}
+
+// SillyTavern's own images of this persona: the thumbnail its persona list and
+// chat messages use, and the full-size file under User Avatars. Matched on the
+// address with any earlier token of ours removed, so a second replacement finds
+// the images the first one re-pointed.
+function refreshHostImages(ctx, avatarId, token) {
+    if (!token) return;
+    let thumb = null;
+    try { thumb = ctx?.getThumbnailUrl?.('persona', avatarId) ?? null; } catch { thumb = null; }
+    const full = `User Avatars/${avatarId}`;
+    for (const img of document.querySelectorAll('img')) {
+        // Ours already carry the new token: they were painted from thumbnailUrl.
+        if (img.closest('[id^="pm-"], [class*="pm-"]')) continue;
+        const src = img.getAttribute('src');
+        if (!src) continue;
+        const bare = withoutToken(src);
+        let decoded = bare;
+        try { decoded = decodeURI(bare); } catch { /* compared as written */ }
+        if (bare !== thumb && !decoded.endsWith(full)) continue;
+        img.setAttribute('src', `${bare}${bare.includes('?') ? '&' : '?'}pmv=${token}`);
+    }
 }
 
 export function thumbnailUrl(ctx, avatarId) {
@@ -599,14 +651,14 @@ export function guardStartAvatar(startAvatar) {
     return writableOrSay(s);
 }
 
-function commit(kind, detail) {
+function commit(kind, detail, { outside } = {}) {
     // Read before the save, used after it. The log line describes an accepted write,
     // so writing it first grows persona.log by one line every time state.js refuses,
     // and a refused write is exactly the case where nothing happened to record.
     const persona = getState()?.persona ?? null;
     // Second line of defence: state.js refuses the write outright when the active
     // persona is no longer the one this panel was drawn for.
-    const result = saveAndCompose(panelAvatar, { write: !KEEP_DESCRIPTION_KINDS.has(kind) });
+    const result = saveAndCompose(panelAvatar, { write: !KEEP_DESCRIPTION_KINDS.has(kind), outside });
     if (!result) { notify('error', STRINGS.common.cannotSaveNow); return false; }
     if (result.ok === false) {
         notify('error', STRINGS.common.personaChangedNotSaved);
@@ -618,6 +670,7 @@ function commit(kind, detail) {
         // writeDescription already saved, so this line needs a save of its own.
         freshContext()?.saveSettingsDebounced?.();
     }
+    if (result.keptOutside) notify('warning', STRINGS.common.outsideKept(result.keptOutside.section));
     // A kept description emits no PERSONA_UPDATED, and the icon beside the send
     // box reads the version name from that event's pm:changed: rename or delete
     // the version it shows and the icon went on showing the old name.
@@ -903,9 +956,8 @@ async function applyVersion(versionId) {
     // tap's picture upload is still in flight. With an outside edit pending it
     // is not a no-op, since applying puts the version's text back.
     if (!s.diverged && versionAlreadyApplied(s.persona, versionId) && pictureSettled(s.persona, versionId)) return;
-    // Switching version on top of an outside edit throws that edit
-    // away, so ask once more instead of doing it quietly.
-    if (s.diverged && !(await askConfirm(STRINGS.common.confirmVersionOverOutsideEdit))) return;
+    // An outside edit is kept as a choice by the write itself (state.js
+    // keepOutsideText), so applying a version no longer has to ask first.
     const after = guardStartAvatar(startAvatar);
     if (!after?.persona) return;
     // Asked again of the persona being written to. The avatar matching is necessary
@@ -985,9 +1037,9 @@ export async function runBoundImageWrite(avatarId, versionId, force, known) {
         }
         return result;
     }
-    // The address holds a different picture whatever happens next, so the token
-    // is bumped before any of the bookkeeping below can return early.
-    bumpThumbnails(avatarId);
+    // The address holds a different picture whatever happens next, so every
+    // screen hears it before any of the bookkeeping below can return early.
+    personaImageChanged(avatarId);
     // Read again, because the three round trips above are long enough for the
     // root to have been replaced under us.
     const root = getRoot();
@@ -1058,8 +1110,20 @@ function revertOutsideEdit() {
     const s = guardAvatar();
     if (!s?.persona) return;
     // Rewriting the composed text is enough: writeDescription updates lastComposed,
-    // which is what made the state look diverged.
-    commit('diverge-revert', '');
+    // which is what made the state look diverged. The outside text is dropped on
+    // purpose here; that is what the button says.
+    commit('diverge-revert', '', { outside: 'discard' });
+}
+
+function stripLeadingHeading(text, heading) {
+    const source = String(text ?? '');
+    if (!heading) return source;
+    const trimmed = source.replace(/^\s+/, '');
+    if (!trimmed.startsWith(heading)) return source;
+    const rest = trimmed.slice(heading.length);
+    // Only a whole line: "외모:" must not eat the start of "외모: 키가 크다".
+    if (rest && !/^[ \t]*(\r?\n|$)/.test(rest)) return source;
+    return rest.replace(/^[ \t]*\r?\n/, '');
 }
 
 function absorbOutsideEdit() {
@@ -1093,16 +1157,20 @@ function absorbOutsideEdit() {
     if (!target || !variant) { notify('error', STRINGS.quick.absorbNoItem); return; }
     const now = Date.now();
     // The text we are about to overwrite goes into history first, so absorbing is
-    // never the operation that loses something.
-    snapshot(s.persona, variant.id, variant.text ?? '', now, s.settings);
+    // never the operation that loses something. Forced: inside the merge window
+    // a plain snapshot is skipped, and the body saved minutes ago would be gone.
+    snapshot(s.persona, variant.id, variant.text ?? '', now, s.settings, { force: true });
     // The per variant cap does not bound the total, and the
     // total is what fills settings.json. Taking a snapshot is the only moment the
     // total can grow, so it is the moment to enforce the cap.
     expireOldHistory(s.root, s.settings, now);
     enforceGlobalBudget(s.root, s.settings, now);
-    variant.text = text;
+    // The outside text is the COMPOSED text, so it opens with this item's own
+    // heading when the persona writes headings. Stored as is, compose added the
+    // heading again and every absorb stacked one more.
+    variant.text = stripLeadingHeading(text, headingLine(s.persona.headingFormat, target.name ?? ''));
     variant.updatedAt = now;
-    commit('diverge-absorb', target.name ?? '');
+    commit('diverge-absorb', target.name ?? '', { outside: 'discard' });
 }
 
 // These four write labels or settings, not persona content,
@@ -1477,7 +1545,7 @@ async function runAutoName() {
     // would be renaming whichever of two personas we guessed at.
     if (!s || s.ambiguous || !s.avatar || !s.persona) return;
     const ctx = freshContext();
-    const lang = chatLanguage(ctx?.chat);
+    const lang = conversationLanguage(ctx);
     const name = pickAutoName({
         persona: s.persona,
         lang,

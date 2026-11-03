@@ -3,6 +3,7 @@
 // Node. The DOM half lives in quickbar.js and must never be imported by a test.
 import { livingLabels, filterByLabel, sortEntries } from './roster.js';
 import { STRINGS } from './strings.js';
+import { chatSources, contextLanguage } from './search-pure.js';
 
 // Measured on the device. This build has no /persona-set-name, which is exactly
 // what the plan had hardcoded. These three
@@ -245,16 +246,24 @@ export function versionApplicable(persona, versionId) {
 export function versionAlreadyApplied(persona, versionId) {
     if (!persona || persona.activeVersionId !== versionId) return false;
     const version = (persona.versions ?? []).find(v => v?.id === versionId);
-    return !!version && picksEqual(persona.activePicks, version.picks);
+    return !!version && picksEqual(persona.activePicks, version.picks, livingSections(persona));
 }
 
-function picksEqual(a, b) {
+function livingSections(persona) {
+    return (Array.isArray(persona?.sections) ? persona.sections : []).map(section => section?.id).filter(Boolean);
+}
+
+/* Compared over the items that exist. Deleting an item removes it from the live
+   picks and leaves it in every saved version, so a whole-object comparison
+   called the active version modified the moment any item was deleted - the
+   (수정 있음) that versionApplicable's own rule already says is not true. */
+function picksEqual(a, b, living) {
     const left = a ?? {};
     const right = b ?? {};
-    const keys = Object.keys(left);
-    if (keys.length !== Object.keys(right).length) return false;
-    for (const k of keys) {
-        if (!Object.hasOwn(right, k) || left[k] !== right[k]) return false;
+    for (const id of living) {
+        const l = Object.hasOwn(left, id) ? left[id] : undefined;
+        const r = Object.hasOwn(right, id) ? right[id] : undefined;
+        if (l !== r) return false;
     }
     return true;
 }
@@ -273,7 +282,7 @@ export function describeSelection(persona) {
     // differ and the label says so, or they still name the same dead id and the
     // combination really is the saved one. The section that then drops out of the
     // prompt is reported separately, from compose().missing.
-    return picksEqual(version.picks, persona.activePicks) ? name : name + MODIFIED_SUFFIX;
+    return picksEqual(version.picks, persona.activePicks, livingSections(persona)) ? name : name + MODIFIED_SUFFIX;
 }
 
 // An unrecognised key, including undefined on a settings object saved before this
@@ -370,6 +379,48 @@ export function pickAutoName({ persona, lang, avatar, personas } = {}) {
         if (key !== avatar && other === name) return null;
     }
     return name;
+}
+
+/* What the language vote reads (search-pure.js contextLanguage), gathered from a
+   SillyTavern context. Pure: it only reads the object it is handed.
+
+   The character card comes from characters[characterId]; in a group chat, from
+   every member the group lists, since the conversation is held with all of
+   them. A card SillyTavern has loaded shallow (no description yet) still has
+   its name, and the name still votes. */
+export function languageContextOf(ctx) {
+    const chat = Array.isArray(ctx?.chat) ? ctx.chat : [];
+    const { user, reply, greeting } = chatSources(chat);
+    const characters = Array.isArray(ctx?.characters) ? ctx.characters : [];
+    let cards = [];
+    if (ctx?.groupId !== undefined && ctx?.groupId !== null && ctx?.groupId !== '') {
+        const group = (Array.isArray(ctx?.groups) ? ctx.groups : []).find(g => g?.id == ctx.groupId);
+        const members = Array.isArray(group?.members) ? group.members : [];
+        cards = characters.filter(c => c && members.includes(c.avatar));
+    } else if (ctx?.characterId !== undefined && ctx?.characterId !== null) {
+        const card = characters[Number(ctx.characterId)];
+        if (card) cards = [card];
+    }
+    const field = (card, key) => {
+        const value = card?.data?.[key] ?? card?.[key];
+        return typeof value === 'string' ? value : '';
+    };
+    const names = cards.map(card => field(card, 'name')).filter(Boolean);
+    if (!names.length && typeof ctx?.name2 === 'string') names.push(ctx.name2);
+    return {
+        user,
+        reply,
+        greeting,
+        card: cards.map(card => ['description', 'personality', 'scenario'].map(key => field(card, key)).join(' ')).join(' '),
+        name: names.join(' '),
+        persona: typeof ctx?.powerUserSettings?.persona_description === 'string'
+            ? ctx.powerUserSettings.persona_description : '',
+    };
+}
+
+// The language the persona's name should follow right now, or null.
+export function conversationLanguage(ctx) {
+    return contextLanguage(languageContextOf(ctx)).lang;
 }
 
 /* 채팅 속 동명이인 (user request 2026-08-27). Renaming the ACTIVE persona changes

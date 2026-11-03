@@ -11,7 +11,13 @@
         PERSONA_UPDATED: 'persona_updated', PERSONA_RENAMED: 'persona_renamed', PERSONA_CREATED: 'persona_created',
         PERSONA_DELETED: 'persona_deleted', CHAT_CHANGED: 'chat_changed', USER_MESSAGE_RENDERED: 'user_message_rendered',
         CHARACTER_MESSAGE_RENDERED: 'character_message_rendered', MESSAGE_UPDATED: 'message_updated',
+        MESSAGE_SWIPED: 'message_swiped',
     };
+    const characters = [{
+        name: 'Char', avatar: 'char.png', description: 'A friendly guide who lives by the park.',
+        first_mes: 'Hello {{user}}!',
+        data: { alternate_greetings: ['{{user}}, welcome back. Alice the cat says hi.'] },
+    }];
     const powerUserSettings = {
         personas: {
             '1700000000000-alice.png': 'Alice',
@@ -27,6 +33,9 @@
         never_resize_avatars: false,
     };
     const extensionSettings = {};
+    window.__spriteFiles = {
+        'persona_1700000000000-alice': ['Walk.png', 'pm-backup-1.png', '포즈 1.5.png'],
+    };
     const chat = [
         { name: 'Alice', is_user: true, mes: '안녕하세요. 오늘 날씨가 참 좋네요. 산책하러 나가볼까요?' },
         { name: 'Char', is_user: false, mes: '좋은 생각이에요. 공원까지 같이 걸어가요. {{pimg::walk}} 그리고 사진도 찍어요.' },
@@ -38,7 +47,13 @@
     const slash = window.__slash = [];
     const ctxOf = () => ({
         eventSource, event_types, powerUserSettings, extensionSettings, chat, name1, name2: 'Char',
+        characters, characterId: 0,
         chatMetadata: {},
+        updateMessageBlock(index, message) {
+            const node = document.querySelector(`#chat [mesid="${index}"] .mes_text`);
+            if (node) node.textContent = message.mes;
+        },
+        async saveChat() { window.__chatSaves = (window.__chatSaves ?? 0) + 1; },
         saveSettingsDebounced() { saveCalls.push(Date.now()); },
         uuidv4() { return 'u-' + Math.random().toString(36).slice(2, 10); },
         getThumbnailUrl(type, file) { return `/thumb/${type}/${encodeURIComponent(file)}`; },
@@ -85,13 +100,20 @@
         window.__fetches.push(u);
         if (u.startsWith('/api/sprites/get')) {
             const name = decodeURIComponent(u.split('name=')[1] ?? '');
-            if (name === 'persona_1700000000000-alice') return new Response(JSON.stringify([{ label: 'walk', path: '/sprite/walk.png' }, { label: 'pm-backup-1', path: '/sprite/b.png' }, { label: '포즈 1.5', path: '/sprite/p.png' }]), { status: 200 });
-            return new Response('[]', { status: 200 });
+            // What current SillyTavern answers (src/endpoints/sprites.js): the label is
+            // the file name lowercased and cut at the first dash or dot, the path is
+            // unencoded and stamped with the file's mtime.
+            const files = window.__spriteFiles[name] ?? [];
+            const listing = files.map(file => {
+                const base = file.replace(/\.[^.]*$/, '').toLowerCase();
+                return { label: base.match(/^(.+?)(?:[-\\.].*?)?$/)?.[1] ?? base, path: `/characters/${name}/${file}?t=20261103000000` };
+            });
+            return new Response(JSON.stringify(listing), { status: 200 });
         }
         if (u.startsWith('/api/sprites/upload')) return new Response('{}', { status: 200 });
         if (u.startsWith('/api/sprites/delete')) return new Response('{}', { status: 200 });
         if (u.startsWith('/api/avatars/upload')) return new Response('{}', { status: 200 });
-        if (u.startsWith('/thumb/') || u.startsWith('/sprite/')) {
+        if (u.startsWith('/thumb/') || u.startsWith('/characters/') || u.startsWith('User Avatars/')) {
             const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='), c => c.charCodeAt(0));
             return new Response(png, { status: 200, headers: { 'Content-Type': 'image/png' } });
         }

@@ -5,6 +5,7 @@ import { addLog } from './history.js';
 import { DEFAULT_SETTINGS, DEFAULT_SECTION_NAMES, SCHEMA_VERSION, makeId, migrate } from './store.js';
 import { STRINGS } from './strings.js';
 import { validCrop, writtenKey } from './framing.js';
+import { findAsset } from './assets.js';
 
 // What a version's slot reads when its pick names nothing that still exists.
 // The slot says 없음 and is never filled in for the user.
@@ -403,7 +404,15 @@ export const SETTING_RANGES = Object.freeze({
     pageSizeRoster: Object.freeze({ min: 0, max: 200, step: 1 }),
     pageSizeAssets: Object.freeze({ min: 0, max: 200, step: 1 }),
     pageSizeVersions: Object.freeze({ min: 0, max: 200, step: 1 }),
+    // Not on the drawer as a number field, but an imported file can hold any
+    // value: 0 or less emptied the recent list on every switch, and a string
+    // skipped roster.js's trim so the list grew without bound.
+    lastUsedCap: Object.freeze({ min: 10, max: 500, step: 1 }),
 });
+
+// The tile column count is a fixed list on the drawer (settings-ui.js
+// tileColumnsField); an imported file is held to the same list.
+export const TILE_COLUMN_CHOICES = Object.freeze([0, 2, 3, 4, 5, 6]);
 
 // A number input on Android accepts anything the user pastes, and an empty field
 // reads as an empty string. Both arrive here as NaN, and storing that would
@@ -453,6 +462,16 @@ export function parseImportedRoot(text) {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
         return { ok: false, message: STRINGS.settings.importNotShape };
     }
+    // The same for the containers. An array where an object belongs accepted
+    // named keys in memory and lost every one of them on the next save.
+    for (const key of ['personas', 'settings', 'lastUsed']) {
+        if (Object.hasOwn(parsed, key) && (!parsed[key] || typeof parsed[key] !== 'object' || Array.isArray(parsed[key]))) {
+            return { ok: false, message: STRINGS.settings.importNotShape };
+        }
+    }
+    if (Object.hasOwn(parsed, 'labels') && !Array.isArray(parsed.labels)) {
+        return { ok: false, message: STRINGS.settings.importNotShape };
+    }
     const version = parsed.schemaVersion;
     // A root a newer build owns is never rewritten. On import that
     // means refusing outright, because installing it would put this build into the
@@ -486,6 +505,17 @@ export function parseImportedRoot(text) {
         for (const key of Object.keys(SETTING_RANGES)) {
             if (Object.hasOwn(root.settings, key)) root.settings[key] = clampSetting(key, root.settings[key]);
         }
+        if (!TILE_COLUMN_CHOICES.includes(Number(root.settings.rosterTileColumns))) {
+            root.settings.rosterTileColumns = DEFAULT_SETTINGS.rosterTileColumns;
+        } else {
+            root.settings.rosterTileColumns = Number(root.settings.rosterTileColumns);
+        }
+    }
+    // Groups and versions that are not objects crash the roster and the version
+    // list on the first draw; they are dropped here with nothing else touched.
+    root.labels = root.labels.filter(label => label && typeof label === 'object' && !Array.isArray(label));
+    for (const persona of Object.values(root.personas)) {
+        persona.versions = persona.versions.filter(version => version && typeof version === 'object' && !Array.isArray(version));
     }
     return { ok: true, root };
 }
@@ -643,6 +673,12 @@ export function copyPersonaOnto(root, sourceAvatar, destAvatar, makeIdFn, now, d
         if (dest.avatarBackup) copy.avatarBackup = dest.avatarBackup;
         if (typeof dest.avatarWritten === 'string') copy.avatarWritten = dest.avatarWritten;
     }
+    // So do its names. The per-language names are who the destination IS, not
+    // what it says: carried over, 언어별 이름 자동 적용 renamed the destination to
+    // the source's name, after which the source could not take its own name back
+    // because two personas may not share one.
+    copy.names = dest && typeof dest === 'object' && dest.names && typeof dest.names === 'object'
+        ? { ...dest.names } : {};
     // On the COPY, not on the source: the source did not have anything happen to
     // it, and the destination's own log is gone with the record it belonged to.
     addLog(copy, 'persona-copy', detail ?? '', now);
@@ -813,7 +849,18 @@ export function versionImageState(version, assetLabels, listingOk) {
     const label = boundAsset(version);
     if (!label) return { label: null, state: 'none' };
     if (!listingOk) return { label, state: 'unknown' };
-    return { label, state: (assetLabels ?? []).includes(label) ? 'ok' : 'missing' };
+    // The file the binding names, matched the way the write matches it
+    // (assets.js findAsset), so the screen and the write cannot disagree about
+    // whether a binding saved under an older label still points at a file.
+    const hit = findAsset((assetLabels ?? []).map(name => ({ label: name, serverLabel: groupLabel(name) })), label);
+    return hit ? { label: hit.label, state: 'ok' } : { label, state: 'missing' };
+}
+
+// SillyTavern's own grouping of a file name (sprites.js): lowercased and cut at
+// the first dash or dot. Only used to recognise bindings saved under it.
+function groupLabel(name) {
+    const lower = String(name ?? '').toLowerCase();
+    return lower.match(/^(.+?)(?:[-\\.].*?)?$/)?.[1] ?? lower;
 }
 
 // Which versions point at one asset. The delete confirmation counts them, so a
@@ -1012,7 +1059,8 @@ const SECTION_NAME_ALIASES = Object.freeze({ '외형': '외모', '기본정보':
 
 function sectionNameKey(name) {
     const flat = String(name ?? '').replace(/\s+/g, '');
-    const alias = SECTION_NAME_ALIASES[flat];
+    // Own keys only, for the same reason as classify.js keysFor.
+    const alias = Object.hasOwn(SECTION_NAME_ALIASES, flat) ? SECTION_NAME_ALIASES[flat] : undefined;
     return (alias ?? flat).replace(/\s+/g, '');
 }
 
@@ -1021,6 +1069,16 @@ function sectionNameKey(name) {
 export function missingDefaultSections(persona) {
     const have = new Set((persona?.sections ?? []).map(section => sectionNameKey(section.name)));
     return DEFAULT_SECTION_NAMES.filter(name => !have.has(sectionNameKey(name)));
+}
+
+/* A new item is picked by every saved version too. Applying a version replaces
+   the live picks with the version's own, and a version with no pick for an item
+   added after it was saved dropped that item's text out of the prompt (with a
+   빈 항목 warning for each). classify.js applyResplit already does this. */
+export function pickInEveryVersion(persona, sectionId, variantId) {
+    for (const version of Array.isArray(persona?.versions) ? persona.versions : []) {
+        if (version && typeof version === 'object') version.picks = { ...(version.picks ?? {}), [sectionId]: variantId };
+    }
 }
 
 // Appends every default section the persona does not already have, each with
@@ -1039,6 +1097,7 @@ export function fillDefaultSections(persona, makeIdFn, now) {
         persona.sections.push({ id: sectionId, name });
         persona.variants[sectionId] = [{ id: variantId, label: STRINGS.manager.defaultChoiceLabel, text: '', updatedAt: now }];
         persona.activePicks[sectionId] = variantId;
+        pickInEveryVersion(persona, sectionId, variantId);
         addLog(persona, 'section-add', name, now);
         added.push(name);
     }
@@ -1055,10 +1114,15 @@ export function fillDefaultSections(persona, makeIdFn, now) {
 // The full file list is a parameter because null cannot be turned into "all but
 // this one" without knowing what all is. Passing what the screen is showing keeps
 // the decision in one place.
+// Names compare without case, the way the {{persona_assets}} macro reads them
+// (assets.js activeAssetNames): selections saved under 0.2.0 and earlier hold
+// SillyTavern's lowercased label, and the box and the prompt must agree.
+const sameName = (a, b) => String(a ?? '').toLowerCase() === String(b ?? '').toLowerCase();
+
 export function assetSelected(version, filename) {
     const selection = version?.assetSelection;
     if (!Array.isArray(selection)) return true;
-    return selection.includes(filename);
+    return selection.some(name => sameName(name, filename));
 }
 
 export function toggleAssetSelection(version, filename, allFilenames = []) {
@@ -1067,7 +1131,11 @@ export function toggleAssetSelection(version, filename, allFilenames = []) {
     for (const name of allFilenames ?? []) {
         if (typeof name === 'string' && !all.includes(name)) all.push(name);
     }
-    const current = Array.isArray(version.assetSelection) ? version.assetSelection : null;
+    // Stored names are brought to the folder's own spelling first, so the rest
+    // of this function can compare exactly.
+    const raw = Array.isArray(version.assetSelection) ? version.assetSelection : null;
+    const current = raw === null ? null
+        : raw.map(name => all.find(file => sameName(file, name)) ?? name);
 
     let next;
     if (current === null) {

@@ -61,7 +61,10 @@ function keysFor(names) {
             const key = normalizeTitle(part);
             if (key) keys.add(key);
         }
-        for (const alias of ALIASES[name] ?? []) keys.add(normalizeTitle(alias));
+        // Own keys only: an item named constructor or toString read the
+        // function off Object.prototype here and for..of threw.
+        const aliases = Object.hasOwn(ALIASES, name) && Array.isArray(ALIASES[name]) ? ALIASES[name] : [];
+        for (const alias of aliases) keys.add(normalizeTitle(alias));
         keys.delete('');
         return keys;
     });
@@ -145,7 +148,12 @@ export function splitDescription(text, sectionNames, home = 0) {
         // </외모> after <외모>: the closing half of the title, not content.
         const close = /^<\/\s*([^<>]+?)\s*>$/.exec(lines[i].trim());
         if (close && current && normalizeTitle(close[1]) === normalizeTitle(current.title)) return;
-        if (!title || (title.kind === 'markdown' && title.level !== top)) {
+        // When markdown titles name items, markdown is the structure and a
+        // "메모: 커피를 좋아함" line inside a section is that section's text, not
+        // a title: the alias 메모 used to pull it out into 캐릭터 노트.
+        const contentLine = !title || (title.kind === 'markdown' && title.level !== top)
+            || (named.length > 0 && current?.kind === 'markdown' && title.kind === 'inline');
+        if (contentLine) {
             (current ? current.lines : preamble).push(lines[i]);
             return;
         }
@@ -253,6 +261,25 @@ function liveVariant(persona, section) {
     return list.find(entry => entry?.id === pick) ?? null;
 }
 
+// An item's own title on the first line of its body, in any of the forms a
+// title is written in, removed. Anything else is left exactly as it was.
+export function stripSelfTitle(text, name) {
+    const source = String(text ?? '');
+    const lines = source.replace(/\r\n?/g, '\n').split('\n');
+    const first = lines.findIndex(line => line.trim());
+    if (first === -1) return source;
+    const line = lines[first].trim();
+    const wanted = normalizeTitle(name);
+    if (!wanted) return source;
+    for (const form of STANDALONE) {
+        const m = form.re.exec(line);
+        if (!m) continue;
+        if (normalizeTitle(m[2]) !== wanted) return source;
+        return lines.slice(first + 1).join('\n').replace(/^\s*\n/, '');
+    }
+    return source;
+}
+
 export function planResplit(persona) {
     const sections = Array.isArray(persona?.sections) ? persona.sections : [];
     const names = sections.map(section => section?.name ?? '');
@@ -288,9 +315,9 @@ export function applyResplit(persona, plan, makeIdFn, now, defaultFormat, snapsh
     };
     const created = new Map();
     const appends = new Map();
-    const pushTo = (index, body) => {
+    const pushTo = (index, body, source) => {
         if (!appends.has(index)) appends.set(index, []);
-        appends.get(index).push(body);
+        appends.get(index).push({ body, source });
     };
     for (const source of plan.sources) {
         const keep = [source.split.preamble];
@@ -316,14 +343,15 @@ export function applyResplit(persona, plan, makeIdFn, now, defaultFormat, snapsh
                 }
                 index = created.get(key);
             }
-            pushTo(index, part.body);
+            pushTo(index, part.body, source);
         }
         const home = liveVariant(persona, persona.sections[source.index]);
         if (!home) continue;
         touch(home);
         home.text = keep.filter(Boolean).join('\n\n');
     }
-    for (const [index, bodies] of appends) {
+    const versions = Array.isArray(persona.versions) ? persona.versions : [];
+    for (const [index, moved] of appends) {
         const section = persona.sections[index];
         let target = liveVariant(persona, section);
         if (!target) {
@@ -335,13 +363,46 @@ export function applyResplit(persona, plan, makeIdFn, now, defaultFormat, snapsh
             persona.activePicks[section.id] = target.id;
         }
         touch(target);
-        target.text = [String(target.text ?? '').trim(), ...bodies].filter(Boolean).join('\n\n');
+        target.text = [String(target.text ?? '').trim(), ...moved.map(m => m.body)].filter(Boolean).join('\n\n');
+        /* A saved version that picks the source's body also lost the moved text
+           from it. When that version picks ANOTHER choice for this item, the text
+           goes there too, so applying the version still says everything it said
+           before the split. */
+        const extra = new Map();
+        for (const { body, source } of moved) {
+            const sourceId = persona.sections[source.index]?.id;
+            for (const version of versions) {
+                if (!version?.picks || version.picks[sourceId] !== source.variantId) continue;
+                const pickId = version.picks[section.id];
+                if (!pickId || pickId === target.id) continue;
+                if (!extra.has(pickId)) extra.set(pickId, []);
+                if (!extra.get(pickId).includes(body)) extra.get(pickId).push(body);
+            }
+        }
+        for (const [pickId, bodies] of extra) {
+            const variant = (persona.variants?.[section.id] ?? []).find(entry => entry?.id === pickId);
+            if (!variant) continue;
+            touch(variant);
+            variant.text = [String(variant.text ?? '').trim(), ...bodies].filter(Boolean).join('\n\n');
+        }
     }
     // The titles were part of the text until now. Taken out of the bodies under a
     // heading format of none, the item names would vanish from the prompt.
     if (persona.headingFormat !== 'markdown' && persona.headingFormat !== 'plain') {
         const written = plan.sources.map(source => source.split.format).find(Boolean);
         persona.headingFormat = written ?? (defaultFormat && defaultFormat !== 'none' ? defaultFormat : 'plain');
+        // Items that already carried their own title as their first line would
+        // now print it twice (## 성격 over ## 성격). That line goes; compose
+        // writes the title from here on.
+        for (const section of persona.sections) {
+            for (const variant of persona.variants?.[section.id] ?? []) {
+                if (typeof variant?.text !== 'string') continue;
+                const stripped = stripSelfTitle(variant.text, section.name);
+                if (stripped === variant.text) continue;
+                touch(variant);
+                variant.text = stripped;
+            }
+        }
     }
     for (const [variantId, text] of before) {
         if (text && typeof snapshotFn === 'function') snapshotFn(variantId, text);

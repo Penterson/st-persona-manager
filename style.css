@@ -170,14 +170,6 @@
     display: none;
 }
 
-.pm-quickbar-label {
-    font-size: 0.8em;
-    color: var(--pm-muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
 .pm-quickbar-backdrop {
     position: fixed;
     inset: 0;
@@ -221,8 +213,6 @@
     border-bottom: 1px solid color-mix(in srgb, currentColor 18%, transparent);
     padding-bottom: 4px;
 }
-
-.pm-quickbar-group:last-of-type { border-bottom: none; }
 
 .pm-quickbar-head,
 .pm-manager-head {
@@ -2956,25 +2946,14 @@
    persona picker all suppress the Android tap highlight and none of them drew
    anything in its place, so a tap on a tile did nothing visible until the redraw
    landed - which on a phone is long enough to tap again. The wash is the same one
-   every button in this file uses. Before the filled-state rules above in source
-   order, so a filled control keeps the darker treatment they give it. */
+   every button in this file uses. Filled controls are excluded by selector, so
+   they keep the darker treatment the rules above give them. */
 .pm-quickbar-tile:active,
-.pm-manager-tab:active,
-.pm-quickbar-chip:active,
+.pm-manager-tab:not(.pm-manager-tab-active):active,
+.pm-quickbar-chip:not(.pm-quickbar-chip-active):active,
 .pm-manager-target:active,
-.pm-manager-rowname:active {
+.pm-manager-rowname:not(:disabled):active {
     background: color-mix(in srgb, currentColor 18%, transparent);
-}
-
-.pm-manager-tab-active:active,
-.pm-quickbar-chip-active:active {
-    background: color-mix(in srgb, var(--pm-mass) 84%, var(--pm-on-mass));
-    color: var(--pm-on-mass);
-}
-
-.pm-mass .pm-quickbar-chip-active:active {
-    background: color-mix(in srgb, var(--pm-on-mass) 84%, var(--pm-mass));
-    color: var(--pm-mass);
 }
 
 @media (hover: hover) {
@@ -3351,4 +3330,221 @@
     max-height: none;
     font-size: 1em;
     line-height: 1.5;
+}
+
+/* ── 0.3.0 가시성 보정 ────────────────────────────────────────────────────────
+   One block, last in the file, so each correction wins the cascade without
+   reaching back into the rules above. Every item names what it fixes. */
+
+/* Disabled controls looked enabled. The base button rules paint body-colour
+   text on no background, which overrides the browser's own grey, and the
+   hover washes kept answering. A disabled control now reads as one: dimmed
+   (still above 3:1), no wash, a not-allowed cursor. */
+.pm-panel :is(button, select, input, textarea):disabled,
+.pm-settings :is(button, select, input, textarea):disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+@media (hover: hover) {
+    .pm-panel button:disabled:hover,
+    .pm-settings button:disabled:hover {
+        background: none;
+    }
+}
+
+/* Whole rows and tiles marked inactive dropped their muted second lines under
+   3:1. Inert by cursor and pointer-events; only lightly dimmed. */
+.pm-disabled {
+    opacity: 0.72;
+}
+
+/* Disabled checkboxes vanished (1.4:1), so ticked and unticked looked alike in
+   the read-only drawer. */
+.pm-settings-check:disabled,
+.pm-checkbox:disabled {
+    opacity: 0.7;
+}
+
+/* The state the user must repair was the faintest text on screen: struck AND
+   at 65% AND in the accent. Struck and bold at full ink now. */
+.pm-manager-dead {
+    opacity: 1;
+}
+
+.pm-manager-dead .pm-manager-pickvalue {
+    color: var(--SmartThemeBodyColor);
+    font-weight: 700;
+}
+
+/* Accent as text measured 2.7:1 on light themes. Ink text; the accent stays as
+   a rule beside it, where 3:1 is enough. */
+.pm-manager-editorhead {
+    color: var(--SmartThemeBodyColor);
+    box-shadow: inset 3px 0 0 var(--pm-accent);
+}
+
+.pm-settings-warn {
+    color: var(--SmartThemeBodyColor);
+    text-decoration: underline;
+    text-decoration-color: var(--pm-accent);
+    text-decoration-thickness: 2px;
+    text-underline-offset: 3px;
+}
+
+/* Warning banners were told apart by an accent ring alone (1.9:1 on dark ink).
+   A thick on-mass rule on the leading edge says it without colour. */
+.pm-quickbar-warn,
+.pm-manager-warn {
+    box-shadow: inset 6px 0 0 var(--pm-on-mass), inset 0 0 0 2px var(--pm-accent);
+}
+
+/* Focus ring and the current-tile ring: ink inside, accent outside, so they
+   clear 3:1 on light and dark themes alike. */
+.pm-panel :focus-visible,
+.pm-settings :focus-visible,
+.pm-quickbar:focus-visible {
+    outline: 2px solid var(--pm-mass, var(--SmartThemeBodyColor));
+    outline-offset: -2px;
+    box-shadow: inset 0 0 0 4px var(--pm-accent, var(--SmartThemeQuoteColor));
+}
+
+.pm-quickbar-tile-active .pm-quickbar-tileimgbox {
+    box-shadow: 0 0 0 2px var(--pm-mass), 0 0 0 4px var(--pm-accent);
+}
+
+/* In select mode the picked fill replaced the whole shadow and the current
+   tile lost its ring. Both now. */
+.pm-quickbar-tile-active.pm-picked .pm-quickbar-tileimgbox {
+    box-shadow: inset 0 0 0 3px var(--pm-mass), 0 0 0 2px var(--pm-mass), 0 0 0 4px var(--pm-accent);
+}
+
+/* A search hit inside an ink block was ink on ink. */
+.pm-picked .pm-mark,
+.pm-mass .pm-mark {
+    background: var(--pm-on-mass);
+    color: var(--pm-mass);
+}
+
+/* Input edges are the only edge an unfilled input has; 42% measured 2.6:1 on
+   white. 55% clears 3:1. */
+.pm-panel,
+.pm-quickbar-panel,
+.pm-manager-panel,
+.pm-settings {
+    --pm-rule: 1px solid color-mix(in srgb, currentColor 55%, transparent);
+}
+
+/* The browser's own dropdown list showed light text on its white list under a
+   dark theme. */
+.pm-panel option,
+.pm-settings option {
+    background: var(--pm-on-mass, var(--SmartThemeBlurTintColor));
+    color: var(--SmartThemeBodyColor);
+}
+
+/* Browsers with color-mix but without relative colour syntax (Firefox up to
+   127, Chromium up to 118) kept the translucent tint as the ink blocks' text
+   and the panel ground. An opaque system pair stands in. */
+@supports not (color: rgb(from white r g b)) {
+    .pm-panel,
+    .pm-quickbar-panel,
+    .pm-manager-panel,
+    .pm-settings {
+        --pm-on-mass: Canvas;
+        --pm-mass: CanvasText;
+        --pm-mass-muted: color-mix(in srgb, Canvas 68%, CanvasText);
+        color-scheme: light dark;
+    }
+}
+
+/* The save bar let a third of the scrolled text show through it. */
+.pm-manager-editorfoot {
+    background: var(--pm-on-mass);
+}
+
+/* Tap targets. Rows without a portrait were 37-44px and sat edge to edge. */
+.pm-row {
+    min-height: 44px;
+    box-sizing: border-box;
+}
+
+/* The ⋯ button's 3px outward reach covered the neighbouring version row,
+   which has no gap to absorb it. The box itself is already 44px. */
+.pm-quickbar-vrow > .pm-quickbar-vmore::before {
+    content: none;
+}
+
+/* The roster controls clip vertically (overflow-x forces overflow-y), which
+   cut the buttons' upward reach; wrapped lines overlapped by 2px. */
+.pm-quickbar-rosterhead-controls {
+    padding-top: 3px;
+    row-gap: 6px;
+}
+
+/* The settings title and chevron sat flush against the ink block's edges. */
+.pm-settings-header.pm-mass {
+    padding: 10px 12px;
+}
+
+/* Hosts carry the stacking order, so the non-modal fallback (no <dialog>
+   top layer) is not painted over by SillyTavern's own positioned layers. */
+.pm-quickbar-host,
+.pm-manager-host {
+    z-index: 10000;
+}
+
+/* Height fallbacks for the moment before JS sizes the panels, or a build where
+   it cannot read the viewport. */
+.pm-quickbar-panel {
+    max-height: calc(100dvh - 24px);
+}
+
+/* The two selects meant to take the rest of the line were still capped. */
+.pm-manager-pickrow > .pm-manager-select,
+.pm-manager-valuerow > .pm-manager-select {
+    max-width: none;
+}
+
+/* The ink blocks stopped short of the right edge on desktop. */
+.pm-scroll {
+    scrollbar-gutter: stable both-edges;
+}
+
+/* The grain is a static texture under text, not motion. */
+@media (prefers-reduced-motion: reduce) {
+    .pm-grain::before { display: block; }
+}
+
+@media (prefers-contrast: more) {
+    .pm-grain::before { display: none; }
+}
+
+/* The picture framing editor: never wider than the screen, centred. */
+.pm-framing {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    max-width: 100%;
+    box-sizing: border-box;
+}
+
+.pm-framing .pm-manager-picklabel {
+    align-self: stretch;
+}
+
+.pm-framing-frame {
+    max-width: 100%;
+    touch-action: none;
+    cursor: grab;
+}
+
+.pm-framing-frame:active {
+    cursor: grabbing;
+}
+
+.pm-framing-zoom {
+    width: min(240px, 100%);
 }
