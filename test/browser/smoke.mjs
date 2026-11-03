@@ -1,0 +1,286 @@
+// Browser smoke test. Boots the extension against the SillyTavern mock in
+// host.html, drives every screen at phone and desktop widths, and fails on any
+// console error, page error, or scenario that does not end in the expected
+// state. Screenshots land in test/browser/out for a visual check.
+//
+//   npm run smoke          (needs `npm i -D playwright` and a Chromium it can launch)
+import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { chromium } from 'playwright';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const EXT = path.resolve(here, '..', '..');
+const OUT = path.join(here, 'out');
+const PORT = 8765;
+fs.mkdirSync(OUT, { recursive: true });
+
+const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json' };
+const server = http.createServer((req, res) => {
+    const url = req.url.split('?')[0];
+    const file = url.startsWith('/ext/') ? path.join(EXT, url.slice(5))
+        : (url === '/' || url === '/host.html') ? path.join(here, 'host.html')
+            : path.join(here, url);
+    if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); res.end(); return; }
+    res.writeHead(200, { 'Content-Type': types[path.extname(file)] ?? 'application/octet-stream' });
+    fs.createReadStream(file).pipe(res);
+});
+
+const failures = [];
+function expect(label, condition, detail) {
+    if (!condition) failures.push(`${label}${detail === undefined ? '' : `: ${JSON.stringify(detail)}`}`);
+}
+
+const ALICE = '1700000000000-alice.png';
+const ctxEval = page => page.evaluate(() => window.SillyTavern.getContext());
+
+async function openPanel(page) {
+    await page.click('#pm-quickbar');
+    await page.waitForTimeout(150);
+}
+
+// Opens a fold head if it is closed. The open state is a stored setting, so a
+// second tap in a later scene would close what the first one opened.
+async function ensureOpen(page, index) {
+    const head = page.locator('.pm-quickbar-foldhead').nth(index);
+    if ((await head.getAttribute('aria-expanded')) !== 'true') {
+        await head.click();
+        await page.waitForTimeout(100);
+    }
+}
+
+async function adopt(page) {
+    await ensureOpen(page, 0);
+    const row = page.locator('.pm-quickbar-row', { hasText: '관리 시작' }).first();
+    if (await row.count()) { await row.click(); await page.waitForTimeout(150); }
+}
+
+async function openManager(page, tab = '편집') {
+    await page.locator('.pm-quickbar-footer .pm-quickbar-btn', { hasText: tab }).click();
+    await page.waitForTimeout(250);
+}
+
+// A press that takes a human amount of time. Playwright's click is faster than
+// a frame; the bugs this guards against only appear when a frame can pass
+// between mousedown and mouseup.
+async function slowClick(page, locator) {
+    const box = await locator.boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.waitForTimeout(80);
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+}
+
+async function tour(width, label, light) {
+    const browser = await chromium.launch();
+    const page = await browser.newPage({ viewport: { width, height: 800 }, hasTouch: width < 600, isMobile: width < 600 });
+    const errors = [];
+    page.on('console', m => { if (m.type() === 'error' && !/404/.test(m.text())) errors.push(m.text()); });
+    page.on('pageerror', e => errors.push(`pageerror: ${e.message}`));
+    const shot = name => page.screenshot({ path: path.join(OUT, `${label}-${name}.png`) });
+
+    await page.goto(`http://127.0.0.1:${PORT}/host.html`);
+    if (light) await page.evaluate(() => document.body.classList.add('light'));
+    await page.waitForTimeout(400);
+    expect(`${label} icon mounted`, await page.evaluate(() => !!document.getElementById('pm-quickbar')));
+    expect(`${label} chat tag rendered`, await page.evaluate(() => !!document.querySelector('#chat img.pm-asset')));
+    const macros = await page.evaluate(() => ({ list: window.__macros.persona_assets?.(), prompt: window.__macros.persona_asset_prompt?.() }));
+    expect(`${label} asset macro hides backups`, macros.list === 'walk, 포즈 1.5', macros.list);
+    expect(`${label} prompt macro expands`, macros.prompt?.includes('walk, 포즈 1.5'));
+    await shot('00-boot');
+
+    /* Quick panel */
+    await openPanel(page);
+    expect(`${label} panel opens`, await page.evaluate(() => !!document.getElementById('pm-quickbar-panel')));
+    await shot('01-panel');
+    await adopt(page);
+    const root = await page.evaluate(() => window.SillyTavern.getContext().extensionSettings['persona-manager']);
+    expect(`${label} adopt split the description by its titles`, root?.personas?.[ALICE]?.headingFormat === 'markdown');
+    await page.evaluate(() => window.__popupAnswers.push('v1'));
+    await page.locator('.pm-quickbar-row', { hasText: '현재 구성을 버전으로 저장' }).first().click();
+    await page.waitForTimeout(200);
+    expect(`${label} version saved`, (await ctxEval(page)).extensionSettings['persona-manager'].personas[ALICE].versions.length === 1);
+    await shot('02-panel-versions');
+
+    // A label typed and added with a slow click: the blur-released redraw must
+    // wait for the gesture.
+    await page.locator('.pm-quickbar-rosterhead-controls .pm-quickbar-btn', { hasText: '그룹' }).click();
+    await page.waitForTimeout(100);
+    await page.locator('.pm-quickbar-row[data-pm-avatar]').first().click();
+    await page.waitForTimeout(100);
+    await page.fill('.pm-quickbar-newlabel-input', '친구');
+    await page.evaluate(() => document.dispatchEvent(new CustomEvent('pm:changed')));
+    await page.waitForTimeout(50);
+    await slowClick(page, page.locator('.pm-quickbar-newlabel .pm-quickbar-btn'));
+    const labels = (await ctxEval(page)).extensionSettings['persona-manager'].labels;
+    expect(`${label} slow click on [추가] creates the group`, labels.length === 1 && labels[0].members.includes(ALICE), labels);
+    await page.locator('.pm-quickbar-rosterhead-controls .pm-quickbar-btn', { hasText: '완료' }).click();
+    await page.waitForTimeout(100);
+    await shot('03-panel-group');
+
+    await page.locator('.pm-quickbar-rosterhead-controls .pm-quickbar-btn', { hasText: '검색' }).first().click();
+    await page.waitForTimeout(100);
+    await page.fill('.pm-search-input', 'bob');
+    await page.waitForTimeout(150);
+    expect(`${label} search filters`, await page.locator('[data-pm-avatar]').count() === 1);
+    await page.selectOption('.pm-quickbar-rosterhead-controls select >> nth=1', 'tilesNamed');
+    await page.waitForTimeout(150);
+    await shot('04-panel-tiles');
+    const controls = await page.evaluate(() => { const c = document.querySelector('.pm-quickbar-rosterhead-controls'); return [c.scrollWidth, c.clientWidth]; });
+    expect(`${label} roster controls fit on one line`, controls[0] <= controls[1], controls);
+
+    /* Manager: editor save with a slow click */
+    await openManager(page);
+    expect(`${label} manager opens`, await page.evaluate(() => !!document.getElementById('pm-manager-panel')));
+    await shot('05-manager');
+    await page.locator('.pm-manager-section .pm-manager-rowname').first().click();
+    await page.waitForTimeout(100);
+    await page.locator('.pm-manager-variantrow .pm-manager-btn', { hasText: '편집' }).first().click();
+    await page.waitForTimeout(100);
+    await page.fill('.pm-manager-editor-text', '새 본문입니다.');
+    await page.evaluate(() => document.dispatchEvent(new CustomEvent('pm:changed')));
+    await page.waitForTimeout(50);
+    await slowClick(page, page.locator('.pm-manager-editorfoot .pm-manager-btn', { hasText: '저장' }));
+    const after = await ctxEval(page);
+    expect(`${label} slow click on [저장] writes the body`, after.powerUserSettings.persona_description.startsWith('## 기본 정보\n새 본문입니다.'), after.powerUserSettings.persona_description);
+    expect(`${label} singular and map agree`, after.powerUserSettings.persona_description === after.powerUserSettings.persona_descriptions[ALICE].description);
+    await shot('06-editor-saved');
+    await page.locator('.pm-manager-editorfoot .pm-manager-btn', { hasText: '목록으로' }).click();
+    await page.waitForTimeout(100);
+
+    for (const t of ['페르소나', '언어별 이름', '프롬프트 배치']) {
+        await page.locator('.pm-manager-fold .pm-manager-rowname', { hasText: t }).first().click();
+        await page.waitForTimeout(80);
+    }
+    await shot('07-folds');
+    await page.locator('.pm-manager-btn', { hasText: '전문' }).first().click();
+    await page.waitForTimeout(150);
+    await shot('08-fulltext');
+    await page.locator('.pm-manager-editorfoot .pm-manager-btn', { hasText: '목록으로' }).click();
+    await page.waitForTimeout(100);
+
+    for (const [i, name] of ['versions', 'history', 'assets', 'labels'].entries()) {
+        await page.locator('.pm-manager-tab').nth(i + 1).click();
+        await page.waitForTimeout(250);
+        if (name === 'versions') { await page.locator('.pm-manager-version .pm-manager-rowname').first().click(); await page.waitForTimeout(150); }
+        if (name === 'history') {
+            await page.locator('.pm-manager-tabbody select').first().selectOption({ index: 1 });
+            await page.waitForTimeout(150);
+            const row = page.locator('.pm-manager-historyrow').first();
+            if (await row.count()) { await row.click(); await page.waitForTimeout(150); }
+        }
+        await shot(`1${i}-${name}`);
+    }
+    await page.locator('.pm-manager-tab').nth(3).click();
+    await page.waitForTimeout(250);
+    expect(`${label} asset rows exclude the backup`, await page.locator('.pm-manager-assetrow').count() === 2);
+
+    await page.locator('.pm-manager-target').click();
+    await page.waitForTimeout(150);
+    await shot('14-picker');
+    await page.locator('.pm-manager-personarow').nth(1).click();
+    await page.waitForTimeout(200);
+    await page.locator('.pm-manager-header .pm-manager-btn', { hasText: '닫기' }).click();
+    await page.waitForTimeout(200);
+    expect(`${label} closing the manager returns to the panel`, await page.evaluate(() => !!document.getElementById('pm-quickbar-panel')));
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(150);
+    expect(`${label} escape closes the panel`, await page.evaluate(() => !document.getElementById('pm-quickbar-panel')));
+
+    /* Outside edit, absorbed into the item that holds the text */
+    await page.evaluate(() => {
+        const c = window.SillyTavern.getContext();
+        const p = c.extensionSettings['persona-manager'].personas['1700000000000-alice.png'];
+        // One item holds everything, as after a whole-text adopt.
+        for (const s of p.sections) p.variants[s.id][0].text = '';
+        p.variants[p.sections[0].id][0].text = '원래 본문';
+        p.headingFormat = 'none';
+    });
+    await page.evaluate(() => document.dispatchEvent(new CustomEvent('pm:changed')));
+    await openPanel(page);
+    await ensureOpen(page, 0);
+    await page.locator('.pm-quickbar-row', { hasText: 'v1' }).first().click();
+    await page.waitForTimeout(200);
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(100);
+    await page.evaluate(async () => {
+        const c = window.SillyTavern.getContext();
+        c.powerUserSettings.persona_descriptions['1700000000000-alice.png'].description = '밖에서 고친 본문';
+        c.powerUserSettings.persona_description = '밖에서 고친 본문';
+        await c.eventSource.emit(c.event_types.PERSONA_UPDATED, '1700000000000-alice.png');
+    });
+    await openPanel(page);
+    await page.waitForTimeout(100);
+    expect(`${label} outside edit shows the banner`, await page.locator('.pm-quickbar-banner', { hasText: '외부' }).count() === 1);
+    await shot('15-diverged');
+    await page.locator('.pm-quickbar-banner .pm-quickbar-btn', { hasText: '가져오기' }).click();
+    await page.waitForTimeout(200);
+    const absorbed = await page.evaluate(() => {
+        const p = window.SillyTavern.getContext().extensionSettings['persona-manager'].personas['1700000000000-alice.png'];
+        // The live pick of each item, in item order, with its index kept.
+        return p.sections.map((s, i) => [i, p.variants[s.id].find(v => v.id === p.activePicks[s.id])?.text ?? '']).filter(([, t]) => t);
+    });
+    expect(`${label} absorb lands in the first item, which held the text`, absorbed.length === 1 && absorbed[0][0] === 0 && absorbed[0][1] === '밖에서 고친 본문', absorbed);
+    expect(`${label} absorb clears the banner`, await page.locator('.pm-quickbar-banner', { hasText: '외부' }).count() === 0);
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(100);
+
+    /* Duplicate names without a direct source: every write locks */
+    await page.evaluate(async () => {
+        const c = window.SillyTavern.getContext();
+        c.powerUserSettings.personas['1700000000001-bob.png'] = 'Alice';
+        document.getElementById('user_avatar_block').innerHTML = '';
+        await c.eventSource.emit(c.event_types.PERSONA_CHANGED);
+    });
+    await openPanel(page);
+    expect(`${label} duplicate names lock editing`, await page.locator('.pm-quickbar-banner', { hasText: '이름이 같은' }).count() === 1);
+    expect(`${label} switching stays enabled while locked`, await page.locator('[data-pm-avatar]:not(.pm-disabled):not([disabled])').count() === 3);
+    await shot('16-ambiguous');
+    await page.keyboard.press('Escape');
+
+    /* Read-only root from a newer build */
+    await page.evaluate(async () => {
+        const c = window.SillyTavern.getContext();
+        c.powerUserSettings.personas['1700000000001-bob.png'] = 'Bob';
+        c.extensionSettings['persona-manager'].schemaVersion = 99;
+        await c.eventSource.emit(c.event_types.PERSONA_CHANGED);
+    });
+    await openPanel(page);
+    expect(`${label} newer schema is read-only`, await page.locator('.pm-quickbar-banner', { hasText: '읽기 전용' }).count() === 1);
+    await shot('17-readonly');
+    await page.keyboard.press('Escape');
+    await page.evaluate(async () => {
+        const c = window.SillyTavern.getContext();
+        c.extensionSettings['persona-manager'].schemaVersion = 2;
+        await c.eventSource.emit(c.event_types.PERSONA_CHANGED);
+    });
+
+    /* Settings drawer and teardown */
+    await page.locator('#persona-manager_settings .pm-settings-header').click();
+    await page.waitForTimeout(150);
+    await page.evaluate(() => document.getElementById('persona-manager_settings')?.scrollIntoView());
+    await shot('18-settings');
+    expect(`${label} settings drawer opens`, await page.evaluate(() => document.getElementById('persona-manager_settings_content')?.style.display === 'block'));
+    expect(`${label} settings has section captions`, await page.locator('.pm-settings-section').count() === 6);
+    expect(`${label} destroy hook runs`, await page.evaluate(() => { try { globalThis.__personaManagerDestroy(); return true; } catch { return false; } }));
+    const leftovers = await page.evaluate(() => [...document.querySelectorAll('[id^="pm-"], [id^="persona-manager"]')].map(n => n.id));
+    expect(`${label} teardown leaves no nodes`, leftovers.length === 0, leftovers);
+    expect(`${label} no console or page errors`, errors.length === 0, errors);
+    await browser.close();
+}
+
+await new Promise(resolve => server.listen(PORT, resolve));
+try {
+    await tour(411, 'phone', false);
+    await tour(1280, 'desktop', true);
+} finally {
+    server.close();
+}
+if (failures.length) {
+    console.error(`smoke: ${failures.length} failure(s)`);
+    for (const f of failures) console.error(' -', f);
+    process.exit(1);
+}
+console.log('smoke: ok (screenshots in test/browser/out)');

@@ -61,14 +61,18 @@ function nameCompare(a, b, collator) {
 }
 
 // The value used for the three non name sort keys. Missing data becomes
-// negative infinity so it always lands at the back of a descending sort.
+// negative infinity; sortEntries puts it at the back in either direction.
 function sortValue(sortBy, entry, deps) {
     if (sortBy === 'recent') {
         const v = deps?.lastUsed?.[entry.avatar];
         return typeof v === 'number' ? v : -Infinity;
     }
     if (sortBy === 'modified') {
-        return modifiedAt(deps?.personas?.[entry.avatar]);
+        // modifiedAt answers 0 for a persona with no edits, and 0 is not a time:
+        // it has to read as missing, like the other two keys, or 오래된 수정순
+        // starts with every persona nobody has touched.
+        const modified = modifiedAt(deps?.personas?.[entry.avatar]);
+        return modified > 0 ? modified : -Infinity;
     }
     // created
     const created = createdAtFromAvatar(entry.avatar);
@@ -96,10 +100,16 @@ export function sortEntries(entries, sortBy, deps) {
     list.sort((a, b) => {
         const va = sortValue(key, a, deps);
         const vb = sortValue(key, b, deps);
-        // Subtracting here breaks the tie break: two missing entries are both
-        // -Infinity, their difference is NaN, NaN !== 0 skips the name compare,
-        // and the sort spec treats a NaN comparator result as equal. Compare the
-        // values first and only then fall through to the name.
+        // An entry with no data for the key goes LAST whichever way the list is
+        // read. Flipping the comparator alone put every never-used persona at
+        // the top of 오래된 사용순, ahead of the ones that had actually been used
+        // longest ago, which is the opposite of what the label promises.
+        const missingA = va === -Infinity;
+        const missingB = vb === -Infinity;
+        if (missingA !== missingB) return missingA ? 1 : -1;
+        // Compared, not subtracted: two missing entries are both -Infinity and
+        // their difference is NaN, which the sort spec reads as equal and which
+        // would skip the name tie break below.
         if (va !== vb) return dir * (vb - va);
         return nameCompare(a, b, collator);
     });

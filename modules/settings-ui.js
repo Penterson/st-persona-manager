@@ -15,9 +15,8 @@ import { getRoot, getState, readUsageBytes, refresh } from './state.js';
 import { freshContext, getPrecisePath, avatarBlockReport } from './ctx.js';
 import { addLog, expireOldHistory, enforceGlobalBudget } from './history.js';
 import { resolveFolderKey, buildImgHtml } from './assets.js';
-import {
-    el, notify, askConfirm, blockDrawerClose, isComposingKey, scheduleAutoName, cancelAutoName,
-} from './quickbar.js';
+import { notify, askConfirm, scheduleAutoName, cancelAutoName } from './quickbar.js';
+import { el, track, runCleanups, blockDrawerClose, isComposingKey } from './dom.js';
 import { invalidateManagerCaches } from './manager.js';
 import { clampSetting, SETTING_RANGES, serializeRoot, parseImportedRoot } from './manager-pure.js';
 // Every sentence the user reads in this drawer comes from there.
@@ -31,17 +30,6 @@ const HOST_ID = 'extensions_settings2';
 
 let mounted = false;
 let cleanups = [];
-
-function track(list, target, type, fn, options) {
-    target.addEventListener(type, fn, options);
-    list.push(() => target.removeEventListener(type, fn, options));
-}
-
-function runCleanups(list) {
-    for (const off of list.splice(0)) {
-        try { off(); } catch (e) { console.warn(`[${MODULE_NAME}] cleanup failed`, e); }
-    }
-}
 
 function save() {
     freshContext()?.saveSettingsDebounced?.();
@@ -79,8 +67,12 @@ function trimPerVariant(root, settings, now = Date.now()) {
         /* The rule history.js states where its own two sweeps obey it: history
            that vanishes without a line is indistinguishable from data loss. This
            sweep arrived without one, which made it the only way to delete stored
-           history and leave the 변경 기록 list saying nothing happened. */
-        if (mine) addLog(persona, 'history-expired', STRINGS.manager.logDetails.expired(mine), now);
+           history and leave the 변경 기록 list saying nothing happened.
+
+           Logged as 이력 정리 with its own detail. It used to borrow the
+           history-expired kind, which reads 이력 기간 만료 on screen: a line
+           naming a cause (age) for a deletion made for another (count). */
+        if (mine) addLog(persona, 'history-evicted', STRINGS.manager.logDetails.trimmed(mine), now);
         dropped += mine;
     }
     return dropped;
@@ -101,6 +93,12 @@ function tightensCap(key, previous, next) {
 }
 
 /* Field builders */
+
+// A caption over a group of rows. The drawer is twenty rows long, and without
+// these a user looking for the history caps had to read every row to find them.
+function sectionHead(text) {
+    return el('div', 'pm-settings-section', text);
+}
 
 function rowOf(labelText, control, hint) {
     const row = el('div', 'pm-settings-row');
@@ -729,9 +727,8 @@ function buildPanel() {
     readOnlyBanner.append(el('div', 'pm-manager-banner-text', STRINGS.settings.readOnlyBanner));
     content.append(readOnlyBanner);
     // The band, built the same way the manager's is (three spans, outer two
-    // ghosted and aria-hidden). Local rather than imported: settings-ui already
-    // imports el from quickbar, and one more cross-module edge for four lines of
-    // markup is not worth the coupling.
+    // ghosted and aria-hidden). Four lines of markup, kept local rather than
+    // shared: a cross-module edge is not worth it for this little.
     const band = el('div', 'pm-band');
     for (const ghost of [true, false, true]) {
         const span = el('span', `pm-band-word${ghost ? ' pm-band-ghost' : ''}`, STRINGS.settings.bandWord);
@@ -740,38 +737,50 @@ function buildPanel() {
     }
     content.append(band);
 
-    // Named for what it does. It was labelled 확장 사용, which promises a master
-    // switch this extension deliberately does not have (see store.js): the only
-    // thing it reaches is the quick bar icon, and its own hint said so. Turning the
-    // extension off is SillyTavern's own extension manager's job.
+    const sections = STRINGS.settings.sections;
+    /* 표시: what the extension puts on SillyTavern's own screens. 입력창 아이콘
+       표시 is named for what it does: it was labelled 확장 사용, which promises a
+       master switch this extension deliberately does not have (see store.js).
+       Turning the extension off is SillyTavern's extension manager's job. */
+    content.append(sectionHead(sections.display));
     content.append(toggleField('showQuickBar', STRINGS.settings.showQuickBar, STRINGS.settings.showQuickBarHint));
-    // Two switches, not one three way choice. Either can be on by
-    // itself, and both off is the shipped default.
+    // Two switches, not one three way choice. Either can be on by itself, and
+    // both off is the shipped default.
     content.append(toggleField('rosterShowVersionCount', STRINGS.settings.rosterShowVersionCount, STRINGS.settings.rosterShowVersionCountHint));
     content.append(toggleField('rosterShowVersionNames', STRINGS.settings.rosterShowVersionNames, STRINGS.settings.rosterShowVersionNamesHint));
-    // Tile columns and the three page sizes. 열 수 and 줄 수 are one
-    // setting in two fields (either left at 0 falls back to the page size), so they
-    // sit together. 타일 모양 used to stand between them.
+    content.append(styleField());
+
+    /* 목록: how the persona list is laid out. 열 수 and 줄 수 are one setting in
+       two fields (either left at 0 falls back to the page size), so they sit
+       together. */
+    content.append(sectionHead(sections.list));
     content.append(tileColumnsField());
     content.append(numberField('rosterTileRows', STRINGS.settings.rosterTileRows, STRINGS.settings.rosterTileRowsHint));
     content.append(tileShapeField());
     content.append(numberField('pageSizeRoster', STRINGS.settings.pageSizeRoster, STRINGS.settings.pageSizeHint));
     content.append(numberField('pageSizeAssets', STRINGS.settings.pageSizeAssets, ''));
     content.append(numberField('pageSizeVersions', STRINGS.settings.pageSizeVersions, ''));
+
+    /* 이력: the four caps on stored history. */
+    content.append(sectionHead(sections.history));
     content.append(numberField('historyPerVariant', STRINGS.settings.historyPerVariant, STRINGS.settings.historyPerVariantHint));
     content.append(numberField('historyMaxBytes', STRINGS.settings.historyMaxBytes, STRINGS.settings.historyMaxBytesHint));
     content.append(numberField('historyMaxDays', STRINGS.settings.historyMaxDays, STRINGS.settings.historyMaxDaysHint));
     content.append(numberField('historyCoalesceMinutes', STRINGS.settings.historyCoalesceMinutes, STRINGS.settings.historyCoalesceMinutesHint));
-    // 언어별 이름 자동 적용 (user request). Beside the other two persona-wide
-    // switches rather than with the asset ones: it changes what the persona is
-    // called, which is what the roster and the chat show.
+
+    /* 설명문: what happens to the text itself. */
+    content.append(sectionHead(sections.text));
     content.append(toggleField('autoLocalName', STRINGS.settings.autoLocalName, STRINGS.settings.autoLocalNameHint));
     content.append(toggleField('splitOnAdopt', STRINGS.settings.splitOnAdopt, STRINGS.settings.splitOnAdoptHint));
-    content.append(toggleField('injectAssetMacros', STRINGS.settings.injectAssetMacros, STRINGS.settings.injectAssetMacrosHint));
     content.append(headingFormatField());
-    content.append(templateField());
-    content.append(styleField());
 
+    /* 에셋: the two macros. */
+    content.append(sectionHead(sections.assets));
+    content.append(toggleField('injectAssetMacros', STRINGS.settings.injectAssetMacros, STRINGS.settings.injectAssetMacrosHint));
+    content.append(templateField());
+
+    /* 진단과 데이터. */
+    content.append(sectionHead(sections.data));
     content.append(el('div', 'pm-settings-identify', STRINGS.settings.identify));
     content.append(el('div', 'pm-settings-identify-why pm-hidden'));
 

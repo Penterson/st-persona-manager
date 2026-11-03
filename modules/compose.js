@@ -1,10 +1,10 @@
 // Composing sections into one description and writing it into SillyTavern.
-//2 (dual field), 4.3 (reentrancy) and 5 (composition rules).
-
-// The line a section's body is printed under, or an empty string when the format
-// adds none. Exported because the 전문 screen shows the composed text the way the
-// prompt receives it, and a second copy of this rule over there would be free to
-// drift away from the one the prompt actually uses.
+//
+// Two fields receive the text (the "dual field"): persona_descriptions[avatar]
+// holds every persona's description, and the singular persona_description is
+// what the prompt builder reads for the ACTIVE persona. Writing only the map is
+// a no-op as far as generation is concerned, so writeDescription writes both
+// when the target is the active persona.
 import { textSignature } from './store.js';
 
 // The fingerprint a persona's description is compared against. A record from
@@ -21,6 +21,10 @@ export function markComposed(persona, text) {
     delete persona.lastComposed;
 }
 
+// The line a section's body is printed under, or an empty string when the format
+// adds none. Exported because the 전문 screen shows the composed text the way the
+// prompt receives it, and a second copy of this rule over there would be free to
+// drift away from the one the prompt actually uses.
 export function headingLine(format, name) {
     if (format === 'plain') return `${name}:`;
     if (format === 'markdown') return `## ${name}`;

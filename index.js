@@ -13,6 +13,7 @@ import { mountQuickbar, unmountQuickbar, notify, scheduleAutoName } from './modu
 import { STRINGS } from './modules/strings.js';
 import { mountManager, unmountManager } from './modules/manager.js';
 import { mountSettings, unmountSettings } from './modules/settings-ui.js';
+import { installGestureTracking, resetGestureTracking } from './modules/dom.js';
 
 const listeners = [];
 let chatObserver = null;
@@ -41,7 +42,8 @@ function safely(label, fn) {
 
 function styleNow() { return getState()?.settings.assetStyle; }
 
-function resolvePathFactory(el) {
+// Resolves a {{pimg::}} tag to the path the server listed for it, or null.
+function resolvePath() {
     return ({ folderKey, filename }) => {
         const s = getState();
         if (!s) return null;
@@ -83,14 +85,14 @@ function resolvePathFactory(el) {
 
 function renderOne(messageIndex) {
     const el = document.querySelector(`#chat [mesid="${messageIndex}"] .mes_text`);
-    if (el) renderInElement(el, resolvePathFactory(el), styleNow());
+    if (el) renderInElement(el, resolvePath(), styleNow());
 }
 
 function renderAll() {
     // Per message events only fire for new messages. Without this sweep, tags in
     // history stay as raw text after a chat is opened.
     for (const el of document.querySelectorAll('#chat .mes_text')) {
-        renderInElement(el, resolvePathFactory(el), styleNow());
+        renderInElement(el, resolvePath(), styleNow());
     }
 }
 
@@ -113,7 +115,7 @@ function startChatObserver() {
         pending.clear();
         for (const el of batch) {
             // A rehydration can replace the node again before the frame runs.
-            if (el.isConnected) renderInElement(el, resolvePathFactory(el), styleNow());
+            if (el.isConnected) renderInElement(el, resolvePath(), styleNow());
         }
     };
 
@@ -166,6 +168,9 @@ async function init() {
     if (!freshContext()) { console.warn(`[${MODULE_NAME}] getContext unavailable, extension disabled`); return; }
 
     refresh();
+    // Before any screen is mounted, so the first tap on a screen is already
+    // being watched (see afterGesture in dom.js).
+    installGestureTracking();
     // Before both awaits. The icon used to wait on a dynamic import the device
     // diagnostics record as failing on this build, and then on a sprites request,
     // so it appeared seconds after the send form did. This first refresh has no
@@ -346,6 +351,7 @@ function destroy() {
     // What the upload learned about this server is state like any other, and
     // teardown leaves none behind.
     resetAssetProbes();
+    resetGestureTracking();
     resetState();
     document.getElementById(`${MODULE_NAME}_settings`)?.remove();
     delete globalThis.__personaManagerDestroy;

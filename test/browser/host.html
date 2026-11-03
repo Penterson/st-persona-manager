@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Persona Manager harness</title>
+<link rel="stylesheet" href="/ext/style.css">
+<style>
+  :root {
+    --SmartThemeBodyColor: #e4e4e8;
+    --SmartThemeBlurTintColor: rgba(27, 27, 31, 0.7);
+    --SmartThemeQuoteColor: #d7a85a;
+    --SmartThemeBorderColor: #444;
+    --SmartThemeShadowColor: #000;
+    --SmartThemeEmColor: #bbb;
+  }
+  body.light {
+    --SmartThemeBodyColor: #222;
+    --SmartThemeBlurTintColor: rgba(250, 247, 240, 0.85);
+    --SmartThemeQuoteColor: #8a5a1c;
+  }
+  html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; background: #111; color: var(--SmartThemeBodyColor); }
+  body.light { background: #fff; }
+  #chat { padding: 12px; height: 60vh; overflow: auto; }
+  .mes { padding: 6px; }
+  #send_form { display: flex; gap: 6px; padding: 8px; }
+  #leftSendForm { display: flex; align-items: center; }
+  #send_textarea { flex: 1; }
+  #extensions_settings2 { padding: 8px; }
+  #user_avatar_block { display: none; }
+  #toast-container { position: fixed; top: 8px; right: 8px; z-index: 100000; }
+  .toast { background: #333; color: #fff; padding: 6px 10px; margin: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="chat"></div>
+<div id="send_form">
+  <div id="leftSendForm"></div>
+  <textarea id="send_textarea" rows="2"></textarea>
+</div>
+<div id="user_avatar_block">
+  <div class="avatar-container interactable selected" data-avatar-id="1700000000000-alice.png"></div>
+  <div class="avatar-container interactable" data-avatar-id="1700000000001-bob.png"></div>
+  <div class="avatar-container interactable" data-avatar-id="1700000000002-carol.png"></div>
+</div>
+<textarea id="persona_description" hidden></textarea>
+<select id="persona_description_position"><option value="0">Before Char</option><option value="1">After Char</option><option value="2">Top of AN</option><option value="3">Bottom of AN</option><option value="4">In-chat @ Depth</option></select>
+<select id="persona_depth_role"><option value="0">System</option><option value="1">User</option><option value="2">Assistant</option></select>
+<input id="persona_depth_value" type="number" min="0" max="9999" value="2">
+<div id="extensions_settings2"></div>
+<div id="toast-container"></div>
+<script src="/mock.js"></script>
+<script type="module" src="/ext/index.js"></script>
+</body>
+</html>

@@ -321,6 +321,10 @@ export const STRINGS = deepFreeze({
             // number and not the cause a second time. It used to borrow the line
             // above, which named the wrong reason.
             expired: n => `${n}건 정리`,
+            // The settings drawer's per-choice cap, lowered on history that
+            // already exists. Same kind as the byte budget (이력 정리), its own
+            // reason.
+            trimmed: n => `보관 개수 상한으로 이력 ${n}건 정리`,
             restored: n => `${n}번째 이력으로 복원`,
             imported: '기존 설명문에서 가져오기',
             importedSplit: n => `기존 설명문에서 가져오기 (항목 ${n}개로 분류)`,
@@ -759,6 +763,16 @@ export const STRINGS = deepFreeze({
         // The word the drawer's band repeats. Short on purpose: the band sets it
         // large three times and the app name would not fit a phone at that size.
         bandWord: '설정',
+        // Captions over the groups of rows. The drawer is twenty rows long, and
+        // a caption is what lets the eye skip the rows it is not looking for.
+        sections: {
+            display: '표시',
+            list: '페르소나 목록',
+            history: '이력 보관',
+            text: '설명문',
+            assets: '에셋 매크로',
+            data: '진단과 데이터',
+        },
         readOnlyBanner: '더 새로운 판이 만든 데이터라 읽기 전용. 설정 변경 불가',
         showQuickBar: '입력창 아이콘 표시',
         showQuickBarHint: '끄면 입력창의 페르소나 아이콘과 빠른 전환 패널 숨김. 저장한 내용은 그대로 유지',

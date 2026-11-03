@@ -30,6 +30,11 @@ import { validCrop, writtenKey } from './framing.js';
 import { itemsWithText } from './classify.js';
 // Matching, language detection and paging.
 import { rankOf, matchRanges, srcOf, detectLanguage, chatLanguage, pageOf } from './search-pure.js';
+// DOM helpers shared with the manager and the settings drawer.
+import {
+    el, track, runCleanups, blockDrawerClose, isComposingKey, makeRowActivatable,
+    checkMark, emptyBlock, bannerOf as sharedBanner, groupOf as sharedGroup, afterGesture,
+} from './dom.js';
 
 // QuickPersona is installed on this device and puts its own icon in the same host.
 // Every id and class here carries the pm- prefix so neither extension can reach the
@@ -93,22 +98,10 @@ let popupNeedsDrop = false;
 // anything that needs one calls freshContext() when it runs. The functions that
 // take a ctx parameter are the ones a single synchronous draw passes it down to.
 
-function track(list, target, type, fn, options) {
-    target.addEventListener(type, fn, options);
-    list.push(() => target.removeEventListener(type, fn, options));
-}
-
-function runCleanups(list) {
-    for (const off of list.splice(0)) {
-        try { off(); } catch (e) { console.warn(`[${MODULE_NAME}] cleanup failed`, e); }
-    }
-}
-
 // Exported for modules/manager.js, which is a second screen under the same
-// mobile constraints and must not answer any of them differently. notify, el,
-// blockDrawerClose, isComposingKey, askConfirm,
-// askText, closePanel and guardStartAvatar are shared for that reason; a second
-// copy of any of them would be a second chance to get the rule wrong. Nothing
+// mobile constraints and must not answer any of them differently: notify,
+// askConfirm, askText, closePanel and guardStartAvatar are shared for that
+// reason, and the plain DOM helpers live in dom.js for the same one. Nothing
 // exported here holds a context or a node past the call that made it.
 
 // toastr is a SillyTavern global that the diagnostics never measured, so it is
@@ -155,55 +148,6 @@ export function releaseToasts() {
     if (!box || !toastHome) return;
     if (box.parentElement !== toastHome) toastHome.append(box);
     toastHome = null;
-}
-
-export function el(tag, className, text) {
-    const node = document.createElement(tag);
-    if (className) node.className = className;
-    if (text !== undefined) node.textContent = text;
-    return node;
-}
-
-// SillyTavern closes its drawers on pointer events that land outside them, and a
-// panel attached to body counts as outside. preventDefault is never
-// called in these handlers, so the two that can be passive say so.
-export function blockDrawerClose(node) {
-    for (const type of ['touchstart', 'mousedown', 'click']) {
-        node.addEventListener(type, e => e.stopPropagation(), { passive: type !== 'click' });
-    }
-}
-
-// A hangul composition commits with an Enter whose keyCode is 229,
-// and acting on it would fire the control while the user is still typing.
-export function isComposingKey(e) {
-    return e.isComposing || e.keyCode === 229;
-}
-
-/* A row that answers a tap has to answer a key as well.
-
-   The rows in this panel are divs, because a div is what can hold a portrait, a
-   name, a badge and a tick without a button's own box fighting the layout - the
-   fold heads made the same choice and say so where they are built. What the divs
-   never got is what a button gives away for free: a place in the tab order, a
-   role a screen reader can announce, and Enter and Space. So the persona list,
-   which is the one thing this panel exists for, could be operated by a finger and
-   by nothing else. TalkBack read the names and had no way to choose one.
-
-   The role is only supplied when the caller has not set one: a row in select mode
-   is a checkbox, not a button, and it says so itself. Space is prevented because
-   otherwise it scrolls the panel out from under the row it just fired. */
-export function makeRowActivatable(node, onActivate) {
-    if (!node || typeof onActivate !== 'function') return node;
-    if (!node.hasAttribute('role')) node.setAttribute('role', 'button');
-    node.tabIndex = 0;
-    node.addEventListener('click', onActivate);
-    node.addEventListener('keydown', e => {
-        if (isComposingKey(e)) return;
-        if (e.key !== 'Enter' && e.key !== ' ') return;
-        e.preventDefault();
-        onActivate(e);
-    });
-    return node;
 }
 
 // getThumbnailUrl's third argument was never measured. On some SillyTavern builds
@@ -286,8 +230,18 @@ function buildButton(host) {
     btn.id = BUTTON_ID;
     btn.tabIndex = 0;
     btn.setAttribute('role', 'button');
-    btn.append(el('img', 'pm-quickbar-img'), el('span', 'pm-quickbar-label'));
-    btn.querySelector('.pm-quickbar-img').alt = '';
+    const img = el('img', 'pm-quickbar-img');
+    img.alt = '';
+    /* What shows when there is no picture to show. With no avatar resolved (two
+       personas sharing a name, no persona at all) and no thumbnail helper, the
+       image was hidden and the label is hidden by style.css, so the icon had no
+       size and vanished from the send row: the one control that opens the panel
+       where the state is explained was gone in exactly the state that needs it.
+       SillyTavern's own FontAwesome, which the settings chevron already relies
+       on; a build without it still gets the box the min-size rule reserves. */
+    const fallback = el('span', 'pm-quickbar-fallback fa-solid fa-user');
+    fallback.setAttribute('aria-hidden', 'true');
+    btn.append(img, fallback, el('span', 'pm-quickbar-label'));
     host.append(btn);
 
     // Selection reacts to click only: opening on touchstart lets the
@@ -326,12 +280,15 @@ function paintButton(ctx, btn) {
     // Assigned only when it actually differs. This repaints on every pm:changed,
     // and every one of those events fires while the persona is unchanged, so an
     // unconditional assignment hands the browser the same URL over and over.
+    const fallback = btn.querySelector('.pm-quickbar-fallback');
     if (url) {
         if (img.getAttribute('src') !== url) img.src = url;
         img.hidden = false;
+        if (fallback) fallback.hidden = true;
     } else {
         img.removeAttribute('src');
         img.hidden = true;
+        if (fallback) fallback.hidden = false;
     }
     const title = describeSelection(s?.persona ?? null);
     label.textContent = title;
@@ -1081,9 +1038,8 @@ async function saveAsVersion() {
     if (!name || !name.trim()) return;
     const after = guardStartAvatar(startAvatar);
     if (!after?.persona) return;
-    const uuid = freshContext()?.uuidv4;
     const version = {
-        id: typeof uuid === 'function' ? uuid() : `v-${Date.now().toString(36)}`,
+        id: makeId(freshContext()?.uuidv4),
         name: name.trim(),
         picks: { ...(after.persona.activePicks ?? {}) },
         // null, not absent: the manager's two constructors both write it, and the
@@ -1111,30 +1067,34 @@ function absorbOutsideEdit() {
     if (!s?.persona) return;
     const text = freshContext()?.powerUserSettings?.persona_descriptions?.[s.avatar]?.description ?? '';
     const sections = s.persona.sections ?? [];
-    const last = sections[sections.length - 1];
-    const variantId = last ? s.persona.activePicks?.[last.id] : null;
-    const variant = last ? (s.persona.variants?.[last.id] ?? []).find(v => v.id === variantId) : null;
-    if (!variant) { notify('error', STRINGS.quick.absorbNoItem); return; }
     /* Absorbing puts the WHOLE description into one item, and the description is
        the concatenation of every item. So it is only lossless when that item is
        the only one carrying text: with anything else filled, what those items
        hold is now written twice and every prompt from here on carries it twice.
 
-       Refused rather than absorbed-and-deduplicated, because there is no honest
-       way to tell which part of an edit made outside belongs to which item. The
-       banner keeps [되돌리기] and the manager is one tap away, so the user still
-       has two ways out. */
-    const doubled = sections.some(sec => {
-        if (sec.id === last.id) return false;
+       The item that receives the text is therefore the one that already holds
+       it, or the first item when none does. It used to be the LAST item with a
+       refusal if any other item had text, which contradicted 관리 시작: that puts
+       an adopted description into the FIRST item, so the common case (one item
+       filled, the one 관리 시작 filled) was refused every time.
+
+       Refused rather than absorbed-and-deduplicated when more than one item has
+       text, because there is no honest way to tell which part of an edit made
+       outside belongs to which item. The banner keeps [되돌리기] and the manager
+       is one tap away, so the user still has two ways out. */
+    const liveBody = sec => {
         const pick = s.persona.activePicks?.[sec.id];
-        const body = (s.persona.variants?.[sec.id] ?? []).find(v => v.id === pick);
-        return !!(body?.text ?? '').trim();
-    });
-    if (doubled) { notify('warning', STRINGS.quick.absorbNotOnly); return; }
+        return (s.persona.variants?.[sec.id] ?? []).find(v => v.id === pick) ?? null;
+    };
+    const filled = sections.filter(sec => !!(liveBody(sec)?.text ?? '').trim());
+    if (filled.length > 1) { notify('warning', STRINGS.quick.absorbNotOnly); return; }
+    const target = filled[0] ?? sections[0] ?? null;
+    const variant = target ? liveBody(target) : null;
+    if (!target || !variant) { notify('error', STRINGS.quick.absorbNoItem); return; }
     const now = Date.now();
     // The text we are about to overwrite goes into history first, so absorbing is
     // never the operation that loses something.
-    snapshot(s.persona, variantId, variant.text ?? '', now, s.settings);
+    snapshot(s.persona, variant.id, variant.text ?? '', now, s.settings);
     // The per variant cap does not bound the total, and the
     // total is what fills settings.json. Taking a snapshot is the only moment the
     // total can grow, so it is the moment to enforce the cap.
@@ -1142,7 +1102,7 @@ function absorbOutsideEdit() {
     enforceGlobalBudget(s.root, s.settings, now);
     variant.text = text;
     variant.updatedAt = now;
-    commit('diverge-absorb', last.name ?? '');
+    commit('diverge-absorb', target.name ?? '');
 }
 
 // These four write labels or settings, not persona content,
@@ -1235,8 +1195,7 @@ function createLabel(name, avatarId) {
     if (!rosterWritable(s)) return;
     const trimmed = String(name ?? '').trim();
     if (!trimmed) return;
-    const uuid = freshContext()?.uuidv4;
-    const id = typeof uuid === 'function' ? uuid() : `pm-label-${Date.now().toString(36)}`;
+    const id = makeId(freshContext()?.uuidv4);
     if (!Array.isArray(s.root.labels)) s.root.labels = [];
     s.root.labels.push({ id, name: trimmed, members: [] });
     // Creating a label from this input immediately attaches it to
@@ -1569,11 +1528,7 @@ function adoptHere() {
     if (count > 1) notify('success', STRINGS.common.adoptSplit(count));
 }
 
-function groupOf(title) {
-    const box = el('div', 'pm-quickbar-group');
-    box.append(el('div', 'pm-quickbar-head', title));
-    return box;
-}
+function groupOf(title) { return sharedGroup('pm-quickbar', title); }
 
 function rowOf(text, onClick) {
     const row = el('div', 'pm-row pm-quickbar-row');
@@ -1583,34 +1538,7 @@ function rowOf(text, onClick) {
     return row;
 }
 
-function checkMark(active) {
-    // Hover carries no meaning on a touch screen, so the mark is
-    // always drawn and only its content changes.
-    return el('span', 'pm-check', active ? '✓' : '');
-}
-
-// Matches the manager's emptyOf: an empty list gets the asterisk and the negation
-// at size rather than a grey line in the corner (style.css, "Empty states").
-function emptyBlock(text) {
-    const box = el('div', 'pm-empty');
-    const mark = el('div', 'pm-empty-mark', '✳');
-    // The word underneath carries the meaning; the glyph is the reference's
-    // divider doing duty as a graphic, so it is not announced.
-    mark.setAttribute('aria-hidden', 'true');
-    box.append(mark);
-    box.append(el('div', 'pm-empty-text', text));
-    return box;
-}
-
-// pm-mass, because a banner IS a filled ink block: it already draws --pm-mass
-// under --pm-on-mass type. The inversion that keeps a control readable on such a
-// block is scoped to that class, and without it in the markup the banner's own
-// buttons drew ink on ink and disappeared.
-function bannerOf(className, message) {
-    const box = el('div', `pm-quickbar-banner pm-mass ${className}`);
-    box.append(el('div', 'pm-quickbar-banner-text', message));
-    return box;
-}
+function bannerOf(className, message) { return sharedBanner('pm-quickbar', className, message); }
 
 function divergedBanner(writable) {
     const box = bannerOf('pm-quickbar-warn', STRINGS.quick.divergedBanner);
@@ -1882,7 +1810,7 @@ function duplicateVersionFromPanel(versionId) {
     const s = guardAvatar();
     if (!s?.persona) return;
     const uuid = freshContext()?.uuidv4;
-    const copy = duplicateVersionIn(s.persona, versionId, () => makeId(uuid), Date.now());
+    const copy = duplicateVersionIn(s.persona, versionId, uuid, Date.now());
     if (!copy) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
     // The tools move to the copy: a duplicate is made to be renamed or changed,
     // and that is the next tap.
@@ -2926,10 +2854,11 @@ function footer() {
     ];
     for (const [label, tab, search] of SHORTCUTS) {
         const btn = el('button', 'pm-quickbar-btn', label);
+        btn.type = 'button';
         btn.addEventListener('click', () => {
-            // The manager screen is Task 11. Dispatch is synchronous, so a listener
-            // that exists can mark the event handled; when none does we say so
-            // instead of leaving a button that silently does nothing.
+            // Dispatch is synchronous, so a listener that exists can mark the
+            // event handled; when none does we say so instead of leaving a
+            // button that silently does nothing.
             const detail = { tab, search, handled: false };
             document.dispatchEvent(new CustomEvent('pm:open-manager', { detail }));
             if (!detail.handled) notify('info', STRINGS.quick.managerMissing);
@@ -2954,7 +2883,10 @@ function drawPanel() {
     const active = document.activeElement;
     if (active && panel.contains(active) && isTextEntry(active)) {
         drawDeferred = true;
-        active.addEventListener('blur', () => { drawDeferred = false; scheduleDraw(); }, { once: true });
+        // Released after the gesture that blurred the field has finished, never
+        // in the middle of it: the blur comes from the mousedown of a tap on
+        // [추가], and a rebuild before its mouseup lost the click (dom.js).
+        active.addEventListener('blur', () => afterGesture(() => { drawDeferred = false; scheduleDraw(); }), { once: true });
         return;
     }
 

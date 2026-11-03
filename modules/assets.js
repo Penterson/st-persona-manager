@@ -462,20 +462,6 @@ function queueImageWrite(job) {
     return run;
 }
 
-/* Puts a version's bound asset onto the persona's avatar file.
-
-   Answers with a code rather than a sentence, and never throws: the callers are
-   a version tap in two different screens, and a version apply must not be
-   undone by a picture that failed to move. Codes:
-     { skipped: 'none' }      the version binds nothing
-     { skipped: 'same' }      we already wrote this label to this avatar
-     { error: 'listing' }     the asset folder could not be read
-     { error: 'missing' }     the bound label is not in the folder
-     { error: 'backup' }      the first overwrite was refused: nothing was saved
-     { error: 'fetch' }       the asset itself could not be downloaded
-     { error: 'upload' }      the avatar endpoint refused
-     { ok: true, backedUp }   written; backedUp says a backup was made just now
-*/
 /* Puts a kept picture back onto the avatar.
 
    The other half of taking a backup. Without it the extension copies a picture
@@ -528,6 +514,22 @@ export async function imageSize(file) {
     } finally { URL.revokeObjectURL(url); }
 }
 
+/* Puts a version's bound asset onto the persona's avatar file.
+
+   Answers with a code rather than a sentence, and never throws: the callers are
+   a version tap in two different screens, and a version apply must not be
+   undone by a picture that failed to move. Codes:
+     { skipped: 'none' }      the version binds nothing
+     { skipped: 'same' }      we already wrote this label and framing already
+     { error: 'listing' }     the asset folder could not be read
+     { error: 'missing' }     the bound label is not in the folder
+     { error: 'backup' }      the first overwrite was refused: nothing was saved
+     { error: 'fetch' }       the asset itself could not be downloaded
+     { error: 'decode' }      a framed picture could not be measured, so no crop
+     { error: 'upload' }      the avatar endpoint refused
+     { ok: true, backup }     written; backup is the record of a backup made now
+   Every answer past the backup step also carries `backup`, because by then the
+   copy is on the server whatever happened next. */
 export async function applyBoundImage({ ctx, root, persona, avatarId, label, crop, force, known, now }) {
     if (!label) return { skipped: 'none' };
     // The label alone said nothing about framing: the same picture framed anew

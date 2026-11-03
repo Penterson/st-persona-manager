@@ -152,6 +152,24 @@
     object-fit: cover;
 }
 
+/* The stand-in for a missing picture: the same 22px box, so the icon never
+   loses its place in the send row whatever the state (quickbar.js buildButton). */
+.pm-quickbar-fallback {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    font-size: 16px;
+    border: 1px solid currentColor;
+    border-radius: var(--pm-avatar-radius, 50%);
+    opacity: 0.8;
+}
+
+.pm-quickbar-fallback[hidden] {
+    display: none;
+}
+
 .pm-quickbar-label {
     font-size: 0.8em;
     color: var(--pm-muted);
@@ -3121,7 +3139,7 @@
 
 /* The type on an ink block, made opaque.
 
-   --pm-on-mass is SillyTavern'''s blur tint, and a blur tint is usually an rgba
+   --pm-on-mass is SillyTavern's blur tint, and a blur tint is usually an rgba
    with real alpha in it: it is authored to sit OVER something. Used as a text
    colour it does exactly that, and what it sits over is --pm-mass, the very ink
    the letters are knocked out of, so on a theme with a low alpha the header and
@@ -3137,7 +3155,7 @@
     .pm-manager-panel,
     .pm-settings {
         /* The alpha is written out, because relative colour syntax keeps the
-           origin colour'''s alpha when the slot is left off - measured in Chromium,
+           origin colour's alpha when the slot is left off - measured in Chromium,
            where omitting it left rgba(27,27,31,0.7) exactly as translucent as it
            started. */
         --pm-on-mass: rgb(from var(--SmartThemeBlurTintColor) r g b / 1);
@@ -3254,12 +3272,20 @@
     background: var(--pm-on-mass);
 }
 
-/* 본문 입력 중에는 머리 167px 중 띠 47px 가 장식이다. 키보드가 올라온 화면에서
-   textarea 에 그만큼을 돌려준다. 버튼 포커스에는 걸지 않는다: 탭마다 띠가
-   접혔다 펴지며 화면이 흔들린다. */
-.pm-manager-panel:has(textarea:focus) .pm-band {
-    display: none;
+/* 빠른 패널도 같은 이유로 불투명하게. 테마의 블러 틴트는 알파 0.7 안팎이라, 패널
+   뒤의 입력창과 설정 요소가 목록 행 사이로 비쳐 보였다(헤드리스 측정: Alice 행과
+   Bob 행 사이로 SillyTavern 의 셀렉트 세 개가 읽힘). 관리자 화면에 적용한 보정과
+   같은 값이다. */
+.pm-quickbar-panel {
+    background: var(--pm-on-mass);
 }
+
+/* 본문 입력 중에 띠를 숨기던 규칙은 지웠다. 띠는 스크롤 상자 바깥의 머리에 있어서,
+   textarea 가 포커스를 잃는 순간 47px 이 되돌아오며 본문 전체가 그만큼 내려갔다.
+   그 포커스 잃음은 [저장] 을 누르는 손가락의 mousedown 이 일으키므로, mouseup 은
+   48px 아래의 다른 요소에 떨어지고 click 은 공통 조상으로 가서 저장이 실행되지
+   않았다(헤드리스 Chromium 에서 60ms 누름으로 재현). 키보드가 올라온 화면의 47px 보다
+   저장되는 저장 버튼이 먼저다. */
 
 /* 저장 줄(61px)이 아래에 붙어 있으므로, 포커스를 따라가는 스크롤이 커서를 그 밑에
    세우지 않도록 그 높이만큼 비워 둔다. */
@@ -3338,4 +3364,23 @@
     max-width: 100%;
     min-height: 44px;
     accent-color: currentColor;
+}
+
+/* ── 설정 서랍의 구역 머리말 ─────────────────────────────────────────────────
+   스무 줄짜리 서랍을 여섯 구역으로 나눈다. 캡션은 다른 화면의 작은 머리말과 같은
+   목소리(작고 넓고 대문자)이고, 위의 강한 규칙이 구역의 경계다. */
+.pm-settings-section {
+    padding: var(--pm-rhythm) 0 var(--pm-pair);
+    border-top: var(--pm-rule-strong);
+    font-size: 0.78em;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--pm-muted-2);
+}
+
+/* 첫 캡션은 띠 바로 아래 선다. :first-of-type 은 태그 기준이라 앞의 배너·띠 div 에
+   걸려 한 번도 맞지 않았다. 띠 다음에 오는 캡션이 곧 첫 캡션이다. */
+.pm-band + .pm-settings-section {
+    border-top: none;
 }

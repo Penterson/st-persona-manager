@@ -186,7 +186,7 @@ export function duplicateVersionIn(persona, versionId, makeIdFn, now) {
     const source = findVersion(persona, versionId);
     if (!source) return null;
     const copy = {
-        id: makeIdFn(),
+        id: makeId(makeIdFn),
         name: STRINGS.common.copySuffix(source.name ?? ''),
         // Copied by value. Sharing the object would make editing one version's
         // combination silently edit the other's.
@@ -792,13 +792,6 @@ export function bindAsset(version, label, now) {
     return true;
 }
 
-/* What the screen may say about a binding, kept apart from what it may not.
-
-   'unknown' exists because a listing we could not read is not the same fact as
-   an asset that is gone, and calling one the other would put a sentence on
-   screen that nobody measured. The version tab does not fetch the asset list on
-   its own, so 'unknown' is the honest answer whenever that list is not loaded
-   for this persona. */
 // Whether the version's picture is the one on the avatar file: no picture bound,
 // or the label and framing last written match. A tap on the version already
 // applied is skipped only when this holds, so a picture that failed to write can
@@ -809,6 +802,13 @@ export function pictureSettled(persona, versionId) {
     return !label || persona?.avatarWritten === writtenKey(label, validCrop(version?.avatarCrop));
 }
 
+/* What the screen may say about a binding, kept apart from what it may not.
+
+   'unknown' exists because a listing we could not read is not the same fact as
+   an asset that is gone, and calling one the other would put a sentence on
+   screen that nobody measured. The version tab does not fetch the asset list on
+   its own, so 'unknown' is the honest answer whenever that list is not loaded
+   for this persona. */
 export function versionImageState(version, assetLabels, listingOk) {
     const label = boundAsset(version);
     if (!label) return { label: null, state: 'none' };
@@ -823,13 +823,10 @@ export function versionsBindingAsset(persona, label) {
     return (persona?.versions ?? []).filter(version => boundAsset(version) === label);
 }
 
-/* Tags */
+/* Drag reorder */
 
-// Adds one tag to a tags-bearing thing (a persona or a version). Trimmed,
-// refused when empty, deduplicated by exact text: a duplicate tag chip would
-// be two chips the user cannot tell apart. Returns the stored tag or null.
-// Drag reorder. moveSection above steps one place at a time because the up/down
-// buttons do; a drag lands on an arbitrary index and needs to say so directly.
+// moveSection above steps one place at a time because the up/down buttons do;
+// a drag lands on an arbitrary index and needs to say so directly.
 // The index is where the section ends up AFTER the move, which is what a drop
 // target means: dragging item 0 onto position 3 leaves it third, not fourth.
 export function reorderSection(persona, sectionId, toIndex) {
@@ -983,6 +980,11 @@ export function duplicatePersona(source, makeIdFn) {
     return copy;
 }
 
+/* Tags */
+
+// Adds one tag to a tags-bearing thing (a persona or a version). Trimmed,
+// refused when empty, deduplicated by exact text: a duplicate tag chip would
+// be two chips the user cannot tell apart. Returns the stored tag or null.
 export function addTag(owner, tag) {
     if (!owner || typeof owner !== 'object') return null;
     const trimmed = String(tag ?? '').trim();

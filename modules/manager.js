@@ -38,10 +38,16 @@ import {
     CREATE_WAIT_TURNS,
 } from './quickbar-pure.js';
 import {
-    closePanel, openPanel, isPanelOpen, notify, askConfirm, askChoice, askText, blockDrawerClose,
-    isComposingKey, makeRowActivatable, el, thumbnailUrl, markedText, pagerRow, applyShapeClass,
+    closePanel, openPanel, isPanelOpen, notify, askConfirm, askChoice, askText,
+    thumbnailUrl, markedText, pagerRow, applyShapeClass,
     applyPersonaName, bumpThumbnails, runBoundImageWrite,
-    scheduleAutoName, cancelAutoName, releaseToasts } from './quickbar.js';
+    scheduleAutoName, cancelAutoName, releaseToasts,
+} from './quickbar.js';
+// DOM helpers shared with the quick panel and the settings drawer.
+import {
+    el, track, runCleanups, blockDrawerClose, isComposingKey, makeRowActivatable,
+    checkMark, emptyBlock, bannerOf as sharedBanner, groupOf as sharedGroup, afterGesture,
+} from './dom.js';
 // Matching, language detection and paging.
 import { rankOf, textContains, detectLanguage, chatLanguage, pageOf } from './search-pure.js';
 import {
@@ -190,17 +196,6 @@ function resetListUi() {
 // on top of the drawer the user is standing in. Captured before closePanel()
 // takes the panel down, cleared on every close.
 let fromQuickPanel = false;
-
-function track(list, target, type, fn, options) {
-    target.addEventListener(type, fn, options);
-    list.push(() => target.removeEventListener(type, fn, options));
-}
-
-function runCleanups(list) {
-    for (const off of list.splice(0)) {
-        try { off(); } catch (e) { console.warn(`[${MODULE_NAME}] cleanup failed`, e); }
-    }
-}
 
 // One redraw per frame, and none at all while the user is typing. Same scheduler
 // as the quick panel's, and it matters more here: this screen has a textarea, and
@@ -924,7 +919,7 @@ function duplicateVersion(versionId) {
     if (!s) return;
     const persona = ensureShape(s.persona);
     const uuid = freshContext()?.uuidv4;
-    const copy = duplicateVersionIn(persona, versionId, () => makeId(uuid), Date.now());
+    const copy = duplicateVersionIn(persona, versionId, uuid, Date.now());
     if (!copy) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
     commit('version-duplicate', copy.name, s.avatar);
 }
@@ -1013,11 +1008,11 @@ async function restoreSnapshot(variantId, index) {
         scheduleDraw();
         return;
     }
-    // Restoring writes a snapshot of its own, which is the one
-    // moment the total can grow, so it is the moment to enforce the cap.
-    if (expireOldHistory(after.root, after.settings, now) + enforceGlobalBudget(after.root, after.settings, now)) {
-        historyIndex = null;
-    }
+    // Restoring writes a snapshot of its own, which is the one moment the total
+    // can grow, so it is the moment to enforce the cap. The selection is cleared
+    // either way: the snapshot it pointed at has just become the live text.
+    expireOldHistory(after.root, after.settings, now);
+    enforceGlobalBudget(after.root, after.settings, now);
     historyIndex = null;
     // The editor may be sitting on the body that just changed underneath it.
     if (openVariant?.variantId === variantId) { openVariant = null; editorDirty = false; }
@@ -1362,19 +1357,8 @@ function noteOf(text) {
 }
 
 // An empty list is the one place this panel has room, and the reference fills its
-// empty space with something big rather than with a sentence in the corner. The
-// asterisk is that reference's own divider glyph; here it marks the hole where
-// content will be. The word stays the plain negation the writing rule asks for.
-function emptyOf(text) {
-    const box = el('div', 'pm-empty');
-    const mark = el('div', 'pm-empty-mark', '✳');
-    // The word underneath carries the meaning; the glyph is the reference's
-    // divider doing duty as a graphic, so it is not announced.
-    mark.setAttribute('aria-hidden', 'true');
-    box.append(mark);
-    box.append(el('div', 'pm-empty-text', text));
-    return box;
-}
+// empty space with something big rather than with a sentence in the corner.
+function emptyOf(text) { return emptyBlock(text); }
 
 /* Rows that keep their extra actions folded away */
 
@@ -1562,30 +1546,15 @@ function rowHead() {
     return el('div', 'pm-manager-rowhead');
 }
 
-// pm-mass for the reason the quick panel's banner carries it: the block is
-// already ink, and the inversion that keeps its buttons visible hangs off that
-// class rather than off the banner's own name.
-function bannerOf(className, message) {
-    const box = el('div', `pm-manager-banner pm-mass ${className}`);
-    box.append(el('div', 'pm-manager-banner-text', message));
-    return box;
-}
+function bannerOf(className, message) { return sharedBanner('pm-manager', className, message); }
 
-function groupOf(title) {
-    const box = el('div', 'pm-manager-group');
-    box.append(el('div', 'pm-manager-head', title));
-    return box;
-}
+function groupOf(title) { return sharedGroup('pm-manager', title); }
 
-function checkMark(active) {
-    // Hover carries no meaning on a touch screen, so the mark is
-    // always drawn and only its content changes.
-    return el('span', 'pm-check', active ? '✓' : '');
-}
-
+// The locale is named, like every number in strings.js: this screen is Korean,
+// and the host browser's default put an English date beside Korean captions.
 function formatTime(at) {
     if (!at) return '';
-    try { return new Date(at).toLocaleString(); } catch { return String(at); }
+    try { return new Date(at).toLocaleString('ko-KR'); } catch { return String(at); }
 }
 
 // The active pick control, identical in behaviour to the quick panel's section
@@ -2119,7 +2088,7 @@ async function doResplit() {
     if (!fresh) { notify('info', STRINGS.manager.resplitNothing); scheduleDraw(); return; }
     const now = Date.now();
     const uuid = freshContext()?.uuidv4;
-    const changed = applyResplit(after.persona, fresh, () => makeId(uuid), now, after.settings?.defaultHeadingFormat,
+    const changed = applyResplit(after.persona, fresh, uuid, now, after.settings?.defaultHeadingFormat,
         (variantId, text) => snapshotKeepingIndex(after.persona, variantId, text, now, after.settings, { force: true }));
     // Snapshots were written, which is when the history caps apply.
     if (expireOldHistory(after.root, after.settings, now) + enforceGlobalBudget(after.root, after.settings, now)) {
@@ -5033,10 +5002,6 @@ function fillPickerList(container, ctx) {
     if (pager) container.append(pager);
 }
 
-// The reference's identity move: the section word set large and repeated across a
-// band, with the outer copies reduced to an outline. The ghosts are aria-hidden so
-// the word is announced once, and they are the first thing dropped on a narrow
-// screen (style.css, "Display type").
 /* ── Drag to reorder items (user request) ────────────────────────────────────
    Pointer events rather than HTML5 drag and drop: dragstart never fires on
    Android Chromium for a touch, so the native API is desktop only, while pointer
@@ -5238,6 +5203,10 @@ function dropSectionAt(sectionId, target) {
     commit('section-move', name);
 }
 
+// The reference's identity move: the section word set large and repeated across a
+// band, with the outer copies reduced to an outline. The ghosts are aria-hidden so
+// the word is announced once, and they are the first thing dropped on a narrow
+// screen (style.css, "Display type").
 function bandRow(word) {
     const band = el('div', 'pm-band');
     for (const ghost of [true, false, true]) {
@@ -5314,7 +5283,12 @@ function drawManager() {
     const active = document.activeElement;
     if (active && panel.contains(active) && isTextEntry(active)) {
         drawDeferred = true;
-        active.addEventListener('blur', () => { drawDeferred = false; scheduleDraw(); }, { once: true });
+        // Released after the gesture that blurred the field has finished, never
+        // in the middle of it. The blur comes from the mousedown of the tap on
+        // [저장]; a rebuild before that tap's mouseup put a new node under the
+        // finger, the click went to a common ancestor, and [저장] did nothing
+        // (measured with a 60ms press in Chromium). See afterGesture in dom.js.
+        active.addEventListener('blur', () => afterGesture(() => { drawDeferred = false; scheduleDraw(); }), { once: true });
         return;
     }
 
