@@ -154,6 +154,11 @@ let reviseScrollToBox = false;
 let fullActive = false;
 let fullBlocks = null;
 let fullTexts = null;
+// 전문 보기 방식 (user request): 'items' draws one box per item, 'raw' shows the
+// composed text exactly as SillyTavern receives it, in one block. The raw view
+// is read only; the working copies behind it are the item boxes', so switching
+// back loses nothing.
+let fullView = 'items';
 // Which of the two folded blocks at the top of the 편집 tab is open. Booleans of
 // their own rather than expandedRow keys: expandedRow is cleared by whichever
 // tab draws next, and these two belong to the tab itself rather than to a row in
@@ -2195,6 +2200,7 @@ function refreshSizeLines() {
 
 function resetFullText() {
     fullActive = false;
+    fullView = 'items';
     fullBlocks = null;
     fullTexts = null;
     if (sizeTimer) { clearTimeout(sizeTimer); sizeTimer = 0; }
@@ -2328,7 +2334,44 @@ function fullTextScreen(s, writable, reason) {
     const blocks = fullBlocks ?? [];
     const line = el('div', 'pm-manager-size pm-size-full', sizeTextOf(composeFrom(persona, blocks, fullTexts)));
     wrap.append(line);
+    // The two views, as the history tab's mode toggles: the pressed one is filled
+    // (pm-manager-primary; see the note on the history toggles).
+    const toggles = el('div', 'pm-manager-actions');
+    for (const [key, text] of [['items', STRINGS.manager.fullViewItems], ['raw', STRINGS.manager.fullViewRaw]]) {
+        const active = fullView === key;
+        const btn = el('button', `pm-manager-btn${active ? ' pm-manager-primary' : ''}`, text);
+        btn.type = 'button';
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+        btn.addEventListener('click', () => {
+            if (fullView === key) return;
+            // The boxes are about to leave the screen; what is typed in them
+            // lives on in the working copies and comes back with the boxes.
+            harvestFullTexts();
+            fullView = key;
+            scheduleDraw();
+        });
+        toggles.append(btn);
+    }
+    wrap.append(toggles);
     const format = persona.headingFormat;
+    if (fullView === 'raw') {
+        // One block, the text as composed from the working copies: what [전체
+        // 저장] would send right now, headings included. Selectable so it can
+        // be copied, and not editable, because which item a change belongs to
+        // cannot be told from the joined text.
+        wrap.append(noteOf(STRINGS.manager.fullViewRawGuide));
+        const { box, inner } = textBox('pm-full-raw');
+        inner.textContent = composeFrom(persona, blocks, fullTexts) || STRINGS.manager.previewEmpty;
+        wrap.append(box);
+        const foot = el('div', 'pm-manager-editorfoot');
+        foot.append(actionsRow([
+            actionButton(STRINGS.manager.fullTextSave, () => saveFullText(), writable && fullDirtyCount() > 0, '',
+                fullDirtyCount() > 0 ? reason : STRINGS.manager.nothingChanged),
+            actionButton(STRINGS.manager.editorBackToList, () => leaveFullText(), true),
+        ]));
+        wrap.append(foot);
+        return wrap;
+    }
     if (headingLine(format, 'x')) wrap.append(noteOf(STRINGS.manager.fullTextHeadingNote));
     blocks.forEach((block, index) => {
         const head = headingLine(format, block.sectionName);
@@ -4360,7 +4403,10 @@ function historyDetail(persona, variantId, snapshotText, writable, reason) {
         ['diff', STRINGS.manager.historyModeDiff],
     ]) {
         const active = historyMode === key;
-        const btn = el('button', `pm-manager-btn${active ? ' pm-manager-tab-active' : ''}`, label);
+        // pm-manager-primary, not pm-manager-tab-active: that fill is reset by the
+        // button rule that follows it in style.css, so the pressed toggle drew
+        // its knocked-out type on no fill at all and vanished.
+        const btn = el('button', `pm-manager-btn${active ? ' pm-manager-primary' : ''}`, label);
         btn.type = 'button';
         btn.setAttribute('aria-pressed', active ? 'true' : 'false');
         btn.addEventListener('click', () => { historyMode = key; scheduleDraw(); });

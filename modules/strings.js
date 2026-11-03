@@ -435,6 +435,11 @@ export const STRINGS = deepFreeze({
            word 저장 and that one carries 버전. */
         fullTextOpen: '전문',
         fullTextGuide: 'SillyTavern에 들어가는 설명문 전체. 칸 하나가 항목 하나의 활성 선택지 본문',
+        // 전문 보기 방식 (user request). 항목별 is the editable boxes; 전문 is
+        // the joined text as the prompt receives it, for reading and copying.
+        fullViewItems: '항목별',
+        fullViewRaw: '전문',
+        fullViewRawGuide: '프롬프트에 들어가는 그대로. 수정은 항목별 보기에서',
         fullTextHeadingNote: '항목 이름 줄은 제목 형식 설정에 따라 프롬프트에 함께 전송',
         // Reachable only from a persona with no items at all. A persona that has
         // items but no text in them opens the screen: filling them in is what the
