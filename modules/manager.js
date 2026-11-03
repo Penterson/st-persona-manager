@@ -5249,17 +5249,12 @@ function dropSectionAt(sectionId, target) {
     commit('section-move', name);
 }
 
-// The reference's identity move: the section word set large and repeated across a
-// band, with the outer copies reduced to an outline. The ghosts are aria-hidden so
-// the word is announced once, and they are the first thing dropped on a narrow
-// screen (style.css, "Display type").
+// The band under the tab strip: the tab's name, set large, once. It used to be
+// repeated three times across the band with the outer two as outlines (the
+// reference's wordmark), and the user asked for one word in the middle.
 function bandRow(word) {
     const band = el('div', 'pm-band');
-    for (const ghost of [true, false, true]) {
-        const span = el('span', `pm-band-word${ghost ? ' pm-band-ghost' : ''}`, word);
-        if (ghost) span.setAttribute('aria-hidden', 'true');
-        band.append(span);
-    }
+    band.append(el('span', 'pm-band-word', word));
     return band;
 }
 

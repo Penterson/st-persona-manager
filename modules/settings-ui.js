@@ -726,15 +726,9 @@ function buildPanel() {
     const readOnlyBanner = el('div', 'pm-manager-banner pm-manager-warn pm-settings-readonly pm-hidden');
     readOnlyBanner.append(el('div', 'pm-manager-banner-text', STRINGS.settings.readOnlyBanner));
     content.append(readOnlyBanner);
-    // The band, built the same way the manager's is (three spans, outer two
-    // ghosted and aria-hidden). Four lines of markup, kept local rather than
-    // shared: a cross-module edge is not worth it for this little.
+    // The band names the screen, once, in the manager's display voice.
     const band = el('div', 'pm-band');
-    for (const ghost of [true, false, true]) {
-        const span = el('span', `pm-band-word${ghost ? ' pm-band-ghost' : ''}`, STRINGS.settings.bandWord);
-        if (ghost) span.setAttribute('aria-hidden', 'true');
-        band.append(span);
-    }
+    band.append(el('span', 'pm-band-word', STRINGS.settings.bandWord));
     content.append(band);
 
     const sections = STRINGS.settings.sections;

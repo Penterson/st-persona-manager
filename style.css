@@ -2122,19 +2122,14 @@
 
 
 /* ── Display type ────────────────────────────────────────────────────────────
-   The reference sets its section words huge, heavy and wide, in lowercase, and
-   repeats each one across a band with the outer copies reduced to an outline.
-   That repetition is the whole identity of the page and it costs nothing but
-   text-stroke, so it is the one piece worth taking literally.
-
-   The band is built by the DOM half (bandRow in manager.js): three spans, the
-   middle one filled, the outer two ghosted. aria-hidden on the ghosts, so a
-   screen reader hears the word once. */
+   The section word set large and heavy, once, in the middle of a ruled band
+   (bandRow in manager.js, the settings drawer's band). It was repeated three
+   times with the outer copies as outlines, and the user asked for the one in
+   the middle only. */
 .pm-band {
     display: flex;
     align-items: baseline;
-    justify-content: space-between;
-    gap: 10px;
+    justify-content: center;
     padding: 10px 12px;
     border-top: var(--pm-rule);
     border-bottom: var(--pm-rule);
@@ -2153,34 +2148,10 @@
        rather than font-stretch because a Hangul system face has no width axis to
        vary, and scaleX works on any glyph the device happens to have. */
     transform: scaleX(var(--pm-display-stretch));
-    transform-origin: left center;
+    transform-origin: center;
 }
 
-.pm-band-word:last-child { transform-origin: right center; }
-
-/* The outline copies. -webkit-text-stroke is the only cross-browser way to draw
-   type as a hairline, and Samsung Browser is Chromium, so it is available on the
-   one device this ships to. A build without it simply shows the word filled at
-   low opacity, which is the same idea one step quieter. */
-.pm-band-ghost {
-    color: transparent;
-    -webkit-text-stroke: 1px color-mix(in srgb, currentColor 45%, transparent);
-    opacity: 0.9;
-}
-
-@supports not (-webkit-text-stroke: 1px red) {
-    .pm-band-ghost {
-        color: color-mix(in srgb, currentColor 22%, transparent);
-        -webkit-text-stroke: 0;
-    }
-}
-
-/* On a narrow phone only the solid word fits. The ghosts are decoration, so they
-   are what goes. */
 @media (max-width: 380px) {
-    .pm-band-ghost { display: none; }
-    .pm-band { justify-content: flex-start; }
-
     /* Below this width five controls do not fit at any readable size, so the row
        is allowed to wrap here and only here. The phone this is built for is
        411px, where they stand in one line. */
@@ -3252,17 +3223,6 @@
 
 /* ── 4회차 보정 ─────────────────────────────────────────────────────────────
    앞 규칙은 그대로 두고 캐스케이드만 바로잡는다. */
-
-/* 바깥 단어 둘이 보이지 않았다. color: transparent 로 속을 비우면 currentColor 도
-   투명이 되고, 테두리 색이 그 currentColor 에서 나오므로 테두리까지 투명이었다
-   (Chromium 계산값 color(srgb 0 0 0 / 0)). 속만 비우는 속성으로 바꾸면 color 는
-   물려받은 잉크 그대로라 테두리가 그 잉크에서 나온다. */
-@supports (-webkit-text-stroke: 1px red) {
-    .pm-band-ghost {
-        color: inherit;
-        -webkit-text-fill-color: transparent;
-    }
-}
 
 /* 관리자 화면은 뷰포트 전체를 덮는다. 테마의 반투명 틴트를 그대로 쓰면 아래의
    채팅과 ST 의 블러 층이 비쳐 보이고, 브라우저는 스크롤 프레임마다 그 층들을 다시
