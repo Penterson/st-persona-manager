@@ -1,29 +1,11 @@
-// 가져오기 자동 분류 (user request, 2026-10-24).
-//
-// 관리 시작 used to put the whole existing description into the first item's first
-// choice, so a description already written in parts - 외모, 성격, 말투, each under
-// its own title - arrived as one block the user had to cut apart by hand. This reads
-// the title lines, matches each title to an item by its name, and puts each part
-// into that item. Pure: no document, no context, so the node suite runs it as is.
-import { makeId } from './store.js';
+// Splits a description at its title lines into items, matched by name. Pure: no
+// document, no context, so the node suite runs it as is.
+import { makeId, appendSection, liveVariant } from './store.js';
 import { STRINGS } from './strings.js';
 
-/* What counts as a title line. Each form is one that a description written by hand
-   or by a template actually uses, and each is a whole line on its own, so a sentence
-   that merely contains a colon is never taken for a title:
-
-     ## 외모   # 외모 ###            (markdown; a space after the marks, so a line of
-                                    #해시태그 stays content; only the top level used
-                                    in the text splits, deeper ones stay inside)
-     [외모]  【외모】  〔외모〕        (brackets)
-     **외모**  **외모:**  <외모>      (only when the name is an item's: a bold
-                                    sentence and an HTML tag on its own line are
-                                    content)
-     외모:   외모 :   외모：          (only when the name is an item's: 나이: or
-                                    특징: over a list of lines is content)
-
-   A line of the form 외모: 검은 머리 is a title only when 외모 names an item: the
-   same shape is how 나이: 27 is written, and that one is content. */
+/* Title lines are whole lines: ## Name (a space after the marks, so #hashtag is content),
+   [Name] and its CJK brackets, and, only when Name is an item's, bold, <Name>, Name:
+   and the inline Name: text (the same shape as a fact such as Age: 27). */
 const TITLE_MAX = 30;
 const STANDALONE = [
     { kind: 'markdown', re: /^(#{1,6})\s+(.+?)\s*#*$/ },
@@ -38,22 +20,17 @@ const STANDALONE = [
 const NEEDS_MATCH = new Set(['bold', 'angle', 'plain']);
 const INLINE = /^([^:：]{1,30}?)\s*[:：]\s*(\S.*)$/;
 
-// Spaces, case and the joining marks a title is written with do not make two
-// names different: 버릇 & 습관, 버릇&습관, 버릇/습관 and 버릇·습관 are one item.
+// Spaces, case and joining marks do not make names differ: A & B, A&B, A/B and A·B match.
 export function normalizeTitle(text) {
     return String(text ?? '')
         .toLowerCase()
         .replace(/[\s&/·・,，+_\-–—()（）]+/g, '');
 }
 
-/* Other names for the shipped items, for descriptions written in English or with a
-   neighbouring Korean word (strings.js, classify.titleAliases). Only the shipped
-   names have them: an item the user named themselves is matched by its own name
-   and nothing else. */
+// Aliases for the shipped item names only; a user-named item matches by its own name.
 const ALIASES = STRINGS.classify.titleAliases;
 
-// Every key a title may arrive as, for each item index. The item's own name, each
-// part of a name joined by &, and the aliases of a shipped name.
+// Per item: its name, each &-joined part of it, and a shipped name's aliases.
 function keysFor(names) {
     return names.map(name => {
         const keys = new Set([normalizeTitle(name)]);
@@ -61,8 +38,7 @@ function keysFor(names) {
             const key = normalizeTitle(part);
             if (key) keys.add(key);
         }
-        // Own keys only: an item named constructor or toString read the
-        // function off Object.prototype here and for..of threw.
+        // Own keys only: an item named constructor would read Object.prototype's.
         const aliases = Object.hasOwn(ALIASES, name) && Array.isArray(ALIASES[name]) ? ALIASES[name] : [];
         for (const alias of aliases) keys.add(normalizeTitle(alias));
         keys.delete('');
@@ -70,8 +46,8 @@ function keysFor(names) {
     });
 }
 
-// The item a title belongs to, or -1. The whole name wins over a part or an alias,
-// so an item literally called 말투 is not lost to 말투 & 대사.
+// The item a title belongs to, or -1. A whole name beats a part or an alias, so an item
+// called A is not lost to one called A & B.
 function matchKey(key, names, keys) {
     if (!key) return -1;
     const exact = names.findIndex(name => normalizeTitle(name) === key);
@@ -79,9 +55,8 @@ function matchKey(key, names, keys) {
     return keys.findIndex(set => set.has(key));
 }
 
-// A number in front (1. 외모, 2) 성격) and a gloss in brackets behind (외모
-// (Appearance)) do not change which item a title names. The title as written
-// is tried first, so an item whose own name carries brackets still matches.
+// A leading number (1. Name) or trailing gloss (Name (Gloss)) does not change the match;
+// the title as written is tried first, for names that carry brackets themselves.
 function matchTitle(title, names, keys) {
     const whole = matchKey(normalizeTitle(title), names, keys);
     if (whole !== -1) return whole;
@@ -91,19 +66,9 @@ function matchTitle(title, names, keys) {
     return matchKey(normalizeTitle(bare), names, keys);
 }
 
-/* Splits a description at its title lines.
-
-   Answers null when there is nothing to split: no title at all, or every title
-   lands in the home item (the first one, for 관리 시작, where the whole text would
-   have gone anyway). In both cases 관리 시작 keeps the old behaviour exactly, byte
-   for byte. home is the item the text is in now, for 제목별 분류 on an item that
-   is not the first.
-
-   Otherwise: { preamble, parts: [{ title, index, body }], format }. index is the
-   matched item or -1 for a title no item has; preamble is whatever came before the
-   first title. format is the heading style the titles were written in, so the
-   composed description keeps them: 'markdown', 'plain', or null when they were
-   mixed or a style compose cannot write. */
+/* Answers null when no body would leave the home item (the item the text is in now),
+   else { preamble, parts: [{ title, index (-1: no such item), body }], format }, format
+   being 'markdown', 'plain', or null for mixed styles compose cannot write. */
 export function splitDescription(text, sectionNames, home = 0) {
     const source = String(text ?? '').replace(/\r\n?/g, '\n');
     const names = Array.isArray(sectionNames) ? sectionNames : [];
@@ -120,8 +85,7 @@ export function splitDescription(text, sectionNames, home = 0) {
             if (!title || title.length > TITLE_MAX) break;
             const index = matchTitle(title, names, keys);
             if (NEEDS_MATCH.has(form.kind) && index === -1) break;
-            // [나이: 27], [Age: 27], [{{user}}: tall, shy]: a bracketed fact, not a
-            // title. Only an item's own name may carry these marks and still split.
+            // [Age: 27] or [{{user}}: tall] is a bracketed fact, unless it names an item.
             if (form.kind === 'bracket' && index === -1 && /[:：,，]|\{\{/.test(title)) break;
             return { kind: form.kind, level: m[1].length, title, index, rest: null };
         }
@@ -132,11 +96,8 @@ export function splitDescription(text, sectionNames, home = 0) {
         }
         return null;
     });
-    /* The level that splits is the shallowest one whose titles name items. The
-       shallowest level of all was the rule, and a description that opens with
-       # 아영 over ## 외모 and ## 성격 became one new item called 아영 holding
-       everything. A text whose markdown titles name no item at all falls back to
-       its shallowest level, which becomes new items as before. */
+    // The shallowest markdown level whose titles name items splits (so a # Name over
+    // item titles is not one big item); with none named, the shallowest level does.
     const levels = found.filter(f => f?.kind === 'markdown').map(f => f.level);
     const named = found.filter(f => f?.kind === 'markdown' && f.index !== -1).map(f => f.level);
     const top = named.length ? Math.min(...named) : (levels.length ? Math.min(...levels) : 0);
@@ -145,12 +106,10 @@ export function splitDescription(text, sectionNames, home = 0) {
     const kinds = new Set();
     let current = null;
     found.forEach((title, i) => {
-        // </외모> after <외모>: the closing half of the title, not content.
+        // </Name> after <Name>: the closing half of the title, not content.
         const close = /^<\/\s*([^<>]+?)\s*>$/.exec(lines[i].trim());
         if (close && current && normalizeTitle(close[1]) === normalizeTitle(current.title)) return;
-        // When markdown titles name items, markdown is the structure and a
-        // "메모: 커피를 좋아함" line inside a section is that section's text, not
-        // a title: the alias 메모 used to pull it out into 캐릭터 노트.
+        // When markdown titles name items, an inline Name: text line inside one is content.
         const contentLine = !title || (title.kind === 'markdown' && title.level !== top)
             || (named.length > 0 && current?.kind === 'markdown' && title.kind === 'inline');
         if (contentLine) {
@@ -161,9 +120,8 @@ export function splitDescription(text, sectionNames, home = 0) {
             lines: title.rest !== null ? [title.rest] : [] };
         parts.push(current);
     });
-    /* A title no item has, with nothing under it, would become an empty new item
-       and take its own line with it: [나이] directly over [성별] lost the first
-       line for good. Such a line stays where it was, as text of what came before. */
+    // An unmatched title with nothing under it stays as text of what came before;
+    // as an empty new item, its line would be lost.
     const kept = [];
     for (const part of parts) {
         if (part.index === -1 && !part.lines.join('\n').trim()) {
@@ -175,8 +133,7 @@ export function splitDescription(text, sectionNames, home = 0) {
     }
     if (!kept.length) return null;
     const out = kept.map(part => ({ title: part.title, index: part.index, body: part.lines.join('\n').trim() }));
-    // Nothing with a body leaves the home item: the old behaviour already put
-    // all of it there, and keeps the text exactly as written.
+    // Nothing with a body leaves the home item: keep the text exactly as written.
     if (!out.some(part => part.body && part.index !== home)) return null;
     let format = null;
     if (kinds.size === 1 && kinds.has('markdown')) format = 'markdown';
@@ -184,20 +141,9 @@ export function splitDescription(text, sectionNames, home = 0) {
     return { preamble: preamble.join('\n').trim(), parts: out, format };
 }
 
-/* Fills a persona made by makeDefaultPersona from a split. Answers how many items
-   received text.
-
-   - The text before the first title goes to the first item, ahead of anything a
-     title also sent there.
-   - Two titles naming one item are joined in the order they were written.
-   - A title no item has becomes a new item of that name, at the end: it is
-     structure the user wrote, and folding it into a neighbour would hide it.
-   - A part with a title and no body leaves its item empty.
-
-   The heading format follows what the titles were written in when compose can
-   write that style; otherwise it is the user's default, or plain when that default
-   is none - dropping the titles altogether would take the item names out of the
-   prompt the model reads. */
+/* Fills a makeDefaultPersona persona from a split; answers how many items got text.
+   Unmatched titles become new items at the end. The heading format falls back to the
+   default, or plain over none, as dropping titles would take item names out of the prompt. */
 export function seedFromSplit(persona, split, makeIdFn, defaultFormat) {
     const bodies = new Map();
     const add = (index, body) => {
@@ -212,11 +158,7 @@ export function seedFromSplit(persona, split, makeIdFn, defaultFormat) {
             if (!part.body) continue;
             const key = normalizeTitle(part.title);
             if (!created.has(key)) {
-                const sid = makeId(makeIdFn);
-                const vid = makeId(makeIdFn);
-                persona.sections.push({ id: sid, name: part.title });
-                persona.variants[sid] = [{ id: vid, label: STRINGS.manager.defaultChoiceLabel, text: '', updatedAt: 0 }];
-                persona.activePicks[sid] = vid;
+                appendSection(persona, { name: part.title }, makeIdFn, '', 0);
                 created.set(key, persona.sections.length - 1);
             }
             index = created.get(key);
@@ -233,36 +175,19 @@ export function seedFromSplit(persona, split, makeIdFn, defaultFormat) {
     return bodies.size;
 }
 
-// How many items carry text in the live combination: what a screen says after
-// 관리 시작, so a split is visible as one sentence rather than discovered later.
+// How many items carry text in the live combination, reported after adopting.
 export function itemsWithText(persona) {
     return (persona?.sections ?? []).filter(section => {
-        const pick = persona.activePicks?.[section?.id];
-        const variant = (persona.variants?.[section?.id] ?? []).find(entry => entry?.id === pick);
-        return !!variant?.text?.trim();
+        return !!liveVariant(persona, section)?.text?.trim();
     }).length;
 }
 
-/* ── 제목별 분류, for a persona already managed (user request) ───────────────
-   Everyone adopted before the split existed has their whole description in
-   기본 정보. This reads the live body of every item, and wherever titles in it
-   name another item (or no item at all), plans to move those parts there.
+/* ── Split by title, for a persona already managed ──────────────────────────
+   Moves titled parts of each live body to the items they name (or new ones). Nothing
+   is lost or leaves the prompt: moved text is appended, a target with no live pick
+   gets its first choice picked, and every changed body is snapshotted. */
 
-   Nothing is lost and nothing leaves the prompt:
-   - The source keeps its untitled opening and any part whose title names it.
-   - A target that already has text gets the moved part AFTER its own text.
-   - A target whose pick names nothing is pointed at its first choice, so the
-     moved text reaches the prompt rather than landing in a body nobody reads.
-   - A title no item has becomes a new item, as at 관리 시작.
-   - Every body that changed gets a history snapshot of what it was. */
-function liveVariant(persona, section) {
-    const list = persona.variants?.[section?.id] ?? [];
-    const pick = persona.activePicks?.[section?.id];
-    return list.find(entry => entry?.id === pick) ?? null;
-}
-
-// An item's own title on the first line of its body, in any of the forms a
-// title is written in, removed. Anything else is left exactly as it was.
+// Removes an item's own title from the first line of its body; nothing else changes.
 export function stripSelfTitle(text, name) {
     const source = String(text ?? '');
     const lines = source.replace(/\r\n?/g, '\n').split('\n');
@@ -303,10 +228,8 @@ export function planResplit(persona) {
     return { sources, targets: targets.size, created: created.size };
 }
 
-// Applies a plan made on this same persona a moment ago (the caller plans again
-// after its confirmation, so the plan never outlives the text it was read from).
-// snapshotFn(variantId, previousText) is history.js's snapshot, handed in so this
-// file stays free of the history settings. Answers the variant ids it changed.
+// Applies a fresh plan (callers re-plan after confirming). snapshotFn is history.js's
+// snapshot, passed in to keep history settings out of here. Returns changed variant ids.
 export function applyResplit(persona, plan, makeIdFn, now, defaultFormat, snapshotFn) {
     const before = new Map();
     const touch = variant => {
@@ -328,16 +251,11 @@ export function applyResplit(persona, plan, makeIdFn, now, defaultFormat, snapsh
             if (index === -1) {
                 const key = normalizeTitle(part.title);
                 if (!created.has(key)) {
-                    const sid = makeId(makeIdFn);
-                    const vid = makeId(makeIdFn);
-                    persona.sections.push({ id: sid, name: part.title });
-                    persona.variants[sid] = [{ id: vid, label: STRINGS.manager.defaultChoiceLabel, text: '', updatedAt: now }];
-                    persona.activePicks[sid] = vid;
-                    // Every saved version picks it too. Applying a version replaces
-                    // the live picks with the version's, and a version with no pick
-                    // for this item would drop the moved text out of the prompt.
+                    const { sectionId, variantId } = appendSection(persona, { name: part.title }, makeIdFn, '', now);
+                    // Every saved version picks it too, or applying one would drop
+                    // the moved text from the prompt.
                     for (const version of Array.isArray(persona.versions) ? persona.versions : []) {
-                        if (version && typeof version === 'object') version.picks = { ...(version.picks ?? {}), [sid]: vid };
+                        if (version && typeof version === 'object') version.picks = { ...(version.picks ?? {}), [sectionId]: variantId };
                     }
                     created.set(key, persona.sections.length - 1);
                 }
@@ -364,10 +282,8 @@ export function applyResplit(persona, plan, makeIdFn, now, defaultFormat, snapsh
         }
         touch(target);
         target.text = [String(target.text ?? '').trim(), ...moved.map(m => m.body)].filter(Boolean).join('\n\n');
-        /* A saved version that picks the source's body also lost the moved text
-           from it. When that version picks ANOTHER choice for this item, the text
-           goes there too, so applying the version still says everything it said
-           before the split. */
+        // A saved version picking the source body lost the moved text too: add it to
+        // that version's own pick for this item, if different.
         const extra = new Map();
         for (const { body, source } of moved) {
             const sourceId = persona.sections[source.index]?.id;
@@ -386,14 +302,11 @@ export function applyResplit(persona, plan, makeIdFn, now, defaultFormat, snapsh
             variant.text = [String(variant.text ?? '').trim(), ...bodies].filter(Boolean).join('\n\n');
         }
     }
-    // The titles were part of the text until now. Taken out of the bodies under a
-    // heading format of none, the item names would vanish from the prompt.
+    // Titles leave the bodies, so a format of none would drop item names from the prompt.
     if (persona.headingFormat !== 'markdown' && persona.headingFormat !== 'plain' && persona.headingFormat !== 'own') {
         const written = plan.sources.map(source => source.split.format).find(Boolean);
         persona.headingFormat = written ?? (defaultFormat && defaultFormat !== 'none' ? defaultFormat : 'plain');
-        // Items that already carried their own title as their first line would
-        // now print it twice (## 성격 over ## 성격). That line goes; compose
-        // writes the title from here on.
+        // A body starting with its own title would print it twice; compose writes it now.
         for (const section of persona.sections) {
             for (const variant of persona.variants?.[section.id] ?? []) {
                 if (typeof variant?.text !== 'string') continue;
@@ -410,20 +323,10 @@ export function applyResplit(persona, plan, makeIdFn, now, defaultFormat, snapsh
     return [...before.keys()];
 }
 
-/* ── 설명문의 원래 항목 그대로 (user request, 2026-11-03) ──────────────────────
-   A description that is already divided keeps its own division: the items are
-   its own sections, named exactly as its titles are written, in its order, and
-   the titles keep their own look. Nothing is matched to the shipped item names
-   and no empty shipped items are added.
-
-   Only one title style counts, the first of these the text uses at least twice:
-   markdown headings (at the shallowest level used twice), <이름>…</이름> pairs,
-   [이름] lines, **이름** lines, 이름: lines. Mixing styles, or using one only
-   once, is not taken for a division.
-
-   Answers null, or { preamble, parts: [{ name, body }], template: { open, close } }.
-   The caller checks that composing the result gives the original text back
-   (sameText below) and keeps the description whole when it does not. */
+/* ── A description's own division ──────────────────────────────────────────
+   Its own titles become the items, as written and in order. Only the first style in
+   OWN_ORDER used at least twice counts (markdown at its shallowest such level).
+   Returns null or { preamble, parts, template }; callers require a round trip (sameText). */
 const OWN_FORMS = [
     { kind: 'markdown', re: /^(#{1,6})\s+(.+?)\s*$/ },
     { kind: 'angle', re: /^()<\s*([^<>/=]+?)\s*>$/ },
@@ -499,30 +402,21 @@ export function splitOwnSections(text) {
     };
 }
 
-/* Replaces the persona's items with the description's own. Every item gets one
-   choice holding its text, picked. The text before the first title becomes an
-   untitled first item, so it is printed without a title, as it was written. */
+// Replaces the persona's items with the description's own, one picked choice each; text
+// before the first title becomes an untitled first item.
 export function seedOwnSections(persona, split, makeIdFn, now = Date.now()) {
     persona.sections = [];
     persona.variants = {};
     persona.activePicks = {};
-    const add = (name, body, untitled) => {
-        const sid = makeId(makeIdFn);
-        const vid = makeId(makeIdFn);
-        persona.sections.push(untitled ? { id: sid, name, untitled: true } : { id: sid, name });
-        persona.variants[sid] = [{ id: vid, label: STRINGS.manager.defaultChoiceLabel, text: body, updatedAt: now }];
-        persona.activePicks[sid] = vid;
-    };
-    if (split.preamble) add(STRINGS.classify.preambleName, split.preamble, true);
-    for (const part of split.parts) add(part.name, part.body, false);
+    if (split.preamble) appendSection(persona, { name: STRINGS.classify.preambleName, untitled: true }, makeIdFn, split.preamble, now);
+    for (const part of split.parts) appendSection(persona, { name: part.name }, makeIdFn, part.body, now);
     persona.headingFormat = 'own';
     persona.headingTemplate = { open: split.template.open, close: split.template.close ?? '' };
     return persona.sections.length;
 }
 
-// Whether two descriptions say the same thing line for line. Blank lines and
-// trailing spaces do not count: the prompt reads the same either way, and the
-// composer always separates items with one blank line.
+// Line-for-line equality ignoring blank lines and trailing spaces, which the prompt does
+// not care about and the composer normalises anyway.
 export function sameText(a, b) {
     const lines = text => String(text ?? '').replace(/\r\n?/g, '\n').split('\n')
         .map(line => line.replace(/[ \t]+$/, '')).filter(line => line.trim() !== '');

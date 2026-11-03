@@ -1,11 +1,7 @@
 // Persona list sorting and label membership.
 // Pure functions only: no DOM, no getContext, no SillyTavern imports.
-//
 
-// The four sort criteria, in the order the settings dropdown offers them.
-// Eight orders: four measures, each readable from both ends (user request). The
-// reversed forms carry a suffix rather than a separate list, so a new measure gets
-// its reverse for free and the two can never fall out of step.
+// Four measures, each readable from both ends, in the settings dropdown's order.
 export const SORT_KEYS = Object.freeze([
     'name', 'nameDesc',
     'recent', 'recentOld',
@@ -18,11 +14,8 @@ const REVERSED = Object.freeze({
     nameDesc: 'name', recentOld: 'recent', modifiedOld: 'modified', createdOld: 'created',
 });
 
-// A persona's created time comes from the digits leading its avatar file name.
-// Anything other than exactly thirteen digits is rejected: a shorter run is not
-// a millisecond epoch (reading it as one would sort the persona to 1970), and a
-// longer run is not a plausible epoch either, so both come back as "no created
-// time" instead of being misread.
+// Created time from the avatar file name's leading digits: exactly thirteen (a
+// millisecond epoch), else null rather than a misread date.
 export function createdAtFromAvatar(avatarId) {
     if (typeof avatarId !== 'string') return null;
     const match = avatarId.match(/^\d+/);
@@ -30,8 +23,7 @@ export function createdAtFromAvatar(avatarId) {
     return Number(match[0]);
 }
 
-// The newest updatedAt across every variant of every section. Zero for a
-// persona with no variant touched yet, or no persona at all.
+// Newest updatedAt across all variants; 0 when nothing was touched or no persona.
 export function modifiedAt(persona) {
     let latest = 0;
     for (const list of Object.values(persona?.variants ?? {})) {
@@ -44,11 +36,8 @@ export function modifiedAt(persona) {
     return latest;
 }
 
-// Two personas may carry the same name, and a collator can call two different
-// names equal as well. Either way the pair has no order of its own, so the list
-// would settle wherever the input happened to put it and move
-// again on the next render. The avatar id is unique per persona, so it is the
-// final say and the order stops flickering.
+// Names can tie (duplicates, or collator-equal), so the unique avatar id decides,
+// keeping the order stable between renders.
 function nameCompare(a, b, collator) {
     const byName = (collator && typeof collator.compare === 'function')
         ? collator.compare(a.name, b.name)
@@ -68,9 +57,7 @@ function sortValue(sortBy, entry, deps) {
         return typeof v === 'number' ? v : -Infinity;
     }
     if (sortBy === 'modified') {
-        // modifiedAt answers 0 for a persona with no edits, and 0 is not a time:
-        // it has to read as missing, like the other two keys, or 오래된 수정순
-        // starts with every persona nobody has touched.
+        // 0 means no edits, which must read as missing like the other keys.
         const modified = modifiedAt(deps?.personas?.[entry.avatar]);
         return modified > 0 ? modified : -Infinity;
     }
@@ -79,18 +66,14 @@ function sortValue(sortBy, entry, deps) {
     return created === null ? -Infinity : created;
 }
 
-// Sorts a copy of entries; the array passed in is left untouched. Ties,
-// including every entry with no data for the chosen key, always break by
-// name and then by avatar id, so the order never flickers between renders.
-// An unknown sortBy falls back to name rather than throwing.
+// Sorts a copy. Ties, including entries with no data, break by name then avatar id;
+// an unknown sortBy falls back to name.
 export function sortEntries(entries, sortBy, deps) {
     const list = [...entries];
     const collator = deps?.collator;
     const asked = SORT_KEYS.includes(sortBy) ? sortBy : 'name';
-    // A reversed key sorts on its own measure and then flips. The flip is applied
-    // to the comparator's RESULT, not by reversing the array afterwards: reversing
-    // would also invert the name tie break, so two personas with no recorded use
-    // would swap places every time the direction changed.
+    // Reversed keys flip the comparator's result, not the array, so the name tie
+    // break keeps its direction.
     const key = REVERSED[asked] ?? asked;
     const dir = REVERSED[asked] ? -1 : 1;
     if (key === 'name') {
@@ -100,29 +83,18 @@ export function sortEntries(entries, sortBy, deps) {
     list.sort((a, b) => {
         const va = sortValue(key, a, deps);
         const vb = sortValue(key, b, deps);
-        // An entry with no data for the key goes LAST whichever way the list is
-        // read. Flipping the comparator alone put every never-used persona at
-        // the top of 오래된 사용순, ahead of the ones that had actually been used
-        // longest ago, which is the opposite of what the label promises.
+        // No data goes last in either direction.
         const missingA = va === -Infinity;
         const missingB = vb === -Infinity;
         if (missingA !== missingB) return missingA ? 1 : -1;
-        // Compared, not subtracted: two missing entries are both -Infinity and
-        // their difference is NaN, which the sort spec reads as equal and which
-        // would skip the name tie break below.
+        // Compared first: -Infinity minus -Infinity is NaN, which would skip the tie break.
         if (va !== vb) return dir * (vb - va);
         return nameCompare(a, b, collator);
     });
     return list;
 }
 
-// Every label a persona belongs to, in label order.
-export function labelsFor(labels, avatarId) {
-    return (labels ?? []).filter(label => (label.members ?? []).includes(avatarId));
-}
-
-// Only one chip can be active at a time. No active label,
-// or an active label that no longer exists, means "show everything".
+// One active label at most; none, or one that no longer exists, shows everything.
 export function filterByLabel(entries, labels, activeLabelId) {
     const label = activeLabelId == null ? null : (labels ?? []).find(l => l.id === activeLabelId);
     if (!label) return [...entries];
@@ -130,10 +102,8 @@ export function filterByLabel(entries, labels, activeLabelId) {
     return entries.filter(entry => members.includes(entry.avatar));
 }
 
-// A display only copy of labels with member ids that no longer exist in
-// personas filtered out. The stored labels are never touched: a persona
-// deleted by mistake in SillyTavern can still be restored with its labels
-// intact.
+// Labels without members missing from personas, for display only. Stored labels keep
+// them, so a persona restored after an accidental deletion keeps its labels.
 export function livingLabels(labels, personas) {
     const known = personas ?? {};
     return (labels ?? []).map(label => ({
@@ -142,9 +112,7 @@ export function livingLabels(labels, personas) {
     }));
 }
 
-// Records that avatarId was switched to at time now, keeping at most cap
-// entries. Refreshing an avatar already recorded does not consume a new slot, and
-// does restamp it, which moves it behind the others in the eviction order.
+// Records a switch to avatarId, keeping at most cap entries (oldest evicted first).
 export function recordUse(root, avatarId, now, cap) {
     if (!root.lastUsed || typeof root.lastUsed !== 'object') root.lastUsed = {};
     root.lastUsed[avatarId] = now;
@@ -155,9 +123,7 @@ export function recordUse(root, avatarId, now, cap) {
     }
 }
 
-// Adds avatarId to labelId's members if absent, removes it if present.
-// Returns whether it is a member after the call. A missing label changes
-// nothing.
+// Toggles membership; returns whether avatarId is a member afterwards (false for no label).
 export function toggleMember(labels, labelId, avatarId) {
     const label = (labels ?? []).find(l => l.id === labelId);
     if (!label) return false;

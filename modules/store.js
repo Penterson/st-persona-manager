@@ -4,22 +4,13 @@ import { STRINGS } from './strings.js';
 import { validCrop } from './framing.js';
 
 export const MODULE_NAME = 'persona-manager';
-/* 2 (0.1.24): lastComposed, a full copy of the composed description per persona,
-   became composedSig, a fingerprint of it. A build on 1 reading a 2 root would
-   find no baseline and call every persona's description an outside edit, so it
-   is kept off this root the way every older build is kept off a newer one.
-
-   3 (0.3.3): 0.3.2 added the heading format 'own' (headingFormat 'own',
-   headingTemplate, sections[].untitled) without a new number. A build on 2
-   prints no titles for a format it does not know, so its next write would strip
-   every title from such a description. Nothing else changes between 2 and 3. */
+/* Bumped whenever an older build would damage the data, since older builds treat a newer
+   root as read-only. 2: lastComposed became composedSig (no baseline for 1). 3: heading
+   format 'own', whose titles a build on 2 would strip on its next write. */
 export const SCHEMA_VERSION = 3;
 
-/* What this extension last gave SillyTavern, as a fingerprint rather than a copy.
-   The copy was a fifth of everything this extension stores (measured 21% of an
-   18.9MB tree), and every SillyTavern save serializes all of it, on every tap
-   that writes. The only question ever asked of it is whether SillyTavern's text
-   is still that text, and a length plus a 32 bit FNV-1a hash answers that. */
+/* Fingerprint (length + 32-bit FNV-1a) of what was last given to SillyTavern. A full copy
+   was a fifth of our stored data, and only equality is ever asked of it. */
 export function textSignature(text) {
     const s = String(text ?? '');
     let h = 0x811c9dc5;
@@ -30,62 +21,39 @@ export function textSignature(text) {
     return `${s.length}:${(h >>> 0).toString(36)}`;
 }
 
-// There is deliberately no master "enabled" flag. One was defined here and read
-// nowhere, and honouring it would have been the wrong repair: SillyTavern's extension
-// manager already owns turning this extension off, and a second switch with no screen
-// to flip it can only end up disagreeing with the one the user can actually reach.
-// An older settings.json may still carry the key. Nothing reads it, and migrate only
-// adds defaults, so it sits there harmlessly rather than being deleted from under a
-// build that might still want it.
+// No master "enabled" flag on purpose: SillyTavern's extension manager owns that. An
+// older settings.json may still carry the key; nothing reads it, and it is left in place.
 export const DEFAULT_SETTINGS = Object.freeze({
     showQuickBar: true,
     historyPerVariant: 5,
     historyMaxBytes: 262144,
-    // Age based expiry (user request). 0 = never, which is the shipped default:
-    // a new setting must not delete an existing user's history by appearing.
+    // 0 = never: a new setting must not delete existing history by appearing.
     historyMaxDays: 0,
     historyCoalesceMinutes: 5,
     injectAssetMacros: true,
-    // 언어별 이름 자동 적용 (user request, on by default since 2026-08-27).
-    // It was shipped off, on the reasoning that renaming a persona behind the
-    // user's back is not something to opt them into. That reasoning was wrong in
-    // one specific way: this only ever acts on a persona that has an alternate
-    // name REGISTERED for the chat's language, and registering one is the user
-    // asking for exactly this. Somebody who has never opened 언어별 이름 has no
-    // names, so the switch does nothing for them whichever way it is set.
+    // Per-language auto-naming. On by default: it only acts on personas with a name
+    // registered for the chat's language, and registering one is asking for this.
     autoLocalName: true,
     defaultHeadingFormat: 'none',
-    // How a description comes in at 관리 시작 (state.js seedDescription). 'own'
-    // keeps a description's own division and names (user request, 2026-11-03),
-    // 'whole' puts it in one item, 'defaults' matches it onto the shipped names.
+    // How adopt seeds a description (state.js seedDescription): 'own' keeps its own
+    // division, 'whole' puts it in one item, 'defaults' matches the shipped names.
     adoptSplitMode: 'own',
     assetStyle: 'plain',
-    // The words live in strings.js, this names which ones.
     assetPromptTemplate: STRINGS.settings.assetPromptDefault,
     warnBytes: 524288,
     sortBy: 'name',
     activeLabelId: null,
     lastUsedCap: 50,
-    // Two independent switches, both off out of the box: the
-    // persona list is SillyTavern's and most rows in it are not ours, so nothing
-    // is added to it until the user asks for it.
+    // Off by default: the persona list is SillyTavern's, so nothing is added unasked.
     rosterShowVersionCount: false,
     rosterShowVersionNames: false,
-    // 버전 접기 (user request). Closed out of the box: the quick panel is opened
-    // to change a persona, and the version list was taking a third of it to say
-    // there were no versions.
+    // Collapsed by default: the quick panel is opened to switch personas.
     quickVersionOpen: false,
-    // 언어별 이름 in the quick panel (user request). Closed like the version list,
-    // and for the same reason: the panel is opened to switch a persona.
+    // Per-language names in the quick panel; collapsed for the same reason.
     quickNamesOpen: false,
-    /* The manager's persona picker keeps its own view (user request). It used to
-       read rosterViewMode, so choosing tiles in the quick panel changed the picker
-       with it and there was no way to have one of each. They are different jobs:
-       the quick panel's list is browsed, the picker is a chooser you are already
-       halfway through a task in. migrate seeds this from rosterViewMode for anyone
-       who already had one, so no picker changes shape on upgrade. */
+    // The manager's picker has its own view, separate from the quick panel's
+    // rosterViewMode (migrate seeds it from that, so no picker changes on upgrade).
     pickerViewMode: 'list',
-    // 'list' is the layout the panel has always had.
     rosterViewMode: 'list',
     // 0 means automatic columns / everything on one page.
     rosterTileColumns: 0,
@@ -96,8 +64,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     pageSizeVersions: 20,
 });
 
-// What a persona starts with. Existing personas are untouched;
-// the manager's [기본 항목 채우기] adds the missing ones on request.
+// The items a new persona starts with; existing personas get them only on request.
 export const DEFAULT_SECTION_NAMES = Object.freeze([
     '기본 정보', '외모', '배경', '성격', '버릇 & 습관', '능력 & 기술', '관계',
     '숨겨진 욕망', '말투 & 대사', 'NSFW 외모', '성적 취향', 'AI 가이드라인', '캐릭터 노트',
@@ -121,18 +88,15 @@ export function emptyRoot() {
 
 const isPlainObject = value => !!value && typeof value === 'object' && !Array.isArray(value);
 
-// Containers every reader iterates. Arrays are refused where an object is
-// expected: a personas key holding [] accepted named keys in memory and then
-// lost them all on save, because JSON.stringify drops an array's named keys.
+// Containers every reader iterates. Arrays are refused where an object is expected:
+// JSON.stringify drops an array's named keys, so they would be lost on save.
 function backfillContainers(root) {
     if (!isPlainObject(root.settings)) root.settings = {};
     if (!isPlainObject(root.personas)) root.personas = {};
     if (!Array.isArray(root.labels)) root.labels = [];
     if (!isPlainObject(root.lastUsed)) root.lastUsed = {};
-    // Tags live on personas and versions. Array.isArray and not `?? []`: a
-    // versions key holding an object or a number is not iterable, for..of throws,
-    // and migrate is called from getRoot - so one malformed record took down
-    // every screen at once.
+    // Array.isArray, not ?? []: a non-iterable value would throw in for..of, and migrate
+    // runs from getRoot, so one malformed record would take down every screen.
     for (const persona of Object.values(root.personas)) {
         if (!persona || typeof persona !== 'object') continue;
         if (!Array.isArray(persona.tags)) persona.tags = [];
@@ -143,16 +107,9 @@ function backfillContainers(root) {
     }
 }
 
-/* A root written by a NEWER build is shown, never rewritten.
-
-   The containers used to be backfilled on the stored object itself, before the
-   read-only return, and a readOnly flag written onto it: a newer build's
-   versions held as an object came back as [], and SillyTavern saved that with
-   its next save, so going back to the newer build found the data gone. The
-   screens now read a normalised COPY, cached per stored object so a getRoot per
-   draw does not clone the whole tree each time; the stored object is left
-   exactly as the newer build wrote it. Every write path refuses on readOnly,
-   so nothing is ever written into the copy and lost. */
+/* A root written by a newer build is shown, never rewritten: screens read a normalised
+   copy (cached per stored object, so getRoot does not clone per draw), and every write
+   path refuses on readOnly, so nothing is written into the copy and lost. */
 const futureViews = new WeakMap();
 
 function futureView(stored) {
@@ -186,66 +143,45 @@ export function migrate(root) {
     if (typeof root.schemaVersion !== 'number') root.schemaVersion = SCHEMA_VERSION;
     if (root.schemaVersion > SCHEMA_VERSION) return futureView(root);
     backfillContainers(root);
-    /* Past the read-only return, because this DROPS values rather than filling
-       them in: a shape we do not recognise under a key we own is worth clearing,
-       but only on a root this build is allowed to write. Readers still go through
-       boundAsset, so a hand edited file cannot reach them either way. */
-    // Schema 1 to 2: the full copy becomes its fingerprint (see textSignature).
-    for (const persona of Object.values(root.personas)) {
-        if (!persona || typeof persona !== 'object' || !('lastComposed' in persona)) continue;
-        if (typeof persona.composedSig !== 'string') {
-            persona.composedSig = typeof persona.lastComposed === 'string' ? textSignature(persona.lastComposed) : null;
-        }
-        delete persona.lastComposed;
-    }
-    // Schema 2 to 3, once: a version saved before an item existed has no pick for
-    // it, and applying that version dropped the item from the prompt. 0.3.0 gives
-    // every new item a pick in every version (manager-pure.js pickInEveryVersion);
-    // the versions saved before that get the same here, with the item's current
-    // choice, which is what pickInEveryVersion would have given them.
-    if (root.schemaVersion < 3) {
-        for (const persona of Object.values(root.personas)) backfillVersionPicks(persona);
-    }
-    root.schemaVersion = SCHEMA_VERSION;
+    // Below the read-only return because the rest drops unrecognised values, which is
+    // only allowed on a root this build may write.
+    const backfillPicks = root.schemaVersion < 3;
     for (const persona of Object.values(root.personas)) {
         if (!persona || typeof persona !== 'object') continue;
-        if (persona.avatarWritten !== null && typeof persona.avatarWritten !== 'string') persona.avatarWritten = null;
-        for (const version of Array.isArray(persona.versions) ? persona.versions : []) {
-            if (version && typeof version === 'object' && 'avatarCrop' in version) version.avatarCrop = validCrop(version.avatarCrop);
+        // Schema 1 to 2: the full copy becomes its fingerprint (see textSignature).
+        if ('lastComposed' in persona) {
+            if (typeof persona.composedSig !== 'string') {
+                persona.composedSig = typeof persona.lastComposed === 'string' ? textSignature(persona.lastComposed) : null;
+            }
+            delete persona.lastComposed;
         }
+        // Schema 2 to 3, once: versions saved before an item existed get the item's current
+        // pick, as pickInEveryVersion gives new items; without one, applying drops the item.
+        if (backfillPicks) backfillVersionPicks(persona);
+        if (persona.avatarWritten !== null && typeof persona.avatarWritten !== 'string') persona.avatarWritten = null;
         const backup = persona.avatarBackup;
         if (backup !== null && (typeof backup !== 'object' || typeof backup?.label !== 'string')) persona.avatarBackup = null;
-        // Guaranteed an array by the backfill above, which runs before the
-        // read-only return and therefore before this.
+        // An array, guaranteed by backfillContainers above.
         for (const version of persona.versions) {
             if (!version || typeof version !== 'object') continue;
+            if ('avatarCrop' in version) version.avatarCrop = validCrop(version.avatarCrop);
             if (version.avatarAsset !== null && typeof version.avatarAsset !== 'string') version.avatarAsset = null;
         }
     }
-    // This flag lives on the object we persist, so a single run against a newer
-    // build leaves it in settings.json. Nothing else ever clears it, and a stale
-    // one silently blocks every write from then on.
+    root.schemaVersion = SCHEMA_VERSION;
+    // A stale readOnly may sit in settings.json (older builds stored it); it would block
+    // every write, and nothing else clears it.
     delete root.readOnly;
-    // Before the defaults below, so a root that predates the split keeps the view
-    // it was already showing in both places rather than snapping the picker to the
-    // shipped default.
+    // Before the defaults, so a root predating pickerViewMode keeps its view in both places.
     if (!Object.hasOwn(root.settings, 'pickerViewMode') && root.settings.rosterViewMode) {
         root.settings.pickerViewMode = root.settings.rosterViewMode;
     }
-    /* A default we shipped is ours to replace; a text the user wrote is not.
-
-       The asset instruction is a stored setting, and the backfill below only fills
-       what is MISSING, so every rewrite of the default reached new installs only
-       and left everybody else on the first version of it (device report: 지시문이
-       여전히 옛날 문구). Exact equality against the list of what we have shipped is
-       what separates the two cases: byte for byte one of ours means untouched. */
+    /* A default we shipped is ours to replace; a text the user wrote is not. An exact
+       match with a past default means untouched, so it moves to the current one. */
     if (STRINGS.settings.legacyAssetPrompts.includes(root.settings.assetPromptTemplate)) {
         root.settings.assetPromptTemplate = DEFAULT_SETTINGS.assetPromptTemplate;
     }
-    /* The old switch, splitOnAdopt, shipped ON, so every install carries true
-       whether or not anybody chose it. Retired rather than reused: its stored
-       value says nothing about what the user wants, and the replacement starts
-       from the new default, off. */
+    // splitOnAdopt shipped on, so its stored value says nothing about the user: dropped.
     delete root.settings.splitOnAdopt;
     // 0.3.1's on/off switch, folded into the mode: on meant the shipped names.
     if (Object.hasOwn(root.settings, 'autoSplitOnAdopt')) {
@@ -263,57 +199,61 @@ export function migrate(root) {
     return root;
 }
 
-// The composition headings a user can pick, read by the settings drawer and the
-// 편집 tab from one list. The fourth, 'own', is not offered: it exists only on a
-// persona whose description arrived already divided (state.js seedDescription),
-// and the 편집 tab adds it to that persona's own select.
+// Heading formats offered by the settings drawer and the edit tab. 'own' is not listed:
+// it exists only on personas adopted with their own division, whose select adds it.
 export const HEADING_FORMATS = Object.freeze(['none', 'plain', 'markdown']);
 export const ADOPT_MODES = Object.freeze(['own', 'whole', 'defaults']);
 
-// Tile shapes for the roster's tile views. The user asked for the choice rather
-// than a house shape: a circle crops a rectangular avatar hardest, and somebody
-// whose portraits are full-body art wants the square. Validated on read, because
-// the value reaches a class name.
+// Roster tile shapes; validated on read, because the value reaches a class name.
 export const TILE_SHAPES = Object.freeze(['circle', 'rounded', 'square']);
 
 export function makeDefaultPersona(makeIdFn, headingFormat) {
     const p = {
         sections: [], variants: {}, versions: [],
         activeVersionId: null, activePicks: {},
-        // 'none' unless the user has set a different default, so
-        // adopting an existing description never changes the prompt by itself.
-        // An unknown value out of a hand edited settings.json falls back rather
-        // than reaching headingFor, which would silently treat it as 'none'.
+        // 'none' unless the user set another default, so adopting never changes the
+        // prompt by itself; unknown values (hand edits) fall back here.
         headingFormat: HEADING_FORMATS.includes(headingFormat) ? headingFormat : 'none',
         history: {}, log: [], assets: {},
         assetFolderKey: null,
         // The fingerprint of what SillyTavern was last given; null is the empty text.
         composedSig: null,
         tags: [],
-        /* Replacing a persona picture OVERWRITES SillyTavern's avatar file, so
-           the first time a bound image is written the picture that was there is
-           gone. avatarBackup names the asset it was copied into before that
-           happened, and it is written once and never again: a second backup
-           would be a backup of our own replacement. */
+        // The asset holding the avatar as it was before our first overwrite. Written once:
+        // a second backup would copy our own replacement.
         avatarBackup: null,
         // The label we last wrote to the avatar file. A cache of a server fact,
         // read only to skip a write that would change nothing.
         avatarWritten: null,
     };
-    for (const name of DEFAULT_SECTION_NAMES) {
-        const sid = makeId(makeIdFn);
-        const vid = makeId(makeIdFn);
-        p.sections.push({ id: sid, name });
-        // The same word the manager seeds into a new item's first choice, from
-        // the same place: a second copy here once drifted.
-        p.variants[sid] = [{ id: vid, label: STRINGS.manager.defaultChoiceLabel, text: '', updatedAt: 0 }];
-        p.activePicks[sid] = vid;
-    }
+    for (const name of DEFAULT_SECTION_NAMES) appendSection(p, { name }, makeIdFn, '', 0);
     return p;
+}
+
+// Appends an item with one picked choice under the default label; the item's id is
+// made before the choice's.
+export function appendSection(persona, section, makeIdFn, text, updatedAt) {
+    const sectionId = makeId(makeIdFn);
+    const variantId = makeId(makeIdFn);
+    persona.sections.push({ id: sectionId, ...section });
+    persona.variants[sectionId] = [{ id: variantId, label: STRINGS.manager.defaultChoiceLabel, text, updatedAt }];
+    persona.activePicks[sectionId] = variantId;
+    return { sectionId, variantId };
 }
 
 export function getPersona(root, avatarId) {
     return root?.personas?.[avatarId] ?? null;
+}
+
+export function findVersion(persona, versionId) {
+    const versions = persona?.versions;
+    return Array.isArray(versions) ? versions.find(entry => entry?.id === versionId) ?? null : null;
+}
+
+// The choice an item currently uses (its live pick), or null.
+export function liveVariant(persona, section) {
+    const pick = persona?.activePicks?.[section?.id];
+    return (persona?.variants?.[section?.id] ?? []).find(entry => entry?.id === pick) ?? null;
 }
 
 export function ensurePersona(root, avatarId, makeIdFn) {
@@ -328,23 +268,13 @@ export function isEmptyPersona(p) {
     if (Object.keys(p.assets ?? {}).length) return false;
     if ((p.versions ?? []).length) return false;
     if ((p.log ?? []).length) return false;
-    /* Two records the user made deliberately and that live nowhere else.
-
-       The birth log line normally keeps every entry we created out of this
-       function's reach, which is why these were never missed - until [변경 기록
-       일괄 삭제] on the history tab, which empties that log on request. A
-       persona whose log has been cleared and whose only content is its 언어별
-       이름 or its tags then read as an empty shell, and [빈 페르소나 정리]
-       deleted both without a word. */
+    // Tags and per-language names are user work that lives nowhere else, and the birth
+    // log line that usually protects a record can be cleared from the history tab.
     if ((p.tags ?? []).length) return false;
     if (Object.values(p.names ?? {}).some(name => String(name ?? '').trim())) return false;
-    // The same hole, for pictures. The folder key points at sprites the user
-    // uploaded, and the backup names the copy of the original avatar taken before
-    // the first overwrite; both live on the server, and this record is the only
-    // way back to them.
+    // Likewise for pictures: this record is the only way back to the server-side files.
     if (p.assetFolderKey || p.avatarBackup) return false;
-    // Count actual history entries, not variant keys: a key holding an empty
-    // array must not count as history content.
+    // Actual history entries, not keys: an empty array is not history content.
     for (const list of Object.values(p.history ?? {})) {
         if (Array.isArray(list) && list.length) return false;
     }
@@ -353,18 +283,9 @@ export function isEmptyPersona(p) {
         if (!Array.isArray(list)) return false;
         for (const v of list) if (typeof v?.text === 'string' && v.text.trim()) return false;
     }
-    /* Structure is content even while every body is still blank. Renaming an
-       item, adding one, or adding a second choice is work that lives nowhere but
-       here, and a user who lays out their template before writing into it had all
-       of it deleted by [빈 페르소나 정리] once the birth log line was gone.
-
-       Compared against what makeDefaultPersona builds, not against emptiness: a
-       record still carrying exactly the default items under their default names,
-       one default choice each, is the untouched shell this function is for.
-
-       A record with NO sections stays prunable. That is the shell the settings
-       drawer names as the reason this button exists, and a length check alone
-       would have turned it into the one thing that can never be cleaned up. */
+    /* Structure is content even with every body blank: only the exact makeDefaultPersona
+       shell (default items and names, one default choice each) counts as empty. A record
+       with no sections stays prunable; it is the shell the prune button exists for. */
     const sections = p.sections ?? [];
     if (sections.length) {
         if (sections.length !== DEFAULT_SECTION_NAMES.length) return false;
@@ -386,6 +307,5 @@ export function pruneEmpty(root) {
 }
 
 export function usageBytes(root) {
-    // TextEncoder is available in Node and in browsers.
     return new TextEncoder().encode(JSON.stringify(root ?? {})).length;
 }

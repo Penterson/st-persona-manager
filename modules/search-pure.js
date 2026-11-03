@@ -1,42 +1,24 @@
-// Search, language detection and list paging.
-// Pure: no DOM, no getContext, so 검사/search.test.mjs can import it in Node.
-//
-// The matching core is ported from the user's own 월드인포검색.js (v3.10):
-// Korean initial-consonant (chosung) search, sparse and typo-tolerant fuzzy
-// matching, accuracy-graded ranking, and highlight ranges mapped back onto the
-// original string through a normalisation position table. Only the matching
-// functions travel; the lorebook script's stores, DOM and deep search stay
-// behind. Chosung and fuzzy search are always on here (the source script's
-// CHOSUNG_SEARCH/FUZZY_SEARCH flags, hardcoded true).
+// Search (chosung, sparse and typo-tolerant, graded ranking), language detection and
+// list paging. Pure: no DOM, no getContext, so Node tests can import it.
 
 const CHO = ['ㄱ', 'ㄲ', 'ㄴ', 'ㄷ', 'ㄸ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅃ', 'ㅅ', 'ㅆ', 'ㅇ', 'ㅈ', 'ㅉ', 'ㅊ', 'ㅋ', 'ㅌ', 'ㅍ', 'ㅎ'];
 const SYL_FIRST = 0xAC00;
 const SYL_LAST = 0xD7A3;
 const JAMO_RE = /[ㄱ-ㅎ]/;
 
-// Mac-made archives deliver hangul NFD-decomposed; decomposed syllables share
-// no code points with what the user types, and the chosung table only knows
-// precomposed ones, so without this such names are unfindable.
+// Mac-made archives deliver hangul NFD-decomposed, which matches neither typed text
+// nor the precomposed-only chosung table.
 function nfc(s) {
     try { return s.normalize('NFC'); } catch { return s; }
 }
 
-export function normalize(s) {
+function normalize(s) {
     return nfc(String(s ?? '')).toLowerCase().replace(/\s+/g, '');
 }
 
-/* The normalised-position -> original-position table for highlighting, built
-   against a normalised string that already exists rather than alongside a second
-   one of its own.
-
-   Lowercasing can GROW a character (Turkish İ becomes two code units); every
-   grown piece maps to the same source index so the two sides cannot drift apart.
-   What is read from each source character is its lowercase LENGTH, never its
-   lowercase value, which is what lets this walk a string produced by lowercasing
-   the whole text at once: the one character JavaScript lowercases differently in
-   context is the Greek final sigma, and that one is length preserving. The
-   bounds check is there for a case nobody has produced, and stops short rather
-   than indexing past the end. */
+/* Normalised position -> original position, for highlighting. Lowercasing can grow a
+   character (Turkish İ becomes two code units), so only each character's lowercase length
+   is used; context-dependent lowercasing (Greek final sigma) preserves length. */
 function buildMap(src, normalized) {
     const map = [];
     let j = 0;
@@ -66,8 +48,7 @@ function isSubsequence(text, q) {
     return i === q.length;
 }
 
-// Bounded edit distance with reusable row buffers, exactly as the source
-// script measures typos: substring-style (free leading/trailing text).
+// Substring-style edit distance (leading and trailing text free), reusing row buffers.
 let dpPrev = [];
 let dpCur = [];
 function approxDistance(text, q) {
@@ -92,48 +73,30 @@ function approxDistance(text, q) {
     return best;
 }
 
-// Per-text and per-query caches, same shape as the source script. The text
-// cache clears itself past 5000 entries; the query cache is the last query
-// only, which is what a keystroke-by-keystroke filter re-asks.
+// Per-text cache (cleared past 5000 entries) and a last-query-only cache, which is
+// what a per-keystroke filter re-asks.
 const textCache = new Map();
-/* Three forms of one text, and only the first of them is always needed.
-
-   The filter chips and the 편집 tab's search run textContains over every choice
-   body a persona has, which on this device is 26 bodies of about 2,800 Korean
-   characters. textContains reads the normalised form; it never reads the
-   position table, and it reads the chosung form only when the query carries a
-   jamo. Building all three up front made the first keystroke pay for two
-   answers nobody had asked for.
-
-   Measured on this desktop over those 26 bodies: the character loop below took
-   6.3ms to normalise them and the engine's own string operations take 0.74ms
-   for a result that agrees byte for byte, and toChosung was another 1.3ms. The
-   whole prepText went from 14.7ms to about 3ms, which on the phone is the
-   difference between a visible hitch and none. */
+/* Three forms of one text; only the normalised one is built up front. The chosung form
+   and position table are built on first use, as body searches rarely need them. */
 function prepText(text) {
     let c = textCache.get(text);
     if (!c) {
         if (textCache.size > 5000) textCache.clear();
         const src = nfc(String(text ?? ''));
-        // The same two operations, in the same order, that normalize() applies to
-        // the QUERY. They used to be a character loop here and the engine's own
-        // there, which is a difference nothing needed and nothing checked.
+        // Exactly what normalize() does to the query, in the same order.
         c = { src, t: src.toLowerCase().replace(/\s+/g, ''), map: null, tc: null };
         textCache.set(text, c);
     }
     return c;
 }
 
-// The chosung form, on the first question that needs one.
 function chosungOf(p) {
     if (p.tc === null) p.tc = toChosung(p.t);
     return p.tc;
 }
 
-// The position table, on the first highlight that needs one, which is names and
-// never bodies. It is derived from the normalised string that is already here,
-// so the two can never describe different strings.
-
+// The position table, needed only by highlights (names, never bodies); built from p.t,
+// so the two cannot describe different strings.
 function mapOf(p) {
     if (p.map === null) p.map = buildMap(p.src, p.t);
     return p.map;
@@ -182,9 +145,8 @@ export function scoreOf(text, term) {
     return 0;
 }
 
-// Relevance rank: same grade, then more coverage wins, then an earlier match
-// position wins. Sparse matches take their first hit position; typo matches
-// have no meaningful position and take none.
+// Grade first, then coverage, then earlier position. Sparse matches use their first
+// hit; typo matches have no meaningful position.
 export function rankOf(text, term) {
     const base = scoreOf(text, term);
     if (base <= 0) return 0;
@@ -219,8 +181,7 @@ function subsequenceHits(text, q) {
     return i === q.length ? hits : null;
 }
 
-// Group scattered hit positions into original-position ranges, bridging gaps
-// that are whitespace only, so 북부왕국 marks 북부 왕국 as one chunk.
+// Groups hit positions into original-string ranges, bridging whitespace-only gaps.
 function rangesOf(p, hits) {
     const out = [];
     const map = mapOf(p);
@@ -235,10 +196,8 @@ function rangesOf(p, hits) {
     return out;
 }
 
-// Highlight ranges over the ORIGINAL string ([start, end] inclusive pairs).
-// Contiguous matches come back as one chunk, sparse matches per character
-// chunk, typo matches as nothing (there is no place to honestly point at).
-// Callers must render the NFC form the ranges index into (srcOf below).
+// Inclusive [start, end] ranges over the original string; typo matches get none.
+// Callers must render the NFC form the ranges index into (srcOf).
 export function matchRanges(text, term) {
     const p = prepText(text);
     const q = prepQuery(term);
@@ -257,17 +216,13 @@ export function matchRanges(text, term) {
     return [];
 }
 
-// The NFC form matchRanges indexes into. Drawing the raw original under NFD
-// names would skew every highlight by the decomposed length difference.
+// The NFC form matchRanges indexes into; NFD originals would skew every highlight.
 export function srcOf(text) {
     return prepText(text).src;
 }
 
-// Body-sized text takes the source script's deep-search rule instead of the
-// full grade ladder: a plain normalized substring, or a chosung substring.
-// The sparse and typo tiers match almost any long prose (a two-jamo query is a
-// subsequence of nearly every Korean paragraph), which turns a filter into a
-// no-op and pays an edit-distance table per body per keystroke on top.
+// For body-sized text: substring or chosung substring only. The sparse and typo tiers
+// match almost any long prose, so a filter would pass everything, slowly.
 export function textContains(text, term) {
     const p = prepText(text);
     const q = prepQuery(term);
@@ -278,15 +233,8 @@ export function textContains(text, term) {
 
 /* Language detection */
 
-// Counts writing-system characters and answers ko/ja/zh/en, or null when there
-// is nothing to judge by. Kana wins early because Japanese prose is mostly
-// kanji plus kana, so a plain majority vote would misread it as Chinese: any
-// kana presence at one twentieth of the letters is decisive. The thresholds
-// are data, pinned by tests, not tuned per call.
-//
-// Memoised by the exact text, capped like textCache: the filter chips ask the
-// same unchanged bodies once per keystroke, and a multi-KB scan per persona per
-// key press is measurable jank on the phone.
+// ko/ja/zh/en by character counts, or null. Kana at a twentieth of the letters means
+// Japanese, which is mostly kanji. Memoised: filters re-ask unchanged bodies per keystroke.
 const langCache = new Map();
 export function detectLanguage(text) {
     const s = String(text ?? '');
@@ -297,44 +245,15 @@ export function detectLanguage(text) {
     return answer;
 }
 
-/* What language the conversation is being held in (user request: 언어별 이름
-   자동 적용). The chat, not the description: the description is what the persona
-   IS, and it does not change when the user starts typing English.
+/* Per-speaker scan budget, newest first: enough that one quoted line cannot flip the
+   language, small enough that a switch registers within a few turns. */
+const CHAT_LANGUAGE_SCAN_CHARS = 800;
+const CHAT_LANGUAGE_SCAN_MESSAGES = 6;
 
-   Messages are read from the newest backwards. System messages are skipped:
-   they are SillyTavern's own text, in SillyTavern's language, and counting them
-   would let the UI language outvote the conversation. Six messages and 800
-   characters per speaker, so a block of the old language stops counting within
-   a few turns of the user switching: judging one message alone would flip the
-   name on a single quoted line, and judging the whole chat would never notice
-   the switch at all. */
-export const CHAT_LANGUAGE_SCAN_CHARS = 800;
-export const CHAT_LANGUAGE_SCAN_MESSAGES = 6;
-
-/* ── Context-aware language (user request 2026-11-03) ─────────────────────────
-   The first version judged the conversation by its newest text alone and
-   needed 40 characters of it. In a chat that has only just opened, the one
-   message there is the greeting, so the greeting decided on its own - or, when
-   it was short, nothing did. A Korean card whose greeting opens with an English
-   line renamed the persona to its English name; an English card played in
-   Korean kept the English name until the conversation had piled up enough
-   Korean to outvote the greeting.
-
-   Now every piece of context votes, each with a weight that says how much it
-   speaks for the language the conversation will be held in:
-
-     the user's own messages        5   what the user writes is the answer
-     the character's replies        3   the model follows the conversation
-     the greeting (first message)   1.5 written by the card's author
-     the character card             1.5 description, personality, scenario
-     the character's name           1   a name in hangul or kana is a hint
-     the persona's own description  0.5 what the user wrote about themselves
-
-   Each vote is scaled by how much text stood behind it (a two-letter reply is
-   barely a vote; see FULL_AT), and the language with the most weight wins when
-   it has at least MIN_EVIDENCE behind it. Macros, markup and links are removed
-   first, so {{user}} or an <img> tag cannot tip a Korean text towards English. */
-export const LANGUAGE_WEIGHTS = Object.freeze({
+/* ── Context-aware language ──────────────────────────────────────────────────
+   Each source votes with its weight, scaled by how much text backs it (FULL_AT); the
+   top language wins with at least MIN_EVIDENCE. Macros, markup and links never vote. */
+const LANGUAGE_WEIGHTS = Object.freeze({
     user: 5,
     reply: 3,
     greeting: 1.5,
@@ -347,9 +266,8 @@ export const LANGUAGE_WEIGHTS = Object.freeze({
 const FULL_AT = Object.freeze({ user: 30, reply: 40, greeting: 60, card: 80, name: 2, persona: 60 });
 const MIN_EVIDENCE = 1;
 
-/* Only tag shapes go: a letter right after < (or </). A bare <[^>]*> also ate
-   text that is not markup - from the < of "I <3 this" to the > of a later "->",
-   whole sentences between them, and a Korean aside written as <이게 뭐지?>. */
+// Only tag shapes go (a letter right after < or </): a bare <[^>]*> would also eat
+// prose between a "<3" and a later "->".
 export function stripMarkup(text) {
     return String(text ?? '')
         .replace(/\{\{[^{}]*\}\}/g, ' ')
@@ -358,9 +276,7 @@ export function stripMarkup(text) {
         .replace(/```[\s\S]*?```/g, ' ');
 }
 
-/* How much text stood behind a vote, in Latin-letter equivalents. A hangul
-   syllable, a kana or a kanji carries about what three Latin letters do, so a
-   one-line Korean reply counts as much as a one-line English one. */
+// A hangul syllable, kana or kanji carries about what three Latin letters do.
 const CJK_LETTER_WEIGHT = 3;
 
 function letterCount(text) {
@@ -374,12 +290,9 @@ function letterCount(text) {
     return n;
 }
 
-/* Splits a chat into the three conversational sources. The greeting is the
-   character message at the very start, before the user has said anything;
-   system messages are SillyTavern's own and never count. Newest first, and each
-   speaker has a budget of its own: with one shared budget a single long reply
-   used it up, and the user's own message just before it - the heaviest vote -
-   was never read. */
+/* Splits a chat into user, reply and greeting (character messages before the user's
+   first). System messages, SillyTavern's own text, never count. Each speaker has its own
+   budget, so one long reply cannot crowd out the user's messages. */
 export function chatSources(chat) {
     const out = { user: [], reply: [], greeting: '' };
     if (!Array.isArray(chat)) return out;
@@ -392,8 +305,7 @@ export function chatSources(chat) {
         if (!text) continue;
         const beforeUser = firstUser === -1 || i < firstUser;
         if (!message.is_user && beforeUser) {
-            // Every character message before the user's first one is greeting
-            // material (a group chat can open with several).
+            // A group chat can open with several greetings.
             out.greeting = out.greeting ? `${text} ${out.greeting}` : text;
             continue;
         }
@@ -407,13 +319,8 @@ export function chatSources(chat) {
     return out;
 }
 
-/* The language a source is written in, compared in the unit the confidence is
-   measured in: a hangul syllable, a kana or a kanji as three Latin letters.
-   detectLanguage counts raw characters, which made "Seraphina와 Gregory가 마을에
-   도착했다" (9 hangul, 16 Latin) an English sentence. Kana keeps detectLanguage's
-   rule: a twentieth of the letters marks Japanese, since Japanese text is mostly
-   kanji. */
-function sourceLanguage(text) {
+// Letters per script, fullwidth Latin and kana included.
+function scriptCounts(text) {
     let hangul = 0;
     let kana = 0;
     let han = 0;
@@ -425,7 +332,13 @@ function sourceLanguage(text) {
         else if ((c >= 0x4E00 && c <= 0x9FFF) || (c >= 0x3400 && c <= 0x4DBF)) han++;
         else if ((c >= 0x41 && c <= 0x5A) || (c >= 0x61 && c <= 0x7A) || (c >= 0xFF21 && c <= 0xFF3A) || (c >= 0xFF41 && c <= 0xFF5A)) latin++;
     }
-    const letters = hangul + kana + han + latin;
+    return { hangul, kana, han, latin, letters: hangul + kana + han + latin };
+}
+
+/* Like detectLanguage, but weighing CJK characters as three Latin letters, the unit
+   confidence is measured in; raw counts let a few Latin names outvote a Korean sentence. */
+function sourceLanguage(text) {
+    const { hangul, kana, han, latin, letters } = scriptCounts(text);
     if (!letters) return null;
     if (kana > 0 && kana * 20 >= letters) return 'ja';
     const ko = hangul * CJK_LETTER_WEIGHT;
@@ -436,15 +349,13 @@ function sourceLanguage(text) {
     return null;
 }
 
-/* The decision. sources is { user, reply, greeting, card, name, persona }, each
-   a string or an array of strings; anything missing simply does not vote.
-   Answers { lang, scores } with lang null when the evidence is too thin. */
+/* sources: { user, reply, greeting, card, name, persona }, each a string or array; a
+   missing one does not vote. Returns { lang, scores }, lang null on thin evidence. */
 export function contextLanguage(sources = {}) {
     const scores = {};
     for (const [key, weight] of Object.entries(LANGUAGE_WEIGHTS)) {
         const raw = sources[key];
-        // Markup is stripped per message, so a stray < in one message cannot
-        // pair with a > in the next.
+        // Per message, so a stray < in one cannot pair with a > in the next.
         const text = (Array.isArray(raw) ? raw : [raw]).map(stripMarkup).join(' ');
         if (!text.trim()) continue;
         const letters = letterCount(text);
@@ -461,29 +372,15 @@ export function contextLanguage(sources = {}) {
     return { lang: best && scores[best] >= MIN_EVIDENCE ? best : null, scores };
 }
 
-// Both caches key on the description bodies themselves: textCache keeps the source
-// string, its normalised form and a position array with one entry per character,
-// and langCache keeps up to 500 whole bodies. Neither entry cap can trip before the
-// memory does on a roster of long personas, and resetState()'s rule is that no
-// module state outlives teardown. state.js calls this from resetState.
+// Both caches hold whole description bodies, so resetState (state.js) clears them:
+// no module state outlives teardown.
 export function clearSearchCaches() {
     textCache.clear();
     langCache.clear();
 }
 
 function detectLanguageUncached(s) {
-    let hangul = 0;
-    let kana = 0;
-    let han = 0;
-    let latin = 0;
-    for (let i = 0; i < s.length; i++) {
-        const c = s.charCodeAt(i);
-        if ((c >= 0xAC00 && c <= 0xD7A3) || (c >= 0x3130 && c <= 0x318F) || (c >= 0x1100 && c <= 0x11FF)) hangul++;
-        else if ((c >= 0x3040 && c <= 0x30FF) || (c >= 0x31F0 && c <= 0x31FF) || (c >= 0xFF66 && c <= 0xFF9D)) kana++;
-        else if ((c >= 0x4E00 && c <= 0x9FFF) || (c >= 0x3400 && c <= 0x4DBF)) han++;
-        else if ((c >= 0x41 && c <= 0x5A) || (c >= 0x61 && c <= 0x7A) || (c >= 0xFF21 && c <= 0xFF3A) || (c >= 0xFF41 && c <= 0xFF5A)) latin++;
-    }
-    const letters = hangul + kana + han + latin;
+    const { hangul, kana, han, latin, letters } = scriptCounts(s);
     if (!letters) return null;
     if (kana > 0 && kana * 20 >= letters) return 'ja';
     if (hangul >= kana && hangul >= han && hangul >= latin && hangul > 0) return 'ko';
@@ -494,9 +391,8 @@ function detectLanguageUncached(s) {
 
 /* List paging */
 
-// One window of a list. size 0 (or less) means everything on one page. The
-// requested page is clamped into range, so a filter that shrank the list never
-// leaves the user stranded past the end.
+// One page of a list; size 0 or less means one page. The page is clamped, so a filter
+// that shrank the list never strands the user past the end.
 export function pageOf(list, page, size) {
     const items = Array.isArray(list) ? list : [];
     const n = Number.isInteger(size) && size > 0 ? size : 0;

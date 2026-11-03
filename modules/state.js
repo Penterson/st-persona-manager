@@ -1,6 +1,5 @@
-// Single place that knows "which persona are we on and what is its data".
-// Everything the UI needs goes through here.
-import { MODULE_NAME, migrate, getPersona, ensurePersona, usageBytes, textSignature, makeId, ADOPT_MODES } from './store.js';
+// Which persona is active and what its data is; everything the UI needs goes through here.
+import { MODULE_NAME, migrate, getPersona, ensurePersona, liveVariant, usageBytes, textSignature, makeId, ADOPT_MODES } from './store.js';
 import {
     resolveAvatar, findDuplicateNames, loadPreciseApi, freshContext, selectedAvatarFromDom,
 } from './ctx.js';
@@ -15,41 +14,31 @@ import { recordUse } from './roster.js';
 let preciseApi = null;
 let cache = null;
 
-// No exported function takes a context, because a context handed in is a context
-// somebody kept. getContext() copies name1, chat and characterId by value at call
-// time, so a stored one keeps naming the persona that was active when it was built,
-// and resolving from it writes one persona's text into another's record. Every
-// exported function below asks the provider itself, once per invocation.
+// No exported function takes a context, since a kept one goes stale (see freshContext);
+// each asks the provider once per invocation.
 let provider = freshContext;
 
-// Tests point this at a provider that returns a different context each call, which
-// is what SillyTavern actually does. Call with nothing to put the real one back.
+// For tests; call with nothing to restore the real provider.
 export function setContextProvider(fn) {
     provider = (typeof fn === 'function') ? fn : freshContext;
 }
 
 export async function initPrecise() { preciseApi = await loadPreciseApi(); }
 
-// The optional precise path, or null. This is a bonus, never a dependency, and
-// the import has been seen failing on this device. Callers have to work with
-// null and must verify whatever they do with it.
+// The optional precise api, or null (see loadPreciseApi); callers verify what it says.
 export function getPreciseApi() { return preciseApi; }
 
 export function resetState() {
-    // destroy() has to leave no module state behind. Otherwise re-enabling the
-    // extension keeps serving the previous session's persona and asset list.
+    // destroy() leaves no module state, or a re-enable serves the previous session's data.
     preciseApi = null;
     cache = null;
-    // The search caches hold whole description bodies keyed by their own text, so
-    // leaving them behind keeps the previous session's personas in memory.
     clearSearchCaches();
 }
 
 function rootOf(ctx) {
     const stored = ctx.extensionSettings[MODULE_NAME];
-    // Anything but a plain object is no root at all. A hand edit that left [] or a
-    // string there made migrate hand back a fresh object on every call, so adopt
-    // wrote into a copy nobody kept and getRoot() !== getRoot().
+    // Only a plain object is a root: for [] or a string (hand edits) migrate returns a
+    // fresh object per call, so writes would land in copies nobody keeps.
     if (!stored || typeof stored !== 'object' || Array.isArray(stored)) ctx.extensionSettings[MODULE_NAME] = {};
     return migrate(ctx.extensionSettings[MODULE_NAME]);
 }
@@ -61,28 +50,23 @@ export function getRoot() {
 
 export function getState() { return cache; }
 
-// The number belongs on the settings screen only. Computing it inside refresh()
-// means a full stringify of the whole tree on every persona change, settings
-// update and chat change.
+// On demand for the settings screen; in refresh() it would stringify the tree per event.
 export function readUsageBytes() {
     const ctx = provider();
     return ctx ? usageBytes(rootOf(ctx)) : 0;
 }
 
-// Who is active according to THIS context. Separate from refreshWith so a write can
-// ask the question again without rebuilding the cache, which would only replace one
-// stale answer with another and hide the disagreement we need to see.
+// Who is active according to this context. Separate from refreshWith so a write can
+// re-ask without rebuilding the cache, which would hide a disagreement with it.
 function resolveActive(ctx) {
     const pu = ctx.powerUserSettings ?? {};
     return resolveAvatar({
         preciseAvatar: preciseApi?.user_avatar ?? null,
-        // Read at the moment the question is asked, like everything else here: the
-        // list on screen is SillyTavern's own and it moves when the user switches.
+        // Read per call, like the context: SillyTavern's list moves when the user switches.
         domAvatar: typeof document === 'undefined' ? null : selectedAvatarFromDom(document),
         lockedAvatar: ctx.chatMetadata?.persona ?? null,
         name1: ctx.name1,
         personas: pu.personas,
-        defaultPersona: pu.default_persona,
     });
 }
 
@@ -95,33 +79,13 @@ function refreshWith(ctx) {
     // Drop stale asset data the moment the persona changes, so a macro cannot
     // inject the previous persona's file list while the refetch is in flight.
     const sameAvatar = !!cache && cache.avatar === resolved.avatar;
-    // This is the one place a persona switch is known to have
-    // actually happened, whether the user drove it through this panel or through
-    // SillyTavern's own persona screen. sameAvatar is false on the very first
-    // refresh too (there is no previous cache to match), which correctly records
-    // whichever persona was already active when the extension loaded. A failed
-    // switch never reaches this line, because the avatar refresh() resolves did
-    // not change; nothing else in this file may call recordUse.
-    //
-    // root.readOnly is checked here and not inside recordUse, because reading the
-    // panel must not write to data a newer build owns. The cap cannot save us
-    // there either: migrate returns before it backfills defaults on a future
-    // schema root, so settings.lastUsedCap is undefined, roster.js's typeof gate
-    // never trims, and lastUsed grows without a bound. A Node simulation of 120
-    // switches on a future schema root ended with 121 entries; that is a simulation
-    // on this desktop, not a measurement taken on the device.
+    // The one place a persona switch is known to have happened (from any screen), so
+    // nothing else may call recordUse; the first refresh records the persona at load.
+    // readOnly is checked here: a newer build's root has no lastUsedCap, so nothing trims.
     if (resolved.avatar && !sameAvatar && !root.readOnly) {
         recordUse(root, resolved.avatar, Date.now(), root.settings.lastUsedCap);
-        // recordUse mutates settings and nothing else here asks for a save, so the
-        // record only reached disk when some later write happened to save for its
-        // own reasons, and the recent sort could be a whole session behind. This
-        // runs at most once per switch that actually happened.
-        //
-        // Not on the first refresh of a session. No switch happened there, only a
-        // load, and saving meant serializing every extension's settings (ours
-        // measured 8.4MB at ten personas) and posting them on every page load,
-        // while the phone was still loading the chat. The stamp stays in memory
-        // and goes out with the next save anything makes.
+        // Saved once per real switch, but not on the first refresh: a load is no switch,
+        // and saving posts every extension's settings while the page is still loading.
         if (cache) ctx.saveSettingsDebounced?.();
     }
     cache = {
@@ -143,26 +107,13 @@ function refreshWith(ctx) {
 
 export function refresh() {
     const ctx = provider();
-    // Nothing to resolve against. Leaving the cache alone would serve the previous
-    // answer as if it were current, which is the failure this module exists to avoid.
+    // No context: null, not the previous answer passed off as current.
     return ctx ? refreshWith(ctx) : null;
 }
 
-/* How a description comes in (settings.adoptSplitMode):
-
-     'own'       (default) a description already divided keeps its division:
-                 its own sections become the items, named as its titles are
-                 written, titles printed in its own style. Used only when
-                 composing the result gives the same text back; otherwise, and
-                 for a description with no division, it goes in whole.
-     'whole'     always whole, into the first item.
-     'defaults'  matched onto the shipped item names (외모, 성격 ...).
-
-   Answers how many items received text, 0 when the text went in whole.
-
-   The baseline is the ORIGINAL text in both cases, so adopting never shows the
-   외부 수정 banner. After a split the composed text is laid out the way compose
-   writes titles, and SillyTavern receives that layout with the next write. */
+/* Seeds a record per settings.adoptSplitMode ('own' keeps the description's own sections
+   only if they compose back to the same text); returns items filled, 0 when it went in
+   whole. The baseline stays the original text, so adopting never shows the banner. */
 function seedDescription(persona, description, makeIdFn, settings) {
     const mode = ADOPT_MODES.includes(settings?.adoptSplitMode) ? settings.adoptSplitMode : 'own';
     if (mode === 'own') {
@@ -183,53 +134,40 @@ function seedDescription(persona, description, makeIdFn, settings) {
         : null;
     if (split) return seedFromSplit(persona, split, makeIdFn, settings?.defaultHeadingFormat);
     persona.variants[persona.sections[0].id][0].text = description;
-    // Whole means exactly. With a heading format the first write would put
-    // "## 기본 정보" in front of a description nobody asked to change.
+    // Whole means exactly: a heading format would prefix a title on the first write.
     if (String(description ?? '').trim()) persona.headingFormat = 'none';
     return 0;
 }
 
-function importDetail(filled) {
-    return filled ? STRINGS.manager.logDetails.importedSplit(filled) : STRINGS.manager.logDetails.imported;
+// Creates our record for avatarId, seeded from its existing SillyTavern description.
+function createRecord(ctx, root, avatarId) {
+    const persona = ensurePersona(root, avatarId, ctx.uuidv4);
+    const description = ctx.powerUserSettings?.persona_descriptions?.[avatarId]?.description ?? '';
+    const filled = seedDescription(persona, description, ctx.uuidv4, root.settings);
+    markComposed(persona, description);
+    // A birth log line keeps the pruner off: isEmptyPersona cannot see renamed or
+    // reordered sections.
+    const detail = filled ? STRINGS.manager.logDetails.importedSplit(filled) : STRINGS.manager.logDetails.imported;
+    addLog(persona, 'import', detail, Date.now());
+    ctx.saveSettingsDebounced();
+    return persona;
 }
 
 export function adopt() {
-    // Create our data for this persona, seeded from the existing description so
-    // nothing the user already wrote is lost.
     const ctx = provider();
     if (!ctx) return null;
     const s = refreshWith(ctx);
     if (!s.avatar || s.persona) return s;
-    // adoptFor and saveAndCompose refuse a root a newer build owns, and this
-    // relied on the button being drawn disabled: a tap queued before the redraw
-    // still wrote into that root.
+    // A newer build's root: the disabled button alone misses a tap queued before the redraw.
     if (s.readOnly) return s;
-    const persona = ensurePersona(s.root, s.avatar, ctx.uuidv4);
-    const existing = ctx.powerUserSettings?.persona_descriptions?.[s.avatar]?.description ?? '';
-    const filled = seedDescription(persona, existing, ctx.uuidv4, s.root.settings);
-    markComposed(persona, existing);
-    // The pruner drops entries with no sections, no variants, no history and no
-    // assets, but isEmptyPersona cannot see renamed or reordered sections. One
-    // log line at birth makes every entry we create non-empty, so the pruner can
-    // only ever reach leftovers we never touched.
-    addLog(persona, 'import', importDetail(filled), Date.now());
-    ctx.saveSettingsDebounced();
-    // The same context for the whole call: this body has no await, so nothing can
-    // change under it, and re-asking would only cost a second object.
+    createRecord(ctx, s.root, s.avatar);
+    // Same context throughout: no await in this body, so nothing can change under it.
     return refreshWith(ctx);
 }
 
-/* Writes that cannot change the composed text: a version renamed, moved, copied
-   or deleted, a tag, an asset tick, a variant nobody picked. They used to go
-   through writeDescription like every other write, which rewrote SillyTavern's
-   description with the composed text. With an outside edit pending (the 외부
-   수정 banner, offering 되돌리기 and 가져오기) that silently threw the edit
-   away, no snapshot, on a tap that had nothing to do with the text; and on every
-   other tap it emitted PERSONA_UPDATED and redrew both screens for a text that had
-   not changed. These save our record and leave ST's fields alone.
-
-   Read-only by shape: a frozen Set still answers .add(), so the set itself stays
-   private and only the question is exported. */
+/* Log kinds that cannot change the composed text: these save our record and leave
+   SillyTavern's description alone, so a pending outside edit survives and nothing
+   redraws. Exported as a question only, since a frozen Set still answers .add(). */
 const KEEP_KINDS = new Set([
     'version-create', 'version-rename', 'version-duplicate', 'version-overwrite',
     'version-repick', 'version-move', 'version-delete',
@@ -238,9 +176,7 @@ const KEEP_KINDS = new Set([
 ]);
 export const KEEP_DESCRIPTION_KINDS = Object.freeze({ has: kind => KEEP_KINDS.has(kind) });
 
-// The result has writeDescription's shape, so a caller reads missing the same
-// way. The text is the current composition; SillyTavern's own field is left as
-// it is.
+// Same result shape as writeDescription, but SillyTavern's own field is left as it is.
 function keepDescription(ctx, persona) {
     const { text, missing } = compose(persona);
     ctx.saveSettingsDebounced();
@@ -249,19 +185,9 @@ function keepDescription(ctx, persona) {
 
 const unchangedSinceWrite = persona => textSignature(compose(persona).text) === baselineSignature(persona);
 
-/* The kind is the caller's claim that the text did not change, and a claim can be
-   wrong: 고쳐서 새 버전 saved under version-create while moving every edited
-   item's pick onto a new choice, so the prompt kept the old text and the screen
-   showed the new version applied. Checked here instead of trusted: when the
-   composition is not what SillyTavern was last given, the write happens - unless
-   an outside edit is pending, which a write would throw away and which the
-   banner already offers to resolve.
-
-   One more case is not a change: right after 관리 시작 the baseline is the
-   original description, and the composition may lay the same lines out with
-   other blank lines. A tag or a version rename then rewrote SillyTavern's
-   description and announced PERSONA_UPDATED for a text nobody touched. Equal
-   line for line (classify.js sameText) counts as unchanged. */
+/* A keep kind is the caller's claim that the text did not change, so it is checked:
+   a changed composition is written unless an outside edit is pending (the banner
+   resolves that). Equal line for line (sameText), as just after adopt, is unchanged. */
 function mustWrite(ctx, avatarId, persona, write) {
     if (write) return true;
     if (unchangedSinceWrite(persona)) return false;
@@ -270,36 +196,22 @@ function mustWrite(ctx, avatarId, persona, write) {
     return !sameText(compose(persona).text, current);
 }
 
-/* A write that would only put back what SillyTavern was last given, while an
-   outside edit is pending, is no write. An empty item added, a choice nobody
-   picked edited, a rename under a format that prints no titles: none of them
-   change the composition, yet each one rewrote the description with the old
-   text and turned the edit made in SillyTavern into a hidden choice. The banner
-   is how that edit gets resolved. Applying a version passes force, because
-   asking for that version's text is the point of the tap. */
+/* While an outside edit is pending, a write that would only restore what SillyTavern
+   was last given is skipped; the banner resolves the edit. Applying a version passes
+   force, since that text is the point of the tap. */
 function leaveOutsideEdit(ctx, avatarId, persona, outside, force) {
     return outside === 'keep' && !force && unchangedSinceWrite(persona) && hasDiverged(ctx, avatarId, persona);
 }
 
-/* An outside edit is never overwritten without a copy.
-
-   With the 외부 수정 banner up, only applying a version used to ask first; every
-   other text write - a choice picked, a body saved, an item moved - rewrote
-   SillyTavern's description with the composed text and the edit made in
-   SillyTavern's own persona screen was gone, with no snapshot anywhere. Now the
-   outside text is kept as a new choice in the item that holds the text (or the
-   first item), not picked, so the prompt is what the user just did here and the
-   other text is one tap away. [가져오기] passes outside: 'discard', because
-   taking the edit in is what it does; [되돌리기] keeps the copy too and forces
-   the write, since putting the composition back is the whole of its job. */
+/* An outside edit is never overwritten without a copy: it is kept, unpicked, as a new
+   choice in the item holding the text (or the first item). The import button passes
+   outside: 'discard'; revert keeps the copy and forces the write. */
 function keepOutsideText(ctx, avatarId, persona) {
     const text = ctx.powerUserSettings?.persona_descriptions?.[avatarId]?.description;
     if (typeof text !== 'string' || !text.trim()) return null;
     const sections = Array.isArray(persona.sections) ? persona.sections : [];
     if (!sections.length) return null;
-    const live = section => (persona.variants?.[section.id] ?? [])
-        .find(variant => variant?.id === persona.activePicks?.[section.id]);
-    const filled = sections.filter(section => (live(section)?.text ?? '').trim());
+    const filled = sections.filter(section => (liveVariant(persona, section)?.text ?? '').trim());
     const section = filled.length === 1 ? filled[0] : sections[0];
     if (!Array.isArray(persona.variants[section.id])) persona.variants[section.id] = [];
     const now = Date.now();
@@ -309,76 +221,60 @@ function keepOutsideText(ctx, avatarId, persona) {
     return { section: section.name ?? '', label };
 }
 
-export function saveAndCompose(expectedAvatar, { write = true, outside = 'keep', force = false } = {}) {
-    const ctx = provider();
-    if (!ctx) return null;
-    const s = getState();
-    if (!s?.persona || !s.avatar || s.readOnly) return null;
-    // Ask the live context who is active BEFORE writing anything. The cache was built
-    // by whichever event fired last, and the singular field is one slot
-    // shared by every persona, so composing straight from the cache puts this
-    // persona's text into whoever is really active. Handing s.avatar to
-    // writeDescription as its own activeAvatar made that check compare a value to
-    // itself, which is a guard that can never fail.
-    const active = resolveActive(ctx);
-    // Same named personas without a precise path are not guessed at.
-    if (active.ambiguous) return null;
-    // The editor may have been opened on one persona and saved after a switch.
-    // Writing the current persona with the other one's text loses the edit silently.
-    if (expectedAvatar !== undefined && expectedAvatar !== null && expectedAvatar !== s.avatar) {
-        return { ok: false, reason: 'persona-changed', expected: expectedAvatar, actual: s.avatar };
-    }
-    // Same answer, one step further out: the cache itself may be the thing that fell
-    // behind, and then nobody upstream can have noticed the switch.
-    if (active.avatar !== s.avatar) {
-        return { ok: false, reason: 'persona-changed', expected: s.avatar, actual: active.avatar };
-    }
-    if (leaveOutsideEdit(ctx, s.avatar, s.persona, outside, force) || !mustWrite(ctx, s.avatar, s.persona, write)) {
-        const kept = keepDescription(ctx, s.persona);
+// The shared tail of both saves: keep SillyTavern's text when the write would change
+// nothing or clobber a pending outside edit, otherwise write it (copying any outside edit).
+function writeOrKeep(ctx, avatarId, persona, activeAvatar, { write, outside, force }) {
+    if (leaveOutsideEdit(ctx, avatarId, persona, outside, force) || !mustWrite(ctx, avatarId, persona, write)) {
+        const kept = keepDescription(ctx, persona);
         refreshWith(ctx);
         return kept;
     }
-    const keptOutside = outside === 'keep' && hasDiverged(ctx, s.avatar, s.persona)
-        ? keepOutsideText(ctx, s.avatar, s.persona) : null;
-    const result = writeDescription(ctx, s.avatar, s.persona, active.avatar);
+    const keptOutside = outside === 'keep' && hasDiverged(ctx, avatarId, persona)
+        ? keepOutsideText(ctx, avatarId, persona) : null;
+    const result = writeDescription(ctx, avatarId, persona, activeAvatar);
     if (result.missing.length) {
         // A section that vanished from the prompt must leave a trace.
-        // Disappearing silently is the worst outcome available here.
-        addLog(s.persona, 'compose-missing', result.missing.join(', '), Date.now());
+        addLog(persona, 'compose-missing', result.missing.join(', '), Date.now());
         ctx.saveSettingsDebounced();
     }
     refreshWith(ctx);
     return keptOutside ? { ...result, keptOutside } : result;
 }
 
-// Manager picker support: create our entry for ANY persona SillyTavern knows,
-// not only the active one. Same seeding contract as adopt: the existing
-// description arrives byte for byte, and a birth log line keeps the pruner away.
+export function saveAndCompose(expectedAvatar, { write = true, outside = 'keep', force = false } = {}) {
+    const ctx = provider();
+    if (!ctx) return null;
+    const s = getState();
+    if (!s?.persona || !s.avatar || s.readOnly) return null;
+    // Who is active per the live context, not the cache, which may lag: the singular field
+    // is one slot for all personas, and passing s.avatar would make that check a tautology.
+    const active = resolveActive(ctx);
+    // Same named personas without a precise path are not guessed at.
+    if (active.ambiguous) return null;
+    // The editor may have been opened on one persona and saved after a switch.
+    if (expectedAvatar !== undefined && expectedAvatar !== null && expectedAvatar !== s.avatar) {
+        return { ok: false, reason: 'persona-changed', expected: expectedAvatar, actual: s.avatar };
+    }
+    // The cache itself may have fallen behind, unnoticed upstream.
+    if (active.avatar !== s.avatar) {
+        return { ok: false, reason: 'persona-changed', expected: s.avatar, actual: active.avatar };
+    }
+    return writeOrKeep(ctx, s.avatar, s.persona, active.avatar, { write, outside, force });
+}
+
+// adopt() for any persona SillyTavern knows, not only the active one (the manager picker).
 export function adoptFor(avatarId) {
     const ctx = provider();
     if (!ctx) return null;
     const root = getRoot();
     if (!root || root.readOnly) return null;
-    // Never create an entry for an avatar SillyTavern itself does not list; a typo
-    // here would mint an orphan that nothing can ever display or clean up.
+    // Never for an avatar SillyTavern does not list; nothing could show or clean the orphan.
     if (!Object.hasOwn(ctx.powerUserSettings?.personas ?? {}, avatarId)) return null;
-    const existing = getPersona(root, avatarId);
-    if (existing) return existing;
-    const persona = ensurePersona(root, avatarId, ctx.uuidv4);
-    const description = ctx.powerUserSettings?.persona_descriptions?.[avatarId]?.description ?? '';
-    const filled = seedDescription(persona, description, ctx.uuidv4, root.settings);
-    markComposed(persona, description);
-    addLog(persona, 'import', importDetail(filled), Date.now());
-    ctx.saveSettingsDebounced();
-    return persona;
+    return getPersona(root, avatarId) || createRecord(ctx, root, avatarId);
 }
 
-// Compose and store an arbitrary persona. The write target is pinned by argument,
-// so the await-window race class that needed startAvatar guards in the quick panel
-// does not exist here: a persona switch mid-edit changes which persona is ACTIVE,
-// never which persona this call writes. The singular prompt field is written only
-// when the target happens to be the live active persona, which writeDescription
-// already decides from its fourth argument.
+// Composes and stores any persona, pinned by argument (a switch mid-edit cannot retarget
+// it); writeDescription touches the singular field only if it is the live active one.
 export function saveAndComposeFor(avatarId, { write = true, outside = 'keep', force = false } = {}) {
     const ctx = provider();
     if (!ctx) return null;
@@ -388,29 +284,12 @@ export function saveAndComposeFor(avatarId, { write = true, outside = 'keep', fo
     const persona = getPersona(root, avatarId);
     if (!persona) return null;
     const active = resolveActive(ctx);
-    // With duplicate names and no precise path, which persona is
-    // active is unknowable, so whether to write the singular field is unknowable.
+    // Duplicate names and no precise path: whether to write the singular field is unknowable.
     if (active.ambiguous) return null;
-    if (leaveOutsideEdit(ctx, avatarId, persona, outside, force) || !mustWrite(ctx, avatarId, persona, write)) {
-        const kept = keepDescription(ctx, persona);
-        refreshWith(ctx);
-        return kept;
-    }
-    const keptOutside = outside === 'keep' && hasDiverged(ctx, avatarId, persona)
-        ? keepOutsideText(ctx, avatarId, persona) : null;
-    const result = writeDescription(ctx, avatarId, persona, active.avatar);
-    if (result.missing.length) {
-        addLog(persona, 'compose-missing', result.missing.join(', '), Date.now());
-        ctx.saveSettingsDebounced();
-    }
-    refreshWith(ctx);
-    // No persona could be confirmed as active (no precise path, no marked row in
-    // SillyTavern's list, and a list name that no longer matches the chat's name),
-    // so only the stored copy was written. If this persona is the one playing,
-    // the prompt keeps its old text until it is selected again, and a plain
-    // success would have said otherwise.
-    const activeUnknown = !active.avatar;
-    return keptOutside || activeUnknown ? { ...result, keptOutside, activeUnknown } : result;
+    const result = writeOrKeep(ctx, avatarId, persona, active.avatar, { write, outside, force });
+    // No persona confirmed active, so only the stored copy was written; if this one is
+    // playing, the prompt keeps its old text until reselected, so say so.
+    return !result.kept && !active.avatar ? { ...result, activeUnknown: true } : result;
 }
 
 export async function refreshAssets() {
@@ -422,9 +301,8 @@ export async function refreshAssets() {
     const key = resolveFolderKey(before.root, avatar);
     try {
         const list = await listAssets(ctx, key);
-        // refresh() builds a brand new cache object on every event, so the object we
-        // captured before the await may already be discarded. Re-read it, and publish
-        // only if we are still on the persona this listing belongs to.
+        // refresh() replaces the cache object on every event: re-read it after the await
+        // and publish only if still on the persona this listing belongs to.
         const after = getState();
         if (!after || after.avatar !== avatar) return list;
         after.assetNames = list.map(a => a.label);
@@ -436,8 +314,7 @@ export async function refreshAssets() {
         if (after && after.avatar === avatar) {
             after.assetNames = [];
             after.assetPaths = new Map();
-            // The asset tab goes disabled with a message. A console
-            // warning alone is invisible on a phone.
+            // Shown in the asset tab; a console warning alone is invisible on a phone.
             after.assetError = String(e?.message ?? e);
         }
         return [];

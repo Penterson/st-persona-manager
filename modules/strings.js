@@ -1,41 +1,17 @@
-// Every sentence, label and title the user can read, in one place.
+// Every sentence, label and title the user can read, in one place: pure data and a few
+// formatters, so any screen can import it and tests read it in plain Node.
 //
-// The four renames the user chose (2026-08-27) live here and nowhere else:
-// 구획 -> 항목, 변형 -> 선택지, 라벨 -> 그룹, and the 구성 tab is now 편집.
-// Only the WORDS changed. Data keys (sections, variants, versions, labels), log
-// kind values, CSS class names, element ids and function names are untouched on
-// purpose: renaming any of those would rewrite a user's settings.json for a
-// vocabulary change, and a vocabulary change is not worth a migration.
+// The UI says item, choice and group (and edit for the compose tab) where code says section,
+// variant and label. Data keys, log kinds, classes, ids and function names keep the old words,
+// so a wording change never needs a settings migration.
 //
-// WRITING RULE (2026-08-26, from the user, and it applies to every string below).
-// Three passes got this wrong before it landed, so the rule is written out in full:
+// Writing rules (test/wording.test.mjs): every clause ends on a real noun in Korean
+// software-manual register, never a conjugated verb or a verb bent into noun form. Say
+// current/that, not the demonstrative this, and name the extension via APP_NAME. Empty
+// states are a bare negation; a gesture may be an arrow.
 //
-// 1. Do not end on a conjugated verb or adjective. 읽지 못했다, 버전이 없다, 사라졌다.
-// 2. Do not fix that by bending the verb into a noun shape either. 읽지 못함, 사라짐,
-//    내려받음, and worst of all 엶 are 명사형, not 명사, and the user rejected them
-//    by name: "엶 말고 명사로 끝내라고 명사형 말고".
-// 3. End on a real noun, in the register a Korean software manual uses: 실패, 완료,
-//    불가, 취소, 없음, 오류, 잠금, 미확인, 삭제, 병합, 유지. 목록 불러오기 실패, not
-//    목록을 읽지 못함. 삭제 불가, not 지울 수 없음. 없음 and 있음 are the exception
-//    that stays, because Korean UI lexicalised them into nouns long ago.
-//
-// Demonstratives follow the same register: 이 브라우저 / 이 항목 reads light and
-// spoken, so a manual writes 현재 브라우저 and 해당 항목, and names the extension
-// (APP_NAME) instead of saying 이 확장.
-//
-// Empty states are a bare negation, and a gesture may use an arrow (드래그 → [수정])
-// instead of a sentence.
-//
-// CONFIRM DIALOGS name the act and stop (2026-08-27, from the user, with their own
-// example): 변경 기록 13줄 삭제, not 변경 기록 13줄을 전부 지울까? 선택지 본문과
-// 이력은 그대로 유지. 지웠다는 줄 하나만 기록. The two buttons already ask; what
-// cannot be undone goes in brackets and nothing else goes in at all. test/strings.test.mjs
-// holds both halves: no 까? anywhere, and nothing in the confirm family past 60
-// characters. test/wording.test.mjs checks the clause endings and the demonstrative.
-//
-// Pure data plus a few formatters. Nothing here reads the DOM, a context or the
-// state, so importing it from every screen keeps no reference alive past its
-// moment, and the tests can read it in plain Node.
+// Confirm dialogs (test/strings.test.mjs) name the act and stop: no question, at most 60
+// characters, and only what cannot be undone goes in brackets.
 
 function deepFreeze(value) {
     if (value && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -45,20 +21,12 @@ function deepFreeze(value) {
     return value;
 }
 
-// The one place the extension's own name is written. Three screens carry it and
-// a fourth copy in the map would be a fourth chance for them to disagree.
+// The extension's name, written only here so the screens cannot disagree.
 const APP_NAME = '페르소나 관리자';
 
-/* Particle selection. A Korean particle changes with the last
-   syllable of the word it attaches to, and several sentences here attach one to
-   a name the user typed, where a fixed particle reads wrong half the time
-   ("메모"을). jong answers the final consonant index of that syllable, 0 for
-   none, or null when the word does not end in hangul, in which case the
-   sentence carries both forms the way printed forms do.
-
-   The 을/를 and 과/와 helpers went with the confirm rewrite of 2026-08-27: those
-   dialogs name an act now (선택지 "기본" 삭제) and a noun phrase takes no object
-   particle. What is left is used by the sentences that report a result. */
+// Korean particles follow the last syllable of the word they attach to, here often user text.
+// jong gives that syllable's final consonant index (0 for none), or null when the word does
+// not end in hangul; the sentence then prints both forms.
 function jong(word) {
     const last = String(word ?? '').slice(-1);
     if (last < '가' || last > '힣') return null;
@@ -70,26 +38,21 @@ function iRaneun(word) {
     return j === null ? '(이)라는' : (j ? '이라는' : '라는');
 }
 
-// Counts the user reads. A four digit character count is the normal size of one
-// of these descriptions, and 4021 next to 2679 is harder to compare at a glance
-// than 4,021 next to 2,679. The locale is named rather than left to the host:
-// this screen is Korean, and node and the browser disagree about the default.
+// Counts with digit grouping. The locale is explicit: node and browsers default differently.
 function num(value) {
     return (typeof value === 'number' && Number.isFinite(value))
         ? value.toLocaleString('ko-KR')
         : String(value);
 }
 
-// 으로 keeps its 으 after a consonant EXCEPT ㄹ (하늘로, not 하늘으로), which is
-// why this cannot share eulReul's two way split. ㄹ is jong index 8.
+// The ro/euro particle takes its short form after a vowel and after a final rieul (jong 8).
 function euRo(word) {
     const j = jong(word);
     return j === null ? '(으)로' : (j === 0 || j === 8 ? '로' : '으로');
 }
 
 export const STRINGS = deepFreeze({
-    /* Shared by more than one screen. A second copy of a sentence is a second
-       chance for the two screens to say different things about the same rule. */
+    /* Shared by more than one screen, so they never say different things. */
     common: {
         add: '추가',
         apply: '적용',
@@ -108,7 +71,7 @@ export const STRINGS = deepFreeze({
         personaChangedNotSaved: '페르소나 변경으로 저장 취소',
         readOnly: '더 새로운 판이 만든 데이터라 읽기 전용',
         versionNotApplicable: '해당 버전은 현재 페르소나에 적용 불가',
-        // After 관리 시작 split the description by its titles.
+        // Shown when adopting split the description by its titles.
         adoptSplit: n => `관리 시작 완료. 기존 설명문을 항목 ${n}개로 분리`,
         // An outside edit kept as a choice before a write replaced it.
         outsideKept: section => `SillyTavern에서 고친 설명문을 '${section}' 항목의 선택지로 보관`,
@@ -119,16 +82,14 @@ export const STRINGS = deepFreeze({
             return `외부 수정 ${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
         },
         newVersionName: '새 버전 이름',
-        // A pick left naming a choice that was deleted. Never snapped to the first
-        // option: that would draw a combination the prompt does not contain.
+        // A pick naming a deleted choice. Never snapped to the first option, which would
+        // show a combination the prompt does not contain.
         deletedChoiceOption: '(삭제된 선택지)',
         popupBlocked: '현재 브라우저에서 확인 창 차단 또는 취소. 변경 사항 없음',
-        // Boot time warning from index.js, the one screenless place that talks.
+        // Boot-time warning from index.js.
         noRegisterMacro: '현재 빌드에 매크로 등록 기능이 없어 에셋 매크로 사용 불가. 나머지 기능은 정상 동작',
         copySuffix: name => `${name} 복사본`,
-        // One separator for every list this extension prints on a single line, so
-        // the version names in the persona list and a version's combination in the
-        // manager read the same way.
+        // The one separator for every single-line list.
         dotSeparator: ' · ',
         /* Search and paging, shared by every list. */
         search: '검색',
@@ -149,16 +110,14 @@ export const STRINGS = deepFreeze({
     /* The quick switch panel. */
     quick: {
         iconAria: title => `${APP_NAME}: ${title}`,
-        // What the icon label reads when no version is selected, and what is
-        // appended when the live combination has moved off the selected one.
-        // The changed state must be visible.
+        // Icon label with no version selected, and the suffix once picks move off it.
         iconNoVersion: '버전 없음',
         iconModifiedSuffix: ' (수정 있음)',
         // The diverged banner's three controls.
         divergeRevert: '되돌리기',
         divergeAbsorb: '가져오기',
         divergeLater: '나중에',
-        // The four sort keys, indexed by the stored sortBy value.
+        // Indexed by the stored sortBy value.
         sortNames: {
             name: '이름순',
             nameDesc: '이름 역순',
@@ -169,7 +128,7 @@ export const STRINGS = deepFreeze({
             created: '최근 만든 순',
             createdOld: '오래전 만든 순',
         },
-        // The two view modes, indexed by the stored rosterViewMode.
+        // Indexed by the stored rosterViewMode.
         viewCaption: '보기:',
         viewNames: {
             list: '목록',
@@ -183,28 +142,22 @@ export const STRINGS = deepFreeze({
         unknownName: '(미확인)',
         adoptRow: '현재 페르소나 관리 시작',
         noVersions: '저장된 버전 없음',
-        // 언어별 이름, in the quick panel (user request). Simpler than the manager's:
-        // this panel is always looking at the persona being PLAYED, and for that
-        // one the list-only scope is not a legal choice at all, so
-        // there is nothing to choose between. A language, a name, one tap.
+        // Per-language names in the quick panel. It always shows the persona being played,
+        // so there is no list-only scope to choose.
         headNames: '언어별 이름',
         noLocalNames: '등록된 이름 없음',
         localNamesElsewhere: '편집 탭에서 이름 등록',
         autoNameRow: '대화 언어에 맞춰 자동 적용',
-        // The clash is found by the name itself (quickbar-pure.js nameCollides),
-        // so a second quoted name would only print the same word again.
         confirmNameClash: name => `이름 "${name}" 적용 (대화 속 동명 인물 있음)`,
         namesNeedWritable: '현재 상태에서 이름 변경 불가',
         saveCurrentAsVersion: '+ 현재 구성을 버전으로 저장',
         // [⋯] beside a version row: the screen reader hears which version's tools.
         versionToolsAria: name => `버전 "${name}" 관리`,
         chipAll: '전체',
-        // Named for what it opens: the checkboxes that put this persona in groups.
-        // Plain 편집 would now read as the manager's 편집 tab.
+        // Opens the group checkboxes; not called edit, which is the manager's tab name.
         groupEditToggle: '그룹',
-        // Multi select (user request). A dedicated button turns it on, the same
-        // way 그룹 편집 does, rather than a long press: a long press on a list of
-        // portraits is also how a phone starts a text selection or an image save.
+        // Multi-select has its own button, not a long press: on a phone a long press on
+        // portraits starts a text selection or an image save.
         selectToggle: '선택',
         selectedCount: n => `${n}개 선택`,
         selectNone: '선택 해제',
@@ -229,8 +182,7 @@ export const STRINGS = deepFreeze({
         sortCaption: '정렬:',
         rosterUnavailable: '페르소나 목록 불러오기 실패',
         footerAssets: '에셋',
-        // User request: the panel's foot reaches every manager
-        // tab directly, not only the tab the manager happens to open on.
+        // The panel footer reaches every manager tab directly.
         footerCompose: '편집',
         footerVersions: '버전',
         footerHistory: '이력',
@@ -246,17 +198,13 @@ export const STRINGS = deepFreeze({
         switchAmbiguous: name => `${name}${iRaneun(name)} 이름이 여럿이라 전환 대상 확정 불가`,
         noSwitchCommand: '현재 빌드에 페르소나 전환 슬래시 커맨드 없음',
         switchFailed: name => `${name}${euRo(name)} 페르소나 전환 실패`,
-        // Two independent toggles, so the badge and the name line
-        // are two separate sentences and neither implies the other.
         versionBadge: n => `버전 ${n}`,
     },
 
     /* The manager screen. */
     manager: {
         screenAria: APP_NAME,
-        // The tab name says what the tab is, the line under it
-        // says what the user does there, and it is always drawn. A title attribute
-        // needs a hover, and a phone has none.
+        // Tab descriptions are always drawn, never a title attribute: phones cannot hover.
         tabs: {
             compose: '편집',
             versions: '버전',
@@ -271,8 +219,7 @@ export const STRINGS = deepFreeze({
             assets: '현재 페르소나의 이미지 보관과 채팅 삽입',
             labels: '그룹으로 페르소나 분류',
         },
-        // The structure log stores a machine kind, and these are only how it reads.
-        // The keys are the stored values and never change.
+        // Keyed by the stored log kind, which never changes; only these labels may.
         logKinds: {
             import: '관리 시작',
             'persona-create': '페르소나 생성',
@@ -322,20 +269,12 @@ export const STRINGS = deepFreeze({
             'name-apply': '페르소나 이름 변경',
             'name-auto': '언어별 이름 자동 적용',
         },
-        // The detail line a log row carries next to its kind, rendered by the 변경
-        // 기록 list. These live here and not next to their addLog calls because
-        // history.js and state.js are the only two modules that used to hard code a
-        // Korean sentence, and being outside this table is exactly how they missed
-        // the writing rule three rounds running (이력 …정리됨 / …되돌림 / 가져옴).
+        // The detail text a change-log row shows beside its kind.
         logDetails: {
             evicted: n => `총량 상한으로 이력 ${n}건 정리`,
-            // The kind beside it already reads 이력 기간 만료, so the detail says the
-            // number and not the cause a second time. It used to borrow the line
-            // above, which named the wrong reason.
+            // The kind already names the cause (expiry), so only the count.
             expired: n => `${n}건 정리`,
-            // The settings drawer's per-choice cap, lowered on history that
-            // already exists. Same kind as the byte budget (이력 정리), its own
-            // reason.
+            // A lowered per-choice cap: the byte budget's kind, with its own reason.
             trimmed: n => `보관 개수 상한으로 이력 ${n}건 정리`,
             restored: n => `${n}번째 이력으로 복원`,
             imported: '기존 설명문 그대로',
@@ -359,19 +298,16 @@ export const STRINGS = deepFreeze({
         missingBanner: (n, names) => `선택지 미지정으로 프롬프트에서 빠지는 항목 ${n}개: ${names}`,
         noContext: 'SillyTavern 연결 실패',
 
-        /* 편집 tab */
-        // Tags. The chips row sits at the top of the 편집 tab.
+        /* Compose tab */
+        // Tags: the chip row at the top of the compose tab.
         personaTagsHead: '태그',
         tagAdd: '+ 태그',
         tagAddPrompt: '새 태그',
         confirmDropTag: tag => `태그 "${tag}" 떼기`,
         tagDuplicate: '이미 있는 태그',
         tagGone: '이미 삭제된 태그',
-        /* 제목 형식. Per persona, because the value lives on the
-           persona and every existing one starts at 없음; the settings drawer only
-           decides what a NEW persona starts with. The option labels show the
-           result rather than naming the format, since "plain" and "markdown" say
-           nothing about what lands in the prompt. */
+        // Heading format, per persona; the drawer only sets a new persona's default. The
+        // options show the printed result rather than format names.
         headingFormatLabel: '항목 제목',
         headingFormatAria: '프롬프트에 넣을 항목 제목 형식',
         headingFormatNames: {
@@ -382,21 +318,19 @@ export const STRINGS = deepFreeze({
         // The description's own title style, shown as the pattern it prints.
         headingFormatOwn: open => `원래 형식 (${String(open ?? '').split('{name}').join('이름')})`,
         headingFormatHint: '각 항목 본문 앞에 항목 이름을 넣는 형식. 없음이면 본문만 연결. 원래 형식은 가져온 설명문의 제목 모양 그대로',
-        // 기본 항목 채우기.
+        // Fill in default sections.
         fillDefaults: '기본 항목 채우기',
         confirmFillDefaults: n => `기본 항목 ${n}개 추가`,
         fillDefaultsNothing: '추가할 기본 항목 없음',
         fillDefaultsDone: n => `항목 ${n}개 추가 완료`,
-        /* 제목별 분류 (user request): a description adopted whole, split by the
-           titles written inside it. */
+        // Split a description adopted whole by the titles inside it.
         resplit: '제목별 분류',
         resplitTitle: '본문 속 제목 줄(## 외모, [외모], 외모:)을 기준으로 각 항목에 배치',
         confirmResplit: (targets, created) => (created
             ? `제목 기준 분류: 항목 ${targets}개, 새 항목 ${created}개 (기존 본문 뒤에 추가)`
             : `제목 기준 분류: 항목 ${targets}개 (기존 본문 뒤에 추가)`),
         resplitNothing: '나눌 제목 줄 없음',
-        /* 원래 항목대로 (user request): rebuild the items from the description's
-           own sections, keeping their names and title style. */
+        // Rebuild the sections from the description's own, keeping their names and title style.
         ownSplit: '원래 항목으로 재구성',
         ownSplitTitle: '본문이 이미 제목으로 나뉘어 있으면 그 제목 이름 그대로 항목을 다시 구성',
         confirmOwnSplit: (n, names) => `항목 ${n}개로 다시 구성: ${names}`.slice(0, 60),
@@ -418,7 +352,7 @@ export const STRINGS = deepFreeze({
         dragHandle: '끌어서 순서 변경',
         moveUp: '위로 이동',
         moveDown: '아래로 이동',
-        // Seeded into the data when a new item is made. Visible as a choice name.
+        // Stored in the data as a new section's first choice name.
         defaultChoiceLabel: '기본',
         newChoiceName: '새 선택지 이름',
         choiceName: '선택지 이름',
@@ -431,44 +365,32 @@ export const STRINGS = deepFreeze({
         activeChoiceAria: name => `${name} 활성 선택지`,
         pickMovedToFirst: '활성 선택지 삭제로 첫 선택지로 이동',
         choiceCount: n => `선택지 ${n}개`,
-        // The editor: its own header, its own footer.
         editorHeading: (itemName, choiceLabel) => `${itemName} · ${choiceLabel}`,
         editorAria: label => `${label} 내용`,
         editorRestored: '임시 보관된 편집 복원. [저장] 전까지 미반영',
         editorDiscard: '임시 편집 버리기',
         editorDiscardTitle: '저장된 내용으로 되돌리기',
         editorCloseTitle: '편집기 닫기 (내용은 임시 보관)',
-        // The editor's own footer button. It reads differently from the header's
-        // 닫기 on purpose: while the editor is up both are on screen, and two
-        // buttons with one word and two meanings ask the user to guess.
+        // Worded unlike the header's close button, since both are on screen at once.
         editorBackToList: '목록으로',
         editorOpen: '편집',
         pendingDraft: '임시 편집 있음',
         nothingChanged: '변경 사항 없음',
 
-        /* 크기 (user request). Characters are exact and cost nothing. The token
-           number is SillyTavern's own when this build has a counter and is simply
-           absent when it does not: a guessed tokenizer would put a confident
-           wrong number next to two real ones. */
+        // Size line; tokens appear only when SillyTavern provides a counter (see countSize).
         sizeLine: (chars, bytes) => `글자 ${num(chars)} · 바이트 ${num(bytes)}`,
         sizeLineTokens: (chars, bytes, tokens) => `글자 ${num(chars)} · 바이트 ${num(bytes)} · 토큰 ${num(tokens)}`,
 
-        /* 설명문 전문 (user request). One screen showing the whole composed
-           description in the order the prompt gets it, with every body editable
-           in place. The 버전 tab's 새 버전 만들기 covers the other half of the
-           same need: that one never touches what exists, so this one carries the
-           word 저장 and that one carries 버전. */
+        // Full-text screen: the composed description in prompt order, editable in place.
+        // It saves over bodies, so it says save where the add-only revise screen says version.
         fullTextOpen: '전문',
         fullTextGuide: 'SillyTavern에 들어가는 설명문 전체. 칸 하나가 항목 하나의 활성 선택지 본문',
-        // 전문 보기 방식 (user request). 항목별 is the editable boxes; 전문 is
-        // the joined text as the prompt receives it, for reading and copying.
+        // View modes: editable boxes per item, or the joined prompt text to read and copy.
         fullViewItems: '항목별',
         fullViewRaw: '전문',
         fullViewRawGuide: '프롬프트에 들어가는 그대로. 수정은 항목별 보기에서',
         fullTextHeadingNote: '항목 이름 줄은 제목 형식 설정에 따라 프롬프트에 함께 전송',
-        // Reachable only from a persona with no items at all. A persona that has
-        // items but no text in them opens the screen: filling them in is what the
-        // screen is for.
+        // Only for a persona with no sections; empty sections still open the screen.
         fullTextNoSections: '항목 없음',
         fullTextAria: name => `${name} 본문`,
         fullTextSave: '전체 저장',
@@ -476,11 +398,8 @@ export const STRINGS = deepFreeze({
         fullTextSkipped: names => `편집 중 활성 선택지 변경으로 저장 제외: ${names}`,
         fullTextConfirmLeave: n => `수정 ${n}건 버리고 나가기`,
 
-        /* 프롬프트 배치 (user request). SillyTavern's own descriptor fields, in
-           the manager because the description they place is the one composed
-           here. The position and role LISTS come from SillyTavern's own selects,
-           never from a mapping written here: the numbers are its enum and have
-           never been measured on this build. */
+        // Prompt placement: SillyTavern's own descriptor fields. Position and role lists
+        // come from ST's selects (readSelectOptions), never from a mapping here.
         placementHead: '프롬프트 배치',
         placementHint: '설명문을 프롬프트 어디에 넣을지 정하는 SillyTavern 값. 페르소나 설정 화면의 같은 항목',
         placementSource: '항목 이름은 SillyTavern 화면에 있는 그대로',
@@ -496,8 +415,7 @@ export const STRINGS = deepFreeze({
         placementRoleAria: '설명문 역할',
         placementDepthPrompt: '깊이 (0 이상 정수)',
         placementDepthInvalid: '0 이상 정수만 입력 가능',
-        // The ceiling is SillyTavern's own, read off its depth input (접점 진단 5
-        // measured min=0 max=9999), never a number written here.
+        // The ceiling is read off SillyTavern's own depth input, never hard-coded.
         placementDepthOver: max => `깊이 상한 ${max} 초과`,
         placementSaved: '배치 변경 완료',
         placementFailed: '배치 변경 실패',
@@ -509,41 +427,23 @@ export const STRINGS = deepFreeze({
         editValue: '수정',
         connectValue: '연결',
 
-        /* 언어별 이름 (user request). Stored on our own record: SillyTavern's
-           personas map is what the rest of it identifies a persona by, so
-           rewriting a name there behind the user's back would rename the persona
-           everywhere at once. */
+        // Per-language names, stored on our record (see setLocalName).
         localNamesHead: '언어별 이름',
         localNamesEmpty: '등록된 다른 이름 없음',
         localNameEditHint: '언어 행 누르기 → 이름 수정',
         localNamePrompt: lang => `${lang} 이름 (빈 칸은 삭제)`,
         localNameSaved: '이름 저장 완료',
         localNameRemoved: '이름 삭제 완료',
-        /* What the check on the LANGUAGE rows means, and it has to say which rows:
-           the same box draws a second check, on 자동 적용, that means a switch is
-           on. autoLocalName ships true and a chat that has barely begun can leave
-           the conversation language undecided, so it can show no ticked language row at all
-           and the only check on screen is that switch.
-
-           Named as the SillyTavern name rather than 현재 적용된 이름, because the
-           manager can be pointed at a persona that is not the one playing: there
-           '적용' would be read against the chat, and the chat is somebody else's.
-           It also borrows the wording localNameBase already prints two rows up. */
+        // The check on language rows, unlike the auto-apply switch's check. It says
+        // SillyTavern name, not applied name: the manager may show a persona not playing.
         localNameAppliedHint: '언어 행의 체크 표시는 SillyTavern 이름',
         localNameCurrent: '지금 대화 언어',
-        // A silent no-op is the failure mode this feature can have: the chat is
-        // too short, or this build hands us no chat at all, and nothing happens
-        // with nothing said. The row says what it sees instead.
+        // Said instead of failing silently when the chat is too short or unavailable.
         localNameNoChat: '판별 불가 (대화와 캐릭터 정보에 글자가 부족)',
         localNameBase: name => `SillyTavern 이름 ${name}`,
-        // 적용 is what carries the name into the chat. Storing an alternate changes
-        // nothing by itself, and a screen that looked like it had done something
-        // was the complaint (채팅에 적용되지 않음).
-        /* 이름을 어디까지 반영할지 (user request 2026-08-27). 사용자 지적:
-           채팅 이름과 {{user}}를 한꺼번에 바꾸면 대화 속 동명이인과 부딪힐 수 있다.
-           SillyTavern에서 그 둘은 같은 값(name1)이라 서로 떼어낼 수 없다. 떼어낼 수
-           있는 것은 페르소나 목록의 이름과 채팅에 반영되는 이름이고, 버튼 둘은 그
-           경계에 놓았다. 어느 쪽도 지난 메시지의 글자를 고치지 않는다. */
+        // Applying carries a stored name into the chat, in one of two scopes: the persona
+        // list name only, or the chat too (chat name and {{user}} are both name1 in
+        // SillyTavern, so they cannot be split). Neither rewrites past messages.
         applyToList: '목록',
         applyToChat: '채팅',
         applyScopeHint: '[목록]은 페르소나 목록 이름만. [채팅]은 {{user}}와 새 메시지 이름까지. 지난 메시지는 어느 쪽도 변경 없음',
@@ -554,8 +454,7 @@ export const STRINGS = deepFreeze({
         confirmApplyNameClash: to => `채팅 이름 "${to}" 적용 (대화 속 동명 인물 있음)`,
         listNameApplied: name => `목록 이름 "${name}" 변경 완료`,
         autoNameClashSkipped: name => `대화 속 동명 인물 있음. 자동 적용 생략: ${name}`,
-        // 자동 적용의 상태와 그 상태를 뒤집는 버튼. 설정 서랍에도 같은 스위치가
-        // 있지만, 이름을 적어 넣는 자리에서 바로 켜고 끌 수 있어야 한다.
+        // The auto-apply switch, here as well as in the drawer, where names are entered.
         autoNameRow: '자동 적용',
         autoNameTurnOn: '켜기',
         autoNameTurnOff: '끄기',
@@ -565,8 +464,8 @@ export const STRINGS = deepFreeze({
         localNameApplied: name => `${name}${euRo(name)} 이름 변경 완료`,
         localNameApplyFailed: 'SillyTavern 이름 변경 실패',
 
-        /* 페르소나 자체를 다루는 것들 (user request). 이름, 그림, 그리고 새 페르소나로
-           복제. 셋 다 SillyTavern의 데이터를 바꾸므로 전부 물어보고 시작한다. */
+        // The persona itself: name, picture and duplicate. All change SillyTavern's data,
+        // so all confirm first.
         personaHead: '페르소나',
         renamePersona: '이름 수정',
         renamePersonaPrompt: 'SillyTavern 페르소나 이름',
@@ -574,17 +473,12 @@ export const STRINGS = deepFreeze({
         imageLabel: '이미지',
         imageButton: '교체',
         changeImageAria: '페르소나 이미지로 쓸 그림 파일',
-        // The upload goes through SillyTavern own controls (접점 진단 5 measured
-        // both of them present). A build without one names which one, because that
-        // is the fact the next round would need.
+        // The upload uses SillyTavern's own controls; a build lacking one names which.
         changeImageNoControl: id => `SillyTavern 업로드 칸 없음: ${id}`,
         changeImageDone: '이미지 교체 완료',
-        // The server answers the upload directly, so a failure carries its status
-        // rather than a guess about what the picture looks like now.
+        // Carries the server's status for the upload.
         changeImageFailed: detail => `이미지 교체 실패: ${detail}`,
-        // The fallback path ends inside SillyTavern's own crop dialog, so the rest
-        // of the job is on that screen and this says so instead of claiming an
-        // outcome nothing here can see.
+        // The fallback ends in SillyTavern's crop dialog, whose outcome we cannot see.
         changeImageHandedOver: 'SillyTavern 자르기 창에서 계속 진행',
         confirmChangeImage: name => `"${name}" 이미지 교체 (기존 파일 덮어쓰기)`,
         duplicatePersona: '새 페르소나로 복제',
@@ -593,10 +487,8 @@ export const STRINGS = deepFreeze({
         duplicateNotFound: '새 페르소나 확인 불가. SillyTavern 페르소나 목록 확인 필요',
         duplicateManyFound: '새 페르소나가 여럿 늘어 판별 불가. 관리자 구성 복사 취소',
         duplicateDone: name => `${name}${euRo(name)} 복제 완료`,
-        /* 새 페르소나 생성 (user request). Rides the duplicate command, so the
-           refusals above it apply here too; these are only the sentences that
-           differ. The confirm names the two things a user cannot see coming:
-           the composition starts blank, and the image is the current one's. */
+        // New persona: rides the duplicate command, so the refusals above apply too. The
+        // confirm names the surprises: a blank composition and the current persona's image.
         createPersona: '새 페르소나 생성',
         createNamePrompt: '새 페르소나 이름',
         createNameTaken: name => `이미 있는 이름: "${name}"`,
@@ -606,9 +498,7 @@ export const STRINGS = deepFreeze({
         createRenameFailed: name => `생성 완료. 이름 변경 실패로 "${name}" 유지`,
         createDone: name => `"${name}" 생성 완료`,
 
-        /* 페르소나 복사 (user request). SillyTavern owns making a persona and the
-           path for it is unmeasured, so the destination is always one it already
-           lists, and what gets replaced is our record for it. */
+        // Copy onto an existing persona (see copyPersonaOnto).
         copyOpen: '다른 페르소나로 복사',
         copyHead: '복사 대상 고르기',
         copyGuide: 'SillyTavern에 이미 있는 페르소나로만 복사 가능. 새 페르소나는 [새 페르소나 생성]',
@@ -619,15 +509,12 @@ export const STRINGS = deepFreeze({
         copySameTarget: '현재 편집 중인 페르소나',
         copyLogDetail: name => `${name}에서 복사`,
 
-        /* 버전 tab */
+        /* Versions tab */
         versionName: '버전 이름',
         versionGone: '삭제된 버전',
 
-        /* 버전별 페르소나 이미지 (user request). A version can carry one asset
-           that becomes the persona's picture when it is applied. The four states
-           are separate sentences because they are separate facts: nothing bound,
-           bound and present, bound but gone from the folder, and bound with the
-           folder unread. The last one is not the third one. */
+        // Per-version persona image. Missing and unknown are separate facts: an asset
+        // gone from the folder versus a folder not read.
         versionImageHead: '페르소나 이미지',
         versionImageMark: '이미지 지정',
         versionImageNone: '지정 없음',
@@ -638,8 +525,7 @@ export const STRINGS = deepFreeze({
         versionImageNow: '지금 적용',
         versionImageClear: '지정 해제',
         versionImageNoBinding: '지정된 이미지 없음',
-        /* 위치·크기 조절 (user request). The frame is the avatar's own 2:3 shape,
-           and the dashed square is the part every list and chat icon shows. */
+        // Framing: the frame is the avatar's 2:3 shape; the dashed square is what icons show.
         versionImageFramed: label => `${label} · 위치 조절`,
         versionImageFrame: '위치·크기 조절',
         framingHint: '끌어서 위치 · 두 손가락, 휠, 막대로 확대',
@@ -654,21 +540,16 @@ export const STRINGS = deepFreeze({
         framingWhole: '원본 그대로 적용',
         framingUploading: '올리는 중',
         framingConfirmLeave: '고른 이미지 버리고 닫기',
-        // Replacing the picture overwrites SillyTavern's avatar file, so the one
-        // that was there is copied into the asset folder first. Said out loud
-        // because it happens once and silently changes what the folder holds.
+        // Replacing the picture first backs up the old avatar into the asset folder, so
+        // the change to the folder is announced.
         imageBackupMade: '기존 이미지를 에셋으로 보관 완료',
         imageBackupFailed: detail => `기존 이미지 보관 실패로 교체 취소: ${detail}`,
         imageListingFailed: detail => `에셋 목록 읽기 실패: ${detail}`,
         imageAssetMissing: label => `지정된 에셋 없음: ${label}`,
         imageApplyFailed: detail => `이미지 교체 실패: ${detail}`,
-        // The picture changed but the record of it did not, so the next apply
-        // will do the work again. Reported rather than passed off as a clean
-        // success, which is what the caller cannot see from the outside.
+        // The picture changed but its record did not, so the next apply redoes it.
         imageAppliedUnrecorded: '이미지 교체 완료. 기록 저장 실패',
-        // The backup is taken automatically the first time a bound version
-        // overwrites the avatar, so the way back has to be somewhere the user
-        // can find without knowing that happened.
+        // Restores the automatic backup, findable without knowing it was taken.
         imageRestore: '원본 되돌리기',
         imageNoBackup: '보관된 원본 없음',
         confirmRestoreImage: '보관된 원본 이미지로 되돌리기',
@@ -677,23 +558,17 @@ export const STRINGS = deepFreeze({
         confirmDropVersion: name => `버전 "${name}" 삭제 (태그·이미지 지정 포함, 복구 불가)`,
         overwrite: '덮어쓰기',
         overwriteTitle: '현재 구성을 해당 버전에 덮어쓰기',
-        // What a version's slot reads when its pick names nothing that still
-        // exists, and equally a section the version never picked: in both cases
-        // the version selects nothing there.
+        // A version slot with a dead pick or none (NO_PICK_LABEL).
         noPick: '없음',
-        // Rule 6 says a disabled control explains itself, and rule 4 says the
-        // explanation names the next action: the repair select is inside this
-        // row's own drawer, so the sentence says how to get there.
+        // A disabled control says why and what to do next: the repair select is in the
+        // row's own drawer.
         versionNotApplicableReason: '지정된 선택지 없음. 버전 행 열기 → 다시 고르기',
         noItemsInVersion: '항목 없음',
-        // An empty state is a bare negation; the button standing right under it is
-        // already the statement of the next action, so the sentence does not
-        // narrate what will appear here once the user presses it.
         noVersionsHere: '아직 저장한 버전 없음',
         saveCurrentAsVersion: '현재 구성을 버전으로 저장',
         pickChoiceAria: name => `${name} 선택지 고르기`,
 
-        /* 고쳐서 새 버전 */
+        /* Revise into a new version */
         reviseOpen: '새 버전 만들기',
         reviseGuide: '바꿀 부분 드래그 → [수정]',
         reviseOneItemOnly: '한 항목 안에서만 선택 가능',
@@ -708,7 +583,7 @@ export const STRINGS = deepFreeze({
         reviseNothing: '수정할 본문 없음. 편집 탭에서 내용 먼저 쓰기',
         reviseSkipped: names => `삭제된 항목이라 반영 실패: ${names}`,
 
-        /* 이력 tab */
+        /* History tab */
         evictionNotice: '이력 총량 상한 초과. 오래된 기록 자동 정리. 설정에서 상한 조정 가능',
         historyChoiceLabel: '선택지',
         historyChoicePlaceholder: '선택지 고르기',
@@ -728,13 +603,12 @@ export const STRINGS = deepFreeze({
         diffWholeOnly: '본문이 길어 줄 단위 비교도 불가. 전체 교체로 표시',
         logHead: '변경 기록',
         logEmpty: '기록 없음',
-        // 일괄 삭제. 지운 뒤 한 줄이 남는 것은 기록 만료와 같은 이유다. 기록이
-        // 아무 말 없이 사라지면 데이터 손실과 구별되지 않는다.
+        // Clearing leaves one line: a log that vanishes silently reads as data loss.
         logClear: '기록 전체 삭제',
         confirmClearLog: n => `변경 기록 ${n}줄 삭제`,
         logCleared: n => `변경 기록 ${n}줄 삭제 완료`,
 
-        /* 에셋 tab */
+        /* Assets tab */
         assetFolder: key => `폴더: ${key}`,
         assetLoading: '에셋 목록을 읽는 중',
         assetListFailed: error => `에셋 목록 불러오기 실패: ${error}`,
@@ -749,8 +623,7 @@ export const STRINGS = deepFreeze({
         assetUploadedLog: n => `${n}개`,
         assetDeleteFailed: error => `지우기 실패: ${error}`,
         confirmDropAsset: label => `에셋 "${label}" 삭제 (서버 파일 삭제)`,
-        // The count is the part the user cannot see from the asset row, so it
-        // leads the bracket. What follows it is the same warning as above.
+        // The bound-version count leads, since the asset row cannot show it.
         confirmDropAssetBound: (label, n) => `에셋 "${label}" 삭제 (버전 ${n}개 그림 해제 · 서버 파일 삭제)`,
         targetMovedNotDeleted: '대상 페르소나 변경으로 삭제 취소',
         assetInsert: '입력창에 넣기',
@@ -763,7 +636,7 @@ export const STRINGS = deepFreeze({
         sendBoxMissing: '입력창 찾기 실패',
         sendBoxInserted: '입력창에 삽입 완료',
 
-        /* 그룹 tab */
+        /* Groups tab */
         groupName: '그룹 이름',
         groupGone: '삭제된 그룹',
         confirmDropGroup: name => `그룹 "${name}" 삭제 (페르소나는 유지)`,
@@ -794,11 +667,9 @@ export const STRINGS = deepFreeze({
     /* The settings drawer. */
     settings: {
         title: APP_NAME,
-        // The word the drawer's band repeats. Short on purpose: the band sets it
-        // large three times and the app name would not fit a phone at that size.
+        // Set large in the band, so it must stay short enough for a phone.
         bandWord: '설정',
-        // Captions over the groups of rows. The drawer is twenty rows long, and
-        // a caption is what lets the eye skip the rows it is not looking for.
+        // Captions over the drawer's groups of rows.
         sections: {
             display: '표시',
             list: '페르소나 목록',
@@ -810,8 +681,6 @@ export const STRINGS = deepFreeze({
         readOnlyBanner: '더 새로운 판이 만든 데이터라 읽기 전용. 설정 변경 불가',
         showQuickBar: '입력창 아이콘 표시',
         showQuickBarHint: '끄면 입력창의 페르소나 아이콘과 빠른 전환 패널 숨김. 저장한 내용은 그대로 유지',
-        // Two switches, not one three way choice: the user asked
-        // to be able to turn either on by itself.
         rosterShowVersionCount: '목록에 버전 개수 표시',
         rosterShowVersionCountHint: '페르소나 목록의 이름 옆에 "버전 3"처럼 개수 표시. 관리자 데이터가 없는 페르소나는 제외',
         rosterShowVersionNames: '목록에 버전 이름 표시',
@@ -844,7 +713,6 @@ export const STRINGS = deepFreeze({
         assetStylePlain: '기본',
         assetStyleBordered: '테두리',
         assetStylePolaroid: '폴라로이드',
-        // The display settings.
         rosterTileColumns: '타일 열 수',
         rosterTileColumnsHint: '타일 보기에서 한 줄에 놓는 개수. 자동은 화면 폭 기준',
         tileColumnsAuto: '자동',
@@ -861,10 +729,7 @@ export const STRINGS = deepFreeze({
         pageSizeAssets: '에셋 한 화면 개수',
         pageSizeVersions: '버전 한 화면 개수',
         pageSizeHint: '초과분은 페이지로 분할. 0이면 전부 한 화면에 (0~200)',
-        /* 페르소나 식별 방식 (device: Termux라 콘솔을 볼 수 없음). Which route
-           named the active persona is what decides whether two same-named personas
-           can be edited, so it belongs on the screen rather than in a console line
-           nobody on a phone can open. */
+        // On screen because a phone has no console; see refreshIdentify.
         identify: '페르소나 식별',
         identifySources: {
             precise: '정밀 (파일 직접)',
@@ -879,21 +744,9 @@ export const STRINGS = deepFreeze({
         usage: '저장 사용량',
         usageBytes: kb => `저장 사용량 ${kb}KB`,
         refreshUsage: '사용량 새로고침',
-        // 빈 페르소나, not 빈 항목: what this removes is persona entries with no
-        // data of ours, and 항목 is the fixed word for a section.
-        /* Every asset instruction this extension has ever SHIPPED as the default.
-
-           The template is a stored setting, and migrate only fills a key that is
-           missing, so changing the default changed nothing for anybody who already
-           had one: the user upgraded and went on seeing the first version of this
-           text, which is exactly what they reported. Shipping a new default and
-           leaving every existing install on the old one is not shipping it.
-
-           What must not happen is overwriting an instruction the user wrote. So
-           the test is exact equality against what WE wrote: if the stored value is
-           byte for byte one of ours, it was never touched and is replaced with the
-           current one; anything else is theirs and is left alone. Every retired
-           default has to stay on this list for that comparison to keep working. */
+        // Every asset prompt ever shipped as the default. migrate swaps a stored template
+        // that is byte-identical to one of these for the current default and leaves any
+        // other (the user's own) alone, so retired defaults must stay listed.
         legacyAssetPrompts: Object.freeze([
             '아래는 {{user}}의 이미지 목록이다. 장면에 어울리면 {{pimg::파일명}} 형태로 한 번만 넣어라.\n{{persona_assets}}',
             '{{user}}의 이미지는 아래 목록이 전부다.\n'
@@ -906,21 +759,8 @@ export const STRINGS = deepFreeze({
             + '- 장면의 내용이나 분위기와 맞는 것이 있을 때만 넣는다. 없으면 넣지 않는다.\n'
             + '- 최근 응답에서 쓴 이름은 다시 쓰지 않는다.',
         ]),
-        /* 에셋 지시문 기본값 (user request). The instruction the user supplied,
-           rewritten for this extension's tag format and kept in ENGLISH, which is
-           the language they wrote it in and the language it is addressed to: this
-           string is not read by anyone, it is sent to the model. Every other
-           string in this file is the opposite and is Korean for the same reason.
-
-           Two things in the source could not be copied. It asked for the file
-           EXTENSION in every tag; our listing carries none, because labelOf strips
-           it and the renderer resolves a bare label against the server's own
-           listing, so a tag with an extension resolves to nothing. And it kept a
-           clause about HTML <img> for external pictures, which inside a chat is an
-           invitation to emit raw HTML; the rule here is one form and no other.
-
-           The rest is the source's: a cap of two, only between paragraphs, only
-           when the picture suits the scene, and no repeats from recent turns. */
+        // Sent to the model, never shown, hence English. Tags must carry no file extension
+        // (labels have none, so such a tag resolves to nothing) and no form but pimg.
         assetPromptDefault:
             "The only images {{user}} has are the ones listed here.\n"
             + '{{persona_assets}}\n'
@@ -931,6 +771,7 @@ export const STRINGS = deepFreeze({
             + '- At most two per response, each placed after a paragraph ends, never mid-sentence.\n'
             + "- Insert one only where it suits that paragraph's subject or mood. If none suits it, insert none.\n"
             + '- Do not reuse a name you have used in recent responses.',
+        // Says persona, not item: it removes persona entries, and item means a section.
         pruneEmpty: '빈 페르소나 정리',
         pruneReadOnly: '읽기 전용이라 정리 불가',
         pruneDone: n => `빈 페르소나 ${n}건 정리 완료`,
@@ -943,12 +784,7 @@ export const STRINGS = deepFreeze({
         clearHistoryLog: n => `이력 ${n}건 삭제`,
         clearHistoryDone: n => `이력 ${n}건 삭제 완료`,
         clearHistoryNothing: '지울 이력 없음',
-        /* The CHANGE LOG, which is a different list from the edit history above
-           and the only one no budget could ever reach. Measured: 30 personas at
-           the 200 line cap come to 461KB on their own, past the 512KB the usage
-           figure turns red at, and the eviction the budget runs only ever drops
-           snapshots. So the warning was true and there was nothing on any screen
-           that could act on it. */
+        // The change log: separate from the edit history above and outside every budget.
         clearLogs: '변경 기록 전체 비우기',
         confirmClearLogs: '모든 페르소나의 변경 기록 삭제 (복구 불가)',
         clearLogsDone: n => `변경 기록 ${n}줄 삭제 완료`,
@@ -970,8 +806,7 @@ export const STRINGS = deepFreeze({
         importReadOnly: '읽기 전용이라 가져오기 불가',
         importNotApplied: '읽기 전용이라 가져오기 취소',
         importReadFailed: error => `파일 읽기 실패: ${error}`,
-        // parseImportedRoot's three refusals: a failure that can only be reached
-        // by a user waiting to hear about their file says why.
+        // parseImportedRoot's refusals.
         importNotJson: error => `설정 파일 형식 오류: ${error}`,
         importNotShape: '설정 파일 형식 불일치',
         importBadPersonas: n => `페르소나 ${n}개의 형식 불일치. 현재 데이터 유지`,
@@ -983,13 +818,10 @@ export const STRINGS = deepFreeze({
         importHint: `[설정 가져오기]는 ${APP_NAME}가 저장한 내용을 통째로 교체. 먼저 [설정 내보내기]로 현재 상태 백업 권장`,
     },
 
-    /* 가져오기 자동 분류 (classify.js). Words READ from a description, never shown:
-       the other names a title may use for each shipped item. Keyed by the shipped
-       item name exactly as store.js spells it. Spaces, case and & / · are ignored
-       when matching, so each word is written once. */
+    // Words classify.js reads from descriptions, never shown: title aliases per default
+    // section, keyed by its name as store.js spells it. Matching ignores spaces, case, & / ·.
     classify: {
-        // The text before the first title, kept as an item of its own when a
-        // description is taken in with its own sections. Printed without a title.
+        // The text before the first title, kept as its own section and printed without a title.
         preambleName: '머리말',
         titleAliases: {
             '기본 정보': ['기본정보', '프로필', '개요', 'profile', 'basic info', 'basic information', 'basics', 'overview', 'info'],
@@ -1002,8 +834,7 @@ export const STRINGS = deepFreeze({
             '숨겨진 욕망': ['욕망', 'desires', 'hidden desires', 'secret desires'],
             '말투 & 대사': ['어투', 'speech', 'speech style', 'dialogue', 'voice'],
             'NSFW 외모': ['nsfw appearance'],
-            // Only words that mean the sexual kind: 취향 and preferences also say
-            // 커피와 영화, and that text does not belong in this item.
+            // Sexual senses only: plain taste or preference words also cover coffee and films.
             '성적 취향': ['kinks', 'sexual preferences'],
             'AI 가이드라인': ['가이드라인', 'guidelines', 'ai guidelines', 'ai notes'],
             '캐릭터 노트': ['노트', '메모', 'notes', 'character notes'],

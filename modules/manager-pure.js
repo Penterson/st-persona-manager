@@ -1,42 +1,27 @@
-// Pure logic behind the manager screen.
-// Nothing here touches the DOM, so 검사/manager.test.mjs can import it in plain
-// Node. The DOM half lives in manager.js and must never be imported by a test.
+// Pure logic behind the manager screen. No DOM, so tests import it in plain Node;
+// the DOM half is manager.js, which tests must never import.
 import { addLog } from './history.js';
-import { DEFAULT_SETTINGS, DEFAULT_SECTION_NAMES, SCHEMA_VERSION, makeId, migrate, HEADING_FORMATS, TILE_SHAPES } from './store.js';
+import { DEFAULT_SETTINGS, DEFAULT_SECTION_NAMES, SCHEMA_VERSION, makeId, appendSection, findVersion, liveVariant, migrate, HEADING_FORMATS, TILE_SHAPES } from './store.js';
 import { SORT_KEYS } from './roster.js';
 import { STRINGS } from './strings.js';
 import { validCrop, writtenKey } from './framing.js';
 import { findAsset, groupLabelOf, selectedNames } from './assets.js';
 
-// What a version's slot reads when its pick names nothing that still exists.
-// The slot says 없음 and is never filled in for the user.
-// Substituting a surviving variant would show a combination the version does not
-// actually contain, and the user would never learn that a pick had died.
-// The word itself lives in STRINGS; this export is the name the
-// DOM half and the tests already reach it by.
+// What a version's slot reads when its pick names nothing that exists. Never substituted
+// with a surviving variant: that would show a combination the version does not contain.
 export const NO_PICK_LABEL = STRINGS.manager.noPick;
 
-// The last section is never deleted. A persona with no sections
-// composes to an empty description, and this screen offers no way back out of
-// that, so the refusal has to happen before the mutation rather than after.
+// The last section is never deleted: a persona without sections composes to nothing, and
+// this screen has no way back from that.
 export function canDeleteSection(persona, sectionId) {
     const sections = persona?.sections ?? [];
     if (sections.length <= 1) return false;
     return sections.some(section => section.id === sectionId);
 }
 
-// Removes a section and everything only it could reach: its variant list, its
-// entry in activePicks, and the history of each variant it takes with it.
-// Returns a description of what went, or null when the removal was refused.
-//
-// Version picks are deliberately left pointing at the dead section. Automatic
-// substitution is forbidden, and versionSummary renders the orphaned
-// slot as 없음, which is the honest report. activePicks is the opposite case: it
-// is the live combination, not a saved record of one, so a key naming a section
-// nobody can see again is a ghost. compose() iterates sections and would never
-// look at it, but describeSelection compares the whole activePicks object against
-// each version's picks, so the ghost would make the live combination differ from
-// every saved version for as long as the persona exists.
+// Removes a section with its variants, their history and its activePicks entry; returns what
+// went, or null if refused. Version picks keep the dead key on purpose: saved records are
+// never rewritten, and readers ignore sections that no longer exist.
 export function removeSection(persona, sectionId, now) {
     if (!canDeleteSection(persona, sectionId)) return null;
     const index = persona.sections.findIndex(section => section.id === sectionId);
@@ -52,31 +37,26 @@ export function removeSection(persona, sectionId, now) {
     return { id: sectionId, name: section.name ?? '', variantIds };
 }
 
-// Moves a section one place up or down. Order is what compose() joins the blocks
-// in, so this is a content change and not merely a display preference. Returns
-// whether anything moved: a refusal at either end is a no-op, not an error, so
-// the arrow at the end of the list simply does nothing.
-export function moveSection(persona, sectionId, delta) {
-    const sections = persona?.sections;
-    if (!Array.isArray(sections)) return false;
-    const from = sections.findIndex(section => section.id === sectionId);
+// Moves the entry with this id by delta places. Returns whether it moved: a step past
+// either end is a no-op, not an error.
+function stepById(list, id, delta) {
+    if (!Array.isArray(list)) return false;
+    const from = list.findIndex(entry => entry?.id === id);
     if (from === -1) return false;
     const to = from + delta;
-    if (to < 0 || to >= sections.length) return false;
-    const [moved] = sections.splice(from, 1);
-    sections.splice(to, 0, moved);
+    if (to < 0 || to >= list.length) return false;
+    const [moved] = list.splice(from, 1);
+    list.splice(to, 0, moved);
     return true;
 }
 
-// Deletes one variant. A section always keeps at least one variant, and deleting
-// the active one moves the pick to the section's first remaining variant and says
-// so in the log. Returns what happened, or null when
-// the deletion was refused.
-//
-// The deleted variant's history goes with it for the same reason removeSection
-// drops it: no screen can reach a snapshot whose variant is gone, so leaving it
-// behind only fills settings.json. Version picks keep the dangling id, exactly as
-// in removeSection.
+// Section order is prompt order, so this changes content.
+export function moveSection(persona, sectionId, delta) {
+    return stepById(persona?.sections, sectionId, delta);
+}
+
+// Deletes a variant (never a section's last) with its unreachable history. Deleting the active
+// one moves the pick to the first remaining variant; version picks keep the dangling id.
 export function deleteVariant(persona, sectionId, variantId, now) {
     const list = persona?.variants?.[sectionId];
     if (!Array.isArray(list) || list.length <= 1) return null;
@@ -94,11 +74,8 @@ export function deleteVariant(persona, sectionId, variantId, now) {
     return { removed: gone.id, label: gone.label ?? '', movedTo };
 }
 
-// Renaming and deleting labels live on this screen. An empty name
-// is refused rather than stored: the chip row draws the name and nothing else, so
-// a blank one is a chip the user cannot tell from any other blank one. Duplicate
-// names are allowed on purpose (21.4): labels are identified by id, and blocking
-// the name would stop the user without telling them why.
+// Empty names are refused (a blank chip is indistinguishable); duplicates are allowed, since
+// labels are identified by id.
 export function renameLabel(labels, labelId, name) {
     const label = (labels ?? []).find(entry => entry.id === labelId);
     if (!label) return false;
@@ -108,11 +85,8 @@ export function renameLabel(labels, labelId, name) {
     return true;
 }
 
-// Removes the label itself and nothing else. The members array is a list of
-// avatar ids, so dropping the label cannot reach a persona, which is exactly the
-// intent: the label goes, the personas stay. An activeLabelId left naming the
-// deleted label is handled where it is read (buildRosterView falls back to
-// showing everything).
+// Removes only the label, never its personas. A stale activeLabelId is handled by
+// buildRosterView, which falls back to showing everyone.
 export function deleteLabel(labels, labelId) {
     if (!Array.isArray(labels)) return false;
     const index = labels.findIndex(entry => entry.id === labelId);
@@ -121,15 +95,8 @@ export function deleteLabel(labels, labelId) {
     return true;
 }
 
-// One row per section of the persona, in section order, describing what this
-// version picks there. The whole combination has to be visible at a glance,
-// so a section the version never picked reads the same as one whose pick died:
-// both are 없음, because in both cases the version selects nothing there.
-//
-// Picks naming a section the persona no longer has are not shown. They are kept
-// in the data (removeSection leaves them alone) so that nothing is silently
-// rewritten, but there is no row to show them in and inventing one would describe
-// a section the user cannot act on.
+// One row per section saying what this version picks there. Unpicked and dead picks both read
+// NO_PICK_LABEL; picks for deleted sections stay in the data but get no row.
 export function versionSummary(persona, version) {
     const picks = version?.picks ?? {};
     return (persona?.sections ?? []).map(section => {
@@ -147,29 +114,15 @@ export function versionSummary(persona, version) {
     });
 }
 
-// One line standing in for a whole combination. A version row is kept down to a
-// name, a summary and one button, so the per section detail
-// moves into the expansion and this is what stays on the row. A dead pick reads
-// 없음 here exactly as it does in the detail, because that is what the version
-// selects there.
+// The whole combination on one line, for the collapsed version row.
 export function versionSummaryLine(persona, version) {
     return versionSummary(persona, version)
         .map(row => `${row.sectionName}: ${row.label}`)
         .join(STRINGS.common.dotSeparator);
 }
 
-/* Version writes, shared by the manager and the quick panel.
-
-   Both screens used to carry their own copy of each write, and the quick panel had
-   none of rename, duplicate, overwrite or delete at all. Each helper takes the
-   persona looked up AFTER the screen's await and the version id the row was drawn
-   with, so neither screen can act on an object it read before the question was
-   asked. A missing version answers null, and the caller says 삭제된 버전. */
-function findVersion(persona, versionId) {
-    const versions = persona?.versions;
-    if (!Array.isArray(versions)) return null;
-    return versions.find(entry => entry?.id === versionId) ?? null;
-}
+// Version writes, shared by the manager and the quick panel. Each takes the persona looked up
+// after the screen's await plus a version id, and answers null when the version is gone.
 
 export function renameVersionIn(persona, versionId, name, now) {
     const version = findVersion(persona, versionId);
@@ -180,18 +133,14 @@ export function renameVersionIn(persona, versionId, name, now) {
     return version;
 }
 
-// Next to the original, not at the end: a copy made to be edited is easier to
-// find beside what it came from. activeVersionId is deliberately left alone.
-// Tags and the bound picture travel with the copy; a duplicate that quietly drops
-// them applies somebody else's picture or none.
+// Inserted right after the original; activeVersionId stays. Tags and the bound picture go
+// with the copy.
 export function duplicateVersionIn(persona, versionId, makeIdFn, now) {
     const source = findVersion(persona, versionId);
     if (!source) return null;
     const copy = {
         id: makeId(makeIdFn),
         name: STRINGS.common.copySuffix(source.name ?? ''),
-        // Copied by value. Sharing the object would make editing one version's
-        // combination silently edit the other's.
         picks: { ...(source.picks ?? {}) },
         assetSelection: Array.isArray(source.assetSelection) ? [...source.assetSelection] : null,
         tags: Array.isArray(source.tags) ? [...source.tags] : [],
@@ -203,8 +152,7 @@ export function duplicateVersionIn(persona, versionId, makeIdFn, now) {
     return copy;
 }
 
-// The live combination replaces the saved one. Nothing is snapshotted: history
-// covers variant text, and a version holds no text of its own.
+// No snapshot: history covers variant text, and a version holds none of its own.
 export function overwriteVersionPicks(persona, versionId, now) {
     const version = findVersion(persona, versionId);
     if (!version) return null;
@@ -213,9 +161,7 @@ export function overwriteVersionPicks(persona, versionId, now) {
     return version;
 }
 
-// The picks are the live combination and belong to the persona, not to the
-// version. Deleting the version drops the label, and the combination the user is
-// actually running stays exactly as it is.
+// The live picks belong to the persona, so deleting a version leaves them as they are.
 export function dropVersionFrom(persona, versionId) {
     const versions = persona?.versions;
     if (!Array.isArray(versions)) return null;
@@ -226,60 +172,62 @@ export function dropVersionFrom(persona, versionId) {
     return removed;
 }
 
-// The order versions are listed in, nothing more: no prompt reads it. Same
-// contract as moveSection, a refusal at either end is a no-op.
+// Display order only (no prompt reads it).
 export function moveVersion(persona, versionId, delta) {
-    const versions = persona?.versions;
-    if (!Array.isArray(versions)) return false;
-    const from = versions.findIndex(entry => entry?.id === versionId);
-    if (from === -1) return false;
-    const to = from + delta;
-    if (to < 0 || to >= versions.length) return false;
-    const [moved] = versions.splice(from, 1);
-    versions.splice(to, 0, moved);
-    return true;
+    return stepById(persona?.versions, versionId, delta);
+}
+
+// Points the live picks at the version's and asks write() to store them. A refused write
+// puts the previous picks back, or the version would show as applied over the old prompt
+// and go out with the next unrelated save. Returns whether the write was accepted.
+export function applyVersionPicks(persona, version, write) {
+    const previous = { id: persona.activeVersionId, picks: persona.activePicks };
+    persona.activeVersionId = version.id;
+    persona.activePicks = { ...(version.picks ?? {}) };
+    if (write()) return true;
+    persona.activeVersionId = previous.id;
+    persona.activePicks = previous.picks;
+    return false;
+}
+
+// Appends a version of the live picks and makes it the active one. assetSelection null is
+// every asset, later uploads included; avatarAsset null leaves the picture alone.
+export function addVersion(persona, name, makeIdFn, now) {
+    const version = {
+        id: makeId(makeIdFn),
+        name,
+        picks: { ...(persona.activePicks ?? {}) },
+        assetSelection: null,
+        avatarAsset: null,
+        updatedAt: now,
+    };
+    if (!Array.isArray(persona.versions)) persona.versions = [];
+    persona.versions.push(version);
+    persona.activeVersionId = version.id;
+    return version;
 }
 
 /* Row expansion keys */
 
-// Exactly one row is expanded at a time, so the open row is one string in the
-// screen's module state and every row asks whether that string names it.
-//
-// JSON rather than a joined string, for the same reason draftKey uses it: an id
-// is whatever SillyTavern or a hand edited settings.json put there, so no
-// separator is safe, and two different rows that collapsed onto one key would
-// open each other.
+// The one expanded row is stored as a single key string. JSON, not a joined string: ids come
+// from ST or hand-edited settings, so no separator is safe.
 export function rowKey(kind, ...parts) {
-    // A missing part stays null rather than collapsing to '': an id that is
-    // absent and an id that is an empty string are two different rows, and one
-    // key for both would open each other's drawer, which is the exact failure
-    // the JSON encoding exists to rule out.
+    // Missing parts stay null, so an absent id and an empty one are different rows.
     return JSON.stringify([String(kind ?? ''), ...parts.map(part => (part == null ? null : String(part)))]);
 }
 
-/* Drafts: unsaved editor text (review findings R2 and R3) */
+/* Drafts: unsaved editor text */
 
-// The editor saves on a button, so every path that takes the textarea off the
-// screen used to throw away what was in it: switching tabs and opening a second
-// variant's editor both did it without a word. A confirmation on each would be a
-// question the user has to answer to do something ordinary, so the text is kept
-// instead and put back when that same body is opened again.
-//
-// Strings only. Nothing here holds a persona, a context or a node, so a draft
-// cannot keep a stale object alive; the worst a stale draft can do is offer text
-// for a variant that no longer exists, and the editor is only ever built for a
-// variant that does.
+// Text from an editor taken off screen unsaved, restored when the same body reopens. Strings
+// only, so a draft never keeps a stale persona, context or node alive.
 const drafts = new Map();
 
-// JSON rather than a joined string: an avatar id is a file name and could in
-// principle contain whatever separator we picked, and two different triples that
-// collapse to one key would hand one variant's text to another.
+// JSON: an avatar id is a file name and may contain any separator.
 export function draftKey(avatarId, sectionId, variantId) {
     return JSON.stringify([avatarId ?? null, sectionId ?? null, variantId ?? null]);
 }
 
-// null or undefined text clears the slot, so a caller that has nothing to keep
-// does not have to reach for a second function to say so.
+// null or undefined text clears the slot.
 export function putDraft(avatarId, sectionId, variantId, text) {
     const key = draftKey(avatarId, sectionId, variantId);
     if (text === undefined || text === null) { drafts.delete(key); return false; }
@@ -287,16 +235,13 @@ export function putDraft(avatarId, sectionId, variantId, text) {
     return true;
 }
 
-// Reads without consuming. The draw path uses this: a redraw must not be the
-// thing that empties the slot, because the next redraw would then find nothing.
+// Reads without consuming, for the draw path: the next redraw must still find it.
 export function peekDraft(avatarId, sectionId, variantId) {
     const key = draftKey(avatarId, sectionId, variantId);
     return drafts.has(key) ? drafts.get(key) : null;
 }
 
-// Reads and clears. Used once the text has actually been stored on the variant:
-// leaving it behind would make the next open restore an edit that is already
-// saved, and any later change to that variant would look unsaved next to it.
+// Reads and clears, once the text is stored, so an already saved edit is never restored.
 export function takeDraft(avatarId, sectionId, variantId) {
     const key = draftKey(avatarId, sectionId, variantId);
     if (!drafts.has(key)) return null;
@@ -307,38 +252,24 @@ export function takeDraft(avatarId, sectionId, variantId) {
 
 export function clearDrafts() { drafts.clear(); }
 
-// For the tests and for the teardown check. Nothing on screen reads it.
-export function draftCount() { return drafts.size; }
-
 /* History view */
 
-export const PREVIEW_CHARS = 40;
+const PREVIEW_CHARS = 40;
 
-// One line standing in for a whole snapshot. Newlines are folded because the
-// list gives each entry a single row, and a body whose first line is blank would
-// otherwise show as an empty row that looks like a bug.
+// A one-row preview of a snapshot; whitespace is folded so a leading blank line never shows
+// as an empty row.
 export function previewText(text, max = PREVIEW_CHARS) {
     const flat = String(text ?? '').replace(/\s+/g, ' ').trim();
     if (!flat) return STRINGS.manager.previewEmpty;
-    // Cut by code point. Slicing by code unit can split a surrogate pair, and the
-    // lone half renders as a replacement character.
+    // By code point: slicing code units can split a surrogate pair.
     const chars = [...flat];
     if (chars.length <= max) return flat;
     return chars.slice(0, max).join('') + '...';
 }
 
-// Every variant of the persona, grouped by section, with its snapshots newest
-// first. Each snapshot keeps the index it holds in storage, because that index is
-// what history.js's restore() takes; presenting them reversed and then handing
-// the display position back would restore the wrong one.
-// previewFor decides how much work this does, because previewText runs a regex
-// over a whole 2,000+ character body and the history screen only ever renders one
-// variant's snapshots. Leave it out for every preview (what the tests read); pass
-// a variantId for that variant's previews only; pass null for counts alone, which
-// is all the variant select needs. Measured on the device's real shape (13
-// sections, 5 snapshots each, ~3,000 character bodies) the whole persona cost
-// 3.5-3.9ms per call and drawManager made two of them per repaint, on a screen
-// that repaints on every commit, every tab tap and every PERSONA_UPDATED.
+// Variants grouped by section, snapshots newest first, each keeping its storage index (what
+// history.js restore() takes). previewFor limits the costly previews: omit it for all, pass a
+// variantId for that variant's only, or null for counts alone.
 export function historyView(persona, sectionId, previewFor) {
     const history = persona?.history ?? {};
     const everything = previewFor === undefined;
@@ -358,8 +289,7 @@ export function historyView(persona, sectionId, previewFor) {
                 sectionId: section.id,
                 sectionName: section.name ?? '',
                 variantId: variant.id,
-                // From the stored list, not from snapshots, so a call that skipped
-                // the previews still reports the real number to the select.
+                // From the stored list, so it is right even when previews were skipped.
                 count: list.length,
                 label: variant.label ?? '',
                 snapshots,
@@ -370,31 +300,20 @@ export function historyView(persona, sectionId, previewFor) {
     return groups;
 }
 
-// Eviction leaves a log line so the user can find out why their
-// history got shorter. The history screen is where they go looking, so it is the
-// screen that has to say it.
+// Whether the history screen should explain why history got shorter (eviction or expiry).
 export function hasEvictionNotice(persona) {
-    // Both kinds. Expiry removes history for a different reason than the byte cap
-    // but the user's question is the same one: why is my history shorter.
     return (persona?.log ?? []).some(entry => entry?.kind === 'history-evicted' || entry?.kind === 'history-expired');
 }
 
-// A stable identity for the set of sections that fell out of the prompt. The
-// banner is permanent, but the toast is not: firing one on every commit turned a
-// single unfixed empty section into a toast per tap. Order is not part of the
-// set, so it is sorted away before comparing.
-//
-// JSON rather than a joined string, for the same reason draftKey uses it:
-// section names are whatever the user typed, so no separator is safe, and two
-// different sets that joined to one string would silence a toast that was owed.
+// An order-free identity for the set of sections missing from the prompt, so the toast fires
+// only when the set changes. JSON, as in draftKey: names are user text.
 export function missingSignature(missing) {
     return JSON.stringify([...(missing ?? [])].map(name => String(name ?? '')).sort());
 }
 
 /* Settings ranges */
 
-// The ranges as data, so the settings screen and the clamp cannot disagree about
-// them.
+// Shared by the settings screen and clampSetting, so the two cannot disagree.
 export const SETTING_RANGES = Object.freeze({
     historyPerVariant: Object.freeze({ min: 0, max: 50, step: 1 }),
     historyMaxBytes: Object.freeze({ min: 65536, max: 2097152, step: 1024 }),
@@ -405,27 +324,21 @@ export const SETTING_RANGES = Object.freeze({
     pageSizeRoster: Object.freeze({ min: 0, max: 200, step: 1 }),
     pageSizeAssets: Object.freeze({ min: 0, max: 200, step: 1 }),
     pageSizeVersions: Object.freeze({ min: 0, max: 200, step: 1 }),
-    // Not on the drawer as a number field, but an imported file can hold any
-    // value: 0 or less emptied the recent list on every switch, and a string
-    // skipped roster.js's trim so the list grew without bound.
+    // Not on the drawer but clamped for imports: 0 or less would empty the recent list on
+    // every switch, and a string would skip roster.js's trim.
     lastUsedCap: Object.freeze({ min: 10, max: 500, step: 1 }),
 });
 
-// The tile column count is a fixed list on the drawer (settings-ui.js
-// tileColumnsField); an imported file is held to the same list.
+// The drawer's fixed column choices (0 is auto); imports are held to the same list.
 export const TILE_COLUMN_CHOICES = Object.freeze([0, 2, 3, 4, 5, 6]);
 
-// A number input on Android accepts anything the user pastes, and an empty field
-// reads as an empty string. Both arrive here as NaN, and storing that would
-// serialise as null, which every reader downstream treats as "no cap at all":
-// the one outcome the history caps exist to prevent. So a value we cannot make
-// sense of becomes the shipped default rather than being written through.
+// Android number inputs accept any paste, and NaN would serialise as null, which readers take
+// as no cap at all. Unparseable values become the shipped default instead.
 export function clampSetting(key, value) {
     const range = SETTING_RANGES[key];
     if (!range) return value;
-    // An empty field converts to 0 rather than to NaN, and 0 is a legal value for
-    // historyPerVariant, so a user who cleared the box in order to retype would
-    // have turned history off without asking to. An empty string is no value.
+    // Number('') is 0, which would turn history off for a user clearing the box to retype,
+    // so an empty field is no value.
     const raw = typeof value === 'string' ? value.trim() : value;
     if (raw === '' || raw === null || raw === undefined) return DEFAULT_SETTINGS[key];
     const n = Number(raw);
@@ -435,23 +348,12 @@ export function clampSetting(key, value) {
 
 /* Settings export and import */
 
-// The whole root as a file. Indented, because the file exists so a user can look
-// at it and keep it, and a single line of a few hundred KB is not something a
-// phone text viewer opens.
+// Indented: one line of hundreds of KB is unreadable in a phone text viewer.
 export function serializeRoot(root) {
     return JSON.stringify(root ?? {}, null, 2);
 }
 
-// The other direction, and the only gate between a file off the disk and a
-// wholesale replacement of everything this extension stores. Returns the migrated
-// root to install, or a refusal carrying the sentence to put on screen: a failure
-// that says nothing is forbidden, and this one can only be reached by a
-// user who just picked a file and is waiting to hear about it.
-//
-// Nothing here writes anywhere. The caller installs the root it gets back, which
-// is what keeps the decision testable without a SillyTavern to install into.
-// The settings that are one of a fixed set, with the set the drawer and the
-// screens offer.
+// Settings limited to a fixed set, with the choices the drawer and screens offer.
 const SETTING_CHOICES = Object.freeze({
     assetStyle: ['plain', 'bordered', 'polaroid'],
     rosterTileShape: TILE_SHAPES,
@@ -461,6 +363,8 @@ const SETTING_CHOICES = Object.freeze({
     pickerViewMode: ['list', 'tiles', 'tilesNamed'],
 });
 
+// The only gate before an imported file replaces everything stored. Writes nothing: returns
+// { ok: true, root } to install, or { ok: false, message } with the sentence to show.
 export function parseImportedRoot(text) {
     let parsed;
     try {
@@ -468,14 +372,10 @@ export function parseImportedRoot(text) {
     } catch (e) {
         return { ok: false, message: STRINGS.settings.importNotJson(String(e?.message ?? e)) };
     }
-    // An array is a typeof object too, and so is null. Neither has a settings or a
-    // personas container, and installing one would take the whole screen down on
-    // the next read rather than here where we can say what happened.
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
         return { ok: false, message: STRINGS.settings.importNotShape };
     }
-    // The same for the containers. An array where an object belongs accepted
-    // named keys in memory and lost every one of them on the next save.
+    // An array container would take named keys in memory and lose them all on save.
     for (const key of ['personas', 'settings', 'lastUsed']) {
         if (Object.hasOwn(parsed, key) && (!parsed[key] || typeof parsed[key] !== 'object' || Array.isArray(parsed[key]))) {
             return { ok: false, message: STRINGS.settings.importNotShape };
@@ -485,34 +385,20 @@ export function parseImportedRoot(text) {
         return { ok: false, message: STRINGS.settings.importNotShape };
     }
     const version = parsed.schemaVersion;
-    // A root a newer build owns is never rewritten. On import that
-    // means refusing outright, because installing it would put this build into the
-    // read only state with the user's real data replaced by the file's.
+    // A newer build's root would install read-only, with the user's data already replaced.
     if (typeof version === 'number' && version > SCHEMA_VERSION) {
         return { ok: false, message: STRINGS.settings.importNewer(version, SCHEMA_VERSION) };
     }
-    /* Every entry under personas has to BE a persona. migrate backfills containers
-       and defaults but never changes the shape of what is already there, so a
-       hand edited file whose persona is a string or a null installs cleanly and
-       then throws the first time anything writes a log line to it - which is
-       every write there is. The import would have reported success, and the data
-       it replaced would already be gone.
-
-       Refused rather than repaired or quietly dropped: the file is the user's,
-       and a persona nobody can read is not something to guess the contents of.
-       Nothing has been touched at this point, so their own data is still there. */
+    // Every persona entry must be an object: migrate never fixes existing shapes, and a string
+    // or null would throw on the first write. Refused, not repaired; nothing is touched yet.
     const malformed = Object.values(parsed.personas ?? {})
         .filter(entry => !entry || typeof entry !== 'object' || Array.isArray(entry)).length;
     if (malformed) return { ok: false, message: STRINGS.settings.importBadPersonas(malformed) };
 
-    // migrate backfills the containers and the shipped defaults, so a file written
-    // by an older build, or one a user hand edited down to the parts they cared
-    // about, arrives complete rather than half missing.
+    // migrate backfills containers and defaults for older or hand-trimmed files.
     const root = migrate(parsed);
-    // migrate backfills a missing number and keeps a present one as it is. The
-    // drawer clamps what the user types, and an imported file skipped that gate:
-    // historyMaxBytes 0 (or "abc") is a number the budget reads as "evict every
-    // snapshot", and the next save did exactly that.
+    // Imported numbers get the drawer's clamp (migrate keeps whatever is present):
+    // historyMaxBytes 0 would make the budget evict every snapshot.
     if (root.settings && typeof root.settings === 'object') {
         for (const key of Object.keys(SETTING_RANGES)) {
             if (Object.hasOwn(root.settings, key)) root.settings[key] = clampSetting(key, root.settings[key]);
@@ -522,10 +408,7 @@ export function parseImportedRoot(text) {
         } else {
             root.settings.rosterTileColumns = Number(root.settings.rosterTileColumns);
         }
-        // Choices and switches get the same gate the numbers get: a file saying
-        // rosterTileShape 'hexagon' or autoLocalName 'yes' installed as written,
-        // and the drawer showed a blank select or a ticked box for something that
-        // is not a choice at all, so it could not say what was in effect.
+        // Choices and switches too, or the drawer would show a blank select or a misleading box.
         for (const [key, allowed] of Object.entries(SETTING_CHOICES)) {
             if (Object.hasOwn(root.settings, key) && !allowed.includes(root.settings[key])) root.settings[key] = DEFAULT_SETTINGS[key];
         }
@@ -533,8 +416,7 @@ export function parseImportedRoot(text) {
             if (typeof value === 'boolean' && typeof root.settings[key] !== 'boolean') root.settings[key] = value;
         }
     }
-    // Groups and versions that are not objects crash the roster and the version
-    // list on the first draw; they are dropped here with nothing else touched.
+    // Non-object groups and versions would crash the first draw, so they are dropped.
     root.labels = root.labels.filter(label => label && typeof label === 'object' && !Array.isArray(label));
     for (const persona of Object.values(root.personas)) {
         persona.versions = persona.versions.filter(version => version && typeof version === 'object' && !Array.isArray(version));
@@ -542,33 +424,15 @@ export function parseImportedRoot(text) {
     return { ok: true, root };
 }
 
-/* 고쳐서 새 버전 */
+/* Revise into a new version */
 
-// One block per section the composed prompt actually carries, with the same
-// rules compose() applies: the trimmed body of the active pick, and nothing at
-// all for an empty body or a dead pick. What the revise screen offers for
-// editing has to be exactly what the prompt says, or the user would be revising
-// text that was never sent. Skipped sections keep their picks at save time.
-//
-// variantId names the body the block was built from. The revise screen never
-// needed it, because it only ever ADDS choices; the 전문 screen writes back into
-// the body itself, and without the id a save would land on whatever is picked at
-// save time rather than on the body the user was looking at.
-/* includeEmpty separates the two screens that read this.
-
-   The 고쳐서 새 버전 screen works by dragging a range out of a body, so a body
-   with nothing in it has nothing to offer and is left out. The 전문 screen is
-   the opposite case: it is where a description gets written in the first place,
-   and leaving empty items out of it meant a persona whose items were ALL empty
-   (every new one: makeDefaultPersona seeds thirteen items with '') produced an
-   empty list, which the caller read as "nothing to show" and refused to open.
-   The screen that exists to fill items in was reachable only after the items had
-   already been filled in somewhere else. */
+// One block per section the prompt carries, by compose()'s rules, so edits start from what was
+// sent. variantId pins the full-text screen's save to the body shown; includeEmpty keeps empty
+// bodies for that screen, which is where they get written.
 export function buildReplaceBlocks(persona, includeEmpty) {
     const blocks = [];
     for (const section of persona?.sections ?? []) {
-        const pick = persona.activePicks?.[section.id];
-        const variant = (persona.variants?.[section.id] ?? []).find(entry => entry.id === pick);
+        const variant = liveVariant(persona, section);
         if (!variant) continue;
         const text = (variant.text ?? '').trim();
         if (!text && !includeEmpty) continue;
@@ -577,27 +441,15 @@ export function buildReplaceBlocks(persona, includeEmpty) {
     return blocks;
 }
 
-/* ── 설명문 전문 확인·수정 (user request) ───────────────────────────────────
-   What [저장] on the 전문 screen would do, decided before anything is written.
-   The screen showed one textarea per block, so a write is only safe while the
-   body that block came from is still there AND still the section's active pick:
-   the composed text the user was editing is the picks as they were, and a pick
-   that moved underneath means the text on screen belongs to a body nobody is
-   looking at any more.
-
-   The seam this guards is the one that got past two green unit suites last
-   round: the function and the screen each agreed with themselves about which
-   body index 2 was. Nothing is mutated here, so the caller can snapshot from
-   `before` and the plan can be tested without a persona to write to. */
+// Full-text screen: what saving would write, decided without mutating anything. A block is
+// written only while its body exists and is still the active pick; otherwise it is skipped.
 export function planFullTextSave(persona, blocks, texts) {
     const writes = [];
     const skipped = [];
     (blocks ?? []).forEach((block, index) => {
         const next = texts?.[index];
         if (typeof next !== 'string') return;
-        // buildReplaceBlocks trimmed what it handed the screen, so this compares
-        // against what was DISPLAYED. An untouched block is never written, which
-        // is what keeps a save from stamping every body with a new timestamp.
+        // Compared with the trimmed text displayed; untouched blocks are never written.
         if (next === (block?.text ?? '')) return;
         const section = (persona?.sections ?? []).find(entry => entry.id === block?.sectionId);
         const variant = (persona?.variants?.[block?.sectionId] ?? []).find(entry => entry.id === block?.variantId);
@@ -607,9 +459,7 @@ export function planFullTextSave(persona, blocks, texts) {
             return;
         }
         const before = variant.text ?? '';
-        // The trim above can make an edit that only added surrounding whitespace
-        // come out identical to what is stored. A log line and a history snapshot
-        // for a body that did not change would both be false records.
+        // A whitespace-only edit can equal the stored text; writing it would log a false change.
         if (before === next) return;
         writes.push({
             sectionId: block.sectionId,
@@ -622,19 +472,9 @@ export function planFullTextSave(persona, blocks, texts) {
     return { writes, skipped };
 }
 
-/* ── SillyTavern's own enum controls (user request) ─────────────────────────
-   position and role on the persona descriptor are SillyTavern's enums and their
-   NUMBERS have never been measured on this build. This project has already
-   shipped three guessed values (depth 4, connections, a slash command that does
-   not exist) and all three were wrong, so the numbers are not guessed here
-   either: they are read off SillyTavern's own select, which carries the value
-   and the label for each option together and therefore cannot pair them wrongly.
-
-   Any malformed option refuses the WHOLE select. A partially understood enum is
-   how a wrong mapping gets shipped, and the cost of refusing is a control that
-   says it is unavailable, which is visible and fixable. Takes anything with an
-   options list of {value, textContent}, so the DOM half hands in a select and
-   the test hands in a plain object. */
+// SillyTavern's persona position/role enums, read off its own <select> so values and labels
+// cannot be mispaired; the numbers are never hard-coded. Any malformed option refuses the
+// whole select. Takes anything with options of {value, textContent}.
 export function readSelectOptions(select) {
     const raw = select?.options;
     if (!raw) return null;
@@ -650,15 +490,11 @@ export function readSelectOptions(select) {
         seen.add(number);
         options.push({ value: number, label });
     }
-    // One option is not a choice, and an empty list is not an enum. Either way
-    // there is nothing here worth trusting as SillyTavern's position list.
     return options.length >= 2 ? options : null;
 }
 
-// The depth the user typed. A whole number of messages, so anything else is
-// refused rather than rounded: depth reaches the prompt builder, and a silently
-// coerced 2.7 would place the description somewhere the user did not ask for.
-// No upper bound, because the ceiling is SillyTavern's and was never measured.
+// The typed depth in messages: non-integers are refused, not rounded. No upper bound here;
+// the ceiling is SillyTavern's.
 export function parseDepth(raw) {
     const text = String(raw ?? '').trim();
     if (!/^\d+$/.test(text)) return null;
@@ -666,15 +502,8 @@ export function parseDepth(raw) {
     return Number.isSafeInteger(number) ? number : null;
 }
 
-/* ── Copy one persona's composition onto another (user request) ─────────────
-   duplicatePersona makes the copy; this is where it lands. SillyTavern owns the
-   creation of personas and the API for it has not been measured, so the
-   destination is always a persona that already exists: the caller passes an
-   avatar id SillyTavern listed, and what gets replaced is OUR record for it.
-
-   Returns the copy, or null on every refusal. Copying onto the source would
-   regenerate every id under the user's feet for no gain, which is why the two
-   being equal is a refusal rather than a no-op. */
+// Copies one persona's composition onto another that ST already lists, replacing our record
+// for it. Returns the copy, or null; a copy onto itself is refused as it would only churn ids.
 export function copyPersonaOnto(root, sourceAvatar, destAvatar, makeIdFn, now, detail) {
     if (!root || typeof root !== 'object') return null;
     if (!root.personas || typeof root.personas !== 'object') return null;
@@ -684,43 +513,27 @@ export function copyPersonaOnto(root, sourceAvatar, destAvatar, makeIdFn, now, d
     if (!source) return null;
     const copy = duplicatePersona(source, makeIdFn);
     if (!copy) return null;
-    // What describes the destination's own PICTURE stays with the destination:
-    // its sprite folder, the backup of its original avatar, and which asset is
-    // currently written over it. The copy replaces the persona's text, not its
-    // image file, and dropping the backup record left the original hidden on the
-    // server while the next image apply backed up an already replaced picture.
+    // The destination keeps what describes its own picture (folder, avatar backup, written
+    // asset): the copy replaces the text, not the image file.
     const dest = root.personas[destAvatar];
     if (dest && typeof dest === 'object') {
         if (dest.assetFolderKey) copy.assetFolderKey = dest.assetFolderKey;
         if (dest.avatarBackup) copy.avatarBackup = dest.avatarBackup;
         if (typeof dest.avatarWritten === 'string') copy.avatarWritten = dest.avatarWritten;
     }
-    // So do its names. The per-language names are who the destination IS, not
-    // what it says: carried over, 언어별 이름 자동 적용 renamed the destination to
-    // the source's name, after which the source could not take its own name back
-    // because two personas may not share one.
+    // And its per-language names: copied, auto naming would rename it to the source's name,
+    // which the source could then never take back (names must be unique).
     copy.names = dest && typeof dest === 'object' && dest.names && typeof dest.names === 'object'
         ? { ...dest.names } : {};
-    // On the COPY, not on the source: the source did not have anything happen to
-    // it, and the destination's own log is gone with the record it belonged to.
+    // Logged on the copy: nothing happened to the source.
     addLog(copy, 'persona-copy', detail ?? '', now);
     root.personas[destAvatar] = copy;
     return copy;
 }
 
-// One replacement applied to one block's working text. A non
-// empty replacement goes in verbatim. An empty one is a deletion, and a deletion
-// takes the whitespace run right after the span with it, so cutting a sentence
-// out of the middle does not leave a double space behind; a span at the very end
-// of the block takes the run before it instead. Offsets outside the text are
-// clamped rather than thrown on: they come from a DOM selection, and a stale
-// pair should degrade to a smaller edit, not a crash.
-//
-// The forward absorption stops at a newline UNLESS the span itself begins at
-// the start of its line. Deleting the last sentence of a paragraph
-// must not swallow the blank line after it and fuse two paragraphs; deleting a
-// whole line or paragraph, which is what a span starting at a line start is,
-// should take its line breaks along so no empty line is left behind.
+// Applies one replacement to a block's text; offsets (from a DOM selection) are clamped. A
+// deletion also takes the following whitespace (the preceding run at the end of the text), but
+// stops at a newline unless the span starts a line, so paragraphs never fuse.
 export function applyReplacement(text, start, end, replacement) {
     const source = String(text ?? '');
     const from = Number.isInteger(start) ? Math.max(0, Math.min(start, source.length)) : 0;
@@ -741,30 +554,16 @@ export function applyReplacement(text, start, end, replacement) {
     return source.slice(0, cutFrom) + source.slice(cutTo);
 }
 
-// The save behind [버전으로 저장]. Only the sections whose
-// working text differs get a new choice, labelled with the version's name, and
-// the live pick moves onto it; everything else keeps the pick it has. The new
-// version is then the pick set as it stands, exactly the shape saveAsVersion
-// stores. Nothing existing is overwritten anywhere in this function, which is
-// what makes a stale block harmless: the worst outcome is a new choice beside
-// the old ones.
-//
-// Logging: one variant-add per new choice is written here, where the loop is.
-// The version-create line is left to the caller's commit(), which is the shared
-// path that also saves and composes; writing it here too would log it twice.
-//
-// Returns what happened, or null when the name was empty: { version, changed,
-// skipped }, skipped naming the sections that vanished between the screen
-// opening and the save (the manager is modal, so normally none).
+// Saves the revise screen as a new version: each changed section gets a new choice named after
+// the version and picked; nothing existing is overwritten. Logs variant-add only (the caller's
+// commit() logs version-create). Returns { version, changed, skipped }, or null for no name.
 export function makeReplaceVersion(persona, blocks, workingTexts, name, makeIdFn, now) {
     const trimmed = String(name ?? '').trim();
     if (!persona || !trimmed) return null;
     const changed = [];
     const skipped = [];
     (blocks ?? []).forEach((block, index) => {
-        // A missing working text is an unchanged block, never a deletion: ''
-        // here would grow an empty choice and move the pick onto it for a block
-        // the caller merely failed to hand over.
+        // A missing working text means unchanged, never a deletion.
         const working = String(workingTexts?.[index] ?? block.text);
         if (working === block.text) return;
         const list = persona.variants?.[block.sectionId];
@@ -779,28 +578,11 @@ export function makeReplaceVersion(persona, blocks, workingTexts, name, makeIdFn
         addLog(persona, 'variant-add', trimmed, now);
         changed.push({ sectionId: block.sectionId, variantId });
     });
-    const version = {
-        id: makeId(makeIdFn),
-        name: trimmed,
-        picks: { ...(persona.activePicks ?? {}) },
-        // Null is 전체, and a version made today should keep
-        // using every file including ones uploaded tomorrow.
-        assetSelection: null,
-        // One asset label, or null. null means "leave the picture alone", which is
-        // the opposite of assetSelection's null (= every asset).
-        avatarAsset: null,
-        updatedAt: now,
-    };
-    if (!Array.isArray(persona.versions)) persona.versions = [];
-    persona.versions.push(version);
-    persona.activeVersionId = version.id;
-    return { version, changed, skipped };
+    return { version: addVersion(persona, trimmed, makeIdFn, now), changed, skipped };
 }
 
-// What makeReplaceVersion is about to change, read before it runs, so a save
-// that is refused can take all of it back. Without this the new choices, the
-// moved picks and the version stayed in the live settings, the screen kept its
-// working copies for a retry, and the retry made a second set of everything.
+// Captured before makeReplaceVersion runs, so a refused save can be fully undone instead of
+// leaving everything to be duplicated by a retry.
 export function replaceVersionUndo(persona) {
     return {
         // A copy: makeReplaceVersion writes into the picks object in place.
@@ -826,27 +608,21 @@ export function undoReplaceVersion(persona, result, undo) {
     persona.log = undo.log;
 }
 
-/* ── 버전별 페르소나 이미지 (user request) ───────────────────────────────────
-   A version can name one asset to become the persona's picture when it is
-   applied. Reads go through boundAsset rather than touching the field, for the
-   same reason every other read here does: a settings.json somebody edited by
-   hand can hold anything, and no reader may meet undefined. */
+// Per-version persona picture: the asset that becomes the avatar when the version is applied.
+// Always read through here, since a hand-edited settings.json can hold anything.
 export function boundAsset(version) {
     const label = version?.avatarAsset;
     return typeof label === 'string' && label ? label : null;
 }
 
-/* Whether the binding is a real file name to be matched exactly. Set by every
-   binding made from 0.3.3 on. Bindings older than that may hold 0.2.0's
-   lowercased server label, so they keep findAsset's loose matching; an exact
-   one does not, or deleting pose.png sent its version to pose-1.png, the one
-   file left under the same server label. */
+// Whether the binding is an exact file name (set since 0.3.3). Older ones may hold 0.2.0's
+// lowercased server label and keep findAsset's loose match; exact ones must not, or a deleted
+// pose.png would resolve to pose-1.png.
 export function bindingIsExact(version) {
     return version?.avatarAssetExact === true;
 }
 
-// Returns whether anything changed, so the caller only logs and saves on a real
-// edit. An empty label clears the binding rather than storing an empty string.
+// Returns whether anything changed; an empty label clears the binding.
 export function bindAsset(version, label, now) {
     if (!version || typeof version !== 'object') return false;
     const next = typeof label === 'string' && label.trim() ? label.trim() : null;
@@ -854,37 +630,27 @@ export function bindAsset(version, label, now) {
     version.avatarAsset = next;
     if (next) version.avatarAssetExact = true;
     else delete version.avatarAssetExact;
-    // A framing belongs to the picture it was made on. Kept across a change of
-    // picture it would cut the new one where the old face was.
+    // A crop belongs to the picture it was made on.
     version.avatarCrop = null;
     version.updatedAt = now;
     return true;
 }
 
-// Whether the version's picture is the one on the avatar file: no picture bound,
-// or the label and framing last written match. A tap on the version already
-// applied is skipped only when this holds, so a picture that failed to write can
-// be retried by tapping the version again.
+// Whether the avatar file already shows the version's picture (or none is bound). Re-applying
+// the active version is skipped only then, so a failed picture write can be retried.
 export function pictureSettled(persona, versionId) {
-    const version = (persona?.versions ?? []).find(entry => entry?.id === versionId);
+    const version = findVersion(persona, versionId);
     const label = boundAsset(version);
     return !label || persona?.avatarWritten === writtenKey(label, validCrop(version?.avatarCrop));
 }
 
-/* What the screen may say about a binding, kept apart from what it may not.
-
-   'unknown' exists because a listing we could not read is not the same fact as
-   an asset that is gone, and calling one the other would put a sentence on
-   screen that nobody measured. The version tab does not fetch the asset list on
-   its own, so 'unknown' is the honest answer whenever that list is not loaded
-   for this persona. */
+// The binding's state for the screen. 'unknown' while the asset listing is not loaded:
+// an unread listing is no proof that the asset is gone.
 export function versionImageState(version, assetLabels, listingOk) {
     const label = boundAsset(version);
     if (!label) return { label: null, state: 'none' };
     if (!listingOk) return { label, state: 'unknown' };
-    // The file the binding names, matched the way the write matches it
-    // (assets.js findAsset), so the screen and the write cannot disagree about
-    // whether a binding saved under an older label still points at a file.
+    // Matched as the write matches it (findAsset), so screen and write agree on old labels.
     const hit = resolveBinding(label, assetLabels, bindingIsExact(version));
     return hit ? { label: hit.label, state: 'ok' } : { label, state: 'missing' };
 }
@@ -892,12 +658,8 @@ export function versionImageState(version, assetLabels, listingOk) {
 const resolveBinding = (label, assetLabels, exact) =>
     findAsset((assetLabels ?? []).map(name => ({ label: name, serverLabel: groupLabelOf(name) })), label, exact);
 
-// Which versions point at one asset. The delete confirmation counts them, so a
-// user is told what a removal costs before it happens rather than after. With
-// the listing in hand a binding is resolved the way the screen and the write
-// resolve it, so a binding saved under 0.2.0's lowercased label is counted too;
-// compared exactly, deleting Smile.png warned about none of the versions that
-// showed it.
+// Versions bound to an asset, counted by the delete confirmation. Given the listing, bindings
+// resolve as the write resolves them, so old lowercased labels count too.
 export function versionsBindingAsset(persona, label, assetLabels = null) {
     if (!label) return [];
     const points = Array.isArray(assetLabels)
@@ -908,10 +670,7 @@ export function versionsBindingAsset(persona, label, assetLabels = null) {
 
 /* Drag reorder */
 
-// moveSection above steps one place at a time because the up/down buttons do;
-// a drag lands on an arbitrary index and needs to say so directly.
-// The index is where the section ends up AFTER the move, which is what a drop
-// target means: dragging item 0 onto position 3 leaves it third, not fourth.
+// Moves a section to toIndex, its position after the move (what a drop target means).
 export function reorderSection(persona, sectionId, toIndex) {
     const sections = persona?.sections;
     if (!Array.isArray(sections)) return false;
@@ -924,29 +683,7 @@ export function reorderSection(persona, sectionId, toIndex) {
     return true;
 }
 
-// Bulk tagging over a set of personas. Returns the number actually changed so the
-// screen can report what happened rather than claiming a number it assumed: a tag
-// already present on half the selection is not an edit to those halves.
-export function addTagToAll(personas, tag) {
-    const trimmed = String(tag ?? '').trim();
-    if (!trimmed) return 0;
-    let changed = 0;
-    for (const persona of personas ?? []) {
-        if (addTag(persona, trimmed)) changed++;
-    }
-    return changed;
-}
-
-export function removeTagFromAll(personas, tag) {
-    let changed = 0;
-    for (const persona of personas ?? []) {
-        if (removeTag(persona, tag)) changed++;
-    }
-    return changed;
-}
-
-// Every tag in use across a set, sorted, for the picker the bulk actions offer.
-// Sorted by the locale-independent order so two runs on the same data agree.
+// Every tag in use, in locale-independent order so runs agree.
 export function tagsAcross(personas) {
     const seen = new Set();
     for (const persona of personas ?? []) {
@@ -955,23 +692,14 @@ export function tagsAcross(personas) {
     return [...seen].sort();
 }
 
-/* ── Per-language names (user request) ──────────────────────────────────────
-   The same persona under a different chat language wants a different NAME, not a
-   different persona: 미르 in Korean, Miro in English. The alternates live on
-   our own record; SillyTavern's personas map is untouched until the user actually
-   switches, because that map is what every other part of ST identifies a persona
-   by and rewriting it behind their back would rename the persona everywhere.
-
-   Keyed by the same language codes detectLanguage answers with, so the roster's
-   language chips and this share one vocabulary. */
+// Per-language names, kept on our record and keyed by detectLanguage's codes. ST's personas
+// map changes only on an explicit apply, since ST identifies personas by it everywhere.
 export function setLocalName(persona, lang, name) {
     if (!persona || typeof persona !== 'object') return false;
     const code = String(lang ?? '').trim();
     if (!code) return false;
     if (!persona.names || typeof persona.names !== 'object') persona.names = {};
     const trimmed = String(name ?? '').trim();
-    // An empty name removes the alternate rather than storing a blank one: a blank
-    // would win over the real name the moment that language was chosen.
     if (!trimmed) {
         if (!Object.hasOwn(persona.names, code)) return false;
         delete persona.names[code];
@@ -988,16 +716,11 @@ export function localName(persona, lang, fallback) {
     return (typeof stored === 'string' && stored.trim()) ? stored : (fallback ?? '');
 }
 
-/* ── Size (user request) ─────────────────────────────────────────────────────
-   Characters are exact and free. Tokens are not ours to compute: the count that
-   matters is whatever tokenizer the user's model uses, and guessing it would put
-   a confident wrong number next to a real one. countSize takes the counter as an
-   argument so the DOM half can hand in SillyTavern's if this build has one, and
-   the screen simply omits the token line when it does not. */
+// Size of a text. Tokens come only from SillyTavern's counter when one is passed in (a guessed
+// tokenizer would be confidently wrong); otherwise tokens is null.
 export function countSize(text, tokenCounter) {
     const body = String(text ?? '');
-    // Code points, not UTF-16 units: a surrogate pair is one character to a reader
-    // and 'length' would call an emoji two.
+    // Code points: .length would count an emoji as two.
     const chars = [...body].length;
     let tokens = null;
     if (typeof tokenCounter === 'function') {
@@ -1009,13 +732,8 @@ export function countSize(text, tokenCounter) {
     return { chars, tokens, bytes: new TextEncoder().encode(body).length };
 }
 
-/* ── Duplicate a persona (user request) ──────────────────────────────────────
-   Copies OUR record only, onto an avatar id the caller supplies. Ids inside are
-   regenerated so the two personas cannot share a section or variant id: version
-   picks name variant ids, and a shared id would make one persona's version apply
-   to the other's data. History is deliberately not copied , it is the record of
-   what happened to THAT persona, and duplicating it would attribute edits to a
-   persona that never had them. */
+// Copies our record of a persona with fresh ids, so the two never share section or variant ids
+// that version picks could cross-match. History is not copied: it belongs to the source.
 export function duplicatePersona(source, makeIdFn) {
     if (!source || typeof source !== 'object') return null;
     const idMap = new Map();
@@ -1030,8 +748,7 @@ export function duplicatePersona(source, makeIdFn) {
         activeVersionId: null,
         activePicks: {},
         headingFormat: source.headingFormat ?? 'none',
-        // The own format's title pattern goes with it, or the copy would print
-        // every title as markdown.
+        // The own format's title pattern, or the copy would print every title as markdown.
         ...(source.headingTemplate ? { headingTemplate: { ...source.headingTemplate } } : {}),
         history: {},
         log: [],
@@ -1055,10 +772,7 @@ export function duplicatePersona(source, makeIdFn) {
         const next = { ...version, id: makeId(makeIdFn), picks, tags: [...(version.tags ?? [])] };
         // Asset selections name files in a folder the copy does not own yet.
         next.assetSelection = null;
-        // And so does the bound picture, which the spread above carried across.
-        // The label named a file in the SOURCE persona's sprite folder; the copy
-        // has its own, empty one, so every apply on the copy reported "the file is
-        // gone" about a file that was never supposed to be there.
+        // So does the bound picture, which the spread copied.
         next.avatarAsset = null;
         copy.versions.push(next);
         if (source.activeVersionId === version.id) copy.activeVersionId = next.id;
@@ -1068,9 +782,7 @@ export function duplicatePersona(source, makeIdFn) {
 
 /* Tags */
 
-// Adds one tag to a tags-bearing thing (a persona or a version). Trimmed,
-// refused when empty, deduplicated by exact text: a duplicate tag chip would
-// be two chips the user cannot tell apart. Returns the stored tag or null.
+// Adds a trimmed, non-empty, not yet present tag to a persona or version; returns it or null.
 export function addTag(owner, tag) {
     if (!owner || typeof owner !== 'object') return null;
     const trimmed = String(tag ?? '').trim();
@@ -1089,53 +801,43 @@ export function removeTag(owner, tag) {
     return true;
 }
 
-/* 기본 항목 채우기 */
+/* Fill in default sections */
 
-// Space-insensitive name identity, plus the aliases that map the pre-28 default
-// names onto their successors, so filling cannot create a 기본 정보 next to an
-// old 기본정보 or an 외모 next to an 외형.
+// Space-insensitive name identity, with aliases from old default names to current ones, so
+// filling never adds a renamed default next to its old spelling.
 const SECTION_NAME_ALIASES = Object.freeze({ '외형': '외모', '기본정보': '기본 정보' });
 
 function sectionNameKey(name) {
     const flat = String(name ?? '').replace(/\s+/g, '');
-    // Own keys only, for the same reason as classify.js keysFor.
+    // Own keys only, so prototype names never match.
     const alias = Object.hasOwn(SECTION_NAME_ALIASES, flat) ? SECTION_NAME_ALIASES[flat] : undefined;
     return (alias ?? flat).replace(/\s+/g, '');
 }
 
-// What [기본 항목 채우기] would add, so the confirmation can name the count
-// before anything is written.
+// The default sections fillDefaultSections would add, for the confirmation's count.
 export function missingDefaultSections(persona) {
     const have = new Set((persona?.sections ?? []).map(section => sectionNameKey(section.name)));
     return DEFAULT_SECTION_NAMES.filter(name => !have.has(sectionNameKey(name)));
 }
 
-/* A new item is picked by every saved version too. Applying a version replaces
-   the live picks with the version's own, and a version with no pick for an item
-   added after it was saved dropped that item's text out of the prompt (with a
-   빈 항목 warning for each). classify.js applyResplit already does this. */
+// A new section is picked in every saved version too, or applying an older version would drop
+// its text from the prompt.
 export function pickInEveryVersion(persona, sectionId, variantId) {
     for (const version of Array.isArray(persona?.versions) ? persona.versions : []) {
         if (version && typeof version === 'object') version.picks = { ...(version.picks ?? {}), [sectionId]: variantId };
     }
 }
 
-// Appends every default section the persona does not already have, each with
-// one empty 기본 choice picked, and says what it added. Empty bodies never
-// reach the prompt (compose skips them), so this changes nothing the model
-// sees until the user writes into a new section.
+// Appends the missing default sections, each with one empty choice picked, and returns their
+// names. compose skips empty bodies, so the prompt is unchanged until text is written.
 export function fillDefaultSections(persona, makeIdFn, now) {
     if (!persona) return [];
     const added = [];
     for (const name of missingDefaultSections(persona)) {
-        const sectionId = makeId(makeIdFn);
-        const variantId = makeId(makeIdFn);
         if (!Array.isArray(persona.sections)) persona.sections = [];
         if (!persona.variants) persona.variants = {};
         if (!persona.activePicks) persona.activePicks = {};
-        persona.sections.push({ id: sectionId, name });
-        persona.variants[sectionId] = [{ id: variantId, label: STRINGS.manager.defaultChoiceLabel, text: '', updatedAt: now }];
-        persona.activePicks[sectionId] = variantId;
+        const { sectionId, variantId } = appendSection(persona, { name }, makeIdFn, '', now);
         pickInEveryVersion(persona, sectionId, variantId);
         addLog(persona, 'section-add', name, now);
         added.push(name);
@@ -1145,19 +847,9 @@ export function fillDefaultSections(persona, makeIdFn, now) {
 
 /* Per version asset selection */
 
-// null means 전체, which is not the same as a list naming every file: a file
-// uploaded tomorrow is included by null and excluded by the list. So the list is
-// only materialised when the user actually removes something, and it collapses
-// back to null the moment nothing is excluded any more.
-//
-// The full file list is a parameter because null cannot be turned into "all but
-// this one" without knowing what all is. Passing what the screen is showing keeps
-// the decision in one place.
-// Names are read the way the {{persona_assets}} macro reads them (assets.js
-// selectedNames): selections saved under 0.2.0 and earlier hold SillyTavern's
-// lowercased label, sometimes a group of files, and the box and the prompt must
-// agree. allFilenames is what the screen lists; without it a group label cannot
-// be told from a file of that name.
+// assetSelection null means every asset, including future uploads; a list exists only while
+// something is excluded. Names resolve as {{persona_assets}} does (selectedNames), since
+// selections up to 0.2.0 hold ST's lowercased labels. allFilenames is what the screen lists.
 export function assetSelected(version, filename, allFilenames = []) {
     const selection = version?.assetSelection;
     if (!Array.isArray(selection)) return true;
@@ -1171,10 +863,8 @@ export function toggleAssetSelection(version, filename, allFilenames = []) {
     for (const name of allFilenames ?? []) {
         if (typeof name === 'string' && !all.includes(name)) all.push(name);
     }
-    // Stored names are brought to the folder's own spelling first, a 0.2.0 group
-    // label becoming the files it covers, so the rest of this function can compare
-    // exactly. A name that matches no file (deleted since) is kept as written, so
-    // the same file uploaded again is selected again.
+    // Normalise stored names to the folder's spelling (an old group label becomes its files);
+    // names matching no file are kept so a re-upload is selected again.
     const raw = Array.isArray(version.assetSelection) ? version.assetSelection : null;
     let current = null;
     if (raw !== null) {
@@ -1185,19 +875,17 @@ export function toggleAssetSelection(version, filename, allFilenames = []) {
 
     let next;
     if (current === null) {
-        // Was 전체. The only thing a tap can mean here is "not this one".
+        // Was every asset, so a tap means all but this one.
         next = all.filter(name => name !== filename);
     } else if (current.includes(filename)) {
         next = current.filter(name => name !== filename);
     } else {
-        // Kept in the order the folder lists them, so the stored array reads the
-        // same way the screen does however the boxes were ticked.
+        // In folder order, however the boxes were ticked.
         next = all.filter(name => current.includes(name) || name === filename);
         if (!all.includes(filename)) next.push(filename);
     }
 
-    // Nothing excluded any more, so say 전체 rather than freezing today's folder
-    // contents into the version.
+    // Nothing excluded: back to null rather than freezing today's folder contents.
     if (all.length && next.length === all.length && all.every(name => next.includes(name))) {
         version.assetSelection = null;
         return null;
@@ -1208,17 +896,13 @@ export function toggleAssetSelection(version, filename, allFilenames = []) {
 
 /* Asset tags */
 
-// The folder qualified form, always. The bare form resolves against whoever is
-// active when the message is rendered, so a message written today would show a
-// different persona's picture tomorrow.
+// Always folder-qualified: a bare tag resolves against whoever is active at render time.
 export function insertTagText(folderKey, filename) {
     return `{{pimg::${String(folderKey ?? '')}/${String(filename ?? '')}}}`;
 }
 
-// What a textarea should hold after inserting text at the caret, and where the
-// caret then belongs. Kept pure so the send box path is testable without a DOM;
-// a selection is replaced, and a caret we were given nothing usable for puts the
-// text at the end rather than silently at position zero.
+// The textarea value and caret after inserting text at the caret, replacing any selection;
+// with no usable caret the text goes at the end, not at position zero.
 export function insertAtCursor(value, start, end, text) {
     const source = String(value ?? '');
     const insert = String(text ?? '');
