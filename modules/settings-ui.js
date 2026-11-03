@@ -777,7 +777,7 @@ function buildPanel() {
     /* 설명문: what happens to the text itself. */
     content.append(sectionHead(sections.text));
     content.append(toggleField('autoLocalName', STRINGS.settings.autoLocalName, STRINGS.settings.autoLocalNameHint));
-    content.append(toggleField('splitOnAdopt', STRINGS.settings.splitOnAdopt, STRINGS.settings.splitOnAdoptHint));
+    content.append(toggleField('autoSplitOnAdopt', STRINGS.settings.splitOnAdopt, STRINGS.settings.splitOnAdoptHint));
     content.append(headingFormatField());
 
     /* 에셋: the two macros. */

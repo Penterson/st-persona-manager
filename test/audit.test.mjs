@@ -2,7 +2,7 @@
 // found in 0.2.0 and fixed.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { migrate, makeDefaultPersona, isEmptyPersona, DEFAULT_SECTION_NAMES } from '../modules/store.js';
+import { migrate, makeDefaultPersona, isEmptyPersona, DEFAULT_SECTION_NAMES, DEFAULT_SETTINGS } from '../modules/store.js';
 import { parseImportedRoot, copyPersonaOnto, fillDefaultSections, assetSelected, toggleAssetSelection } from '../modules/manager-pure.js';
 import { splitDescription, applyResplit, planResplit, stripSelfTitle } from '../modules/classify.js';
 import { versionAlreadyApplied, describeSelection } from '../modules/quickbar-pure.js';
@@ -90,4 +90,13 @@ test('asset selections match without case, in the box and in the toggle', () => 
 
 test('an unreadable choice list is not taken for an empty persona', () => {
     assert.equal(isEmptyPersona({ variants: { s: {} } }), false);
+});
+
+test('automatic title split is off by default, and the old always-on switch is retired', () => {
+    assert.equal(DEFAULT_SETTINGS.autoSplitOnAdopt, false);
+    const root = migrate({ schemaVersion: 2, settings: { splitOnAdopt: true }, personas: {} });
+    assert.equal('splitOnAdopt' in root.settings, false);
+    assert.equal(root.settings.autoSplitOnAdopt, false);
+    const chosen = migrate({ schemaVersion: 2, settings: { autoSplitOnAdopt: true }, personas: {} });
+    assert.equal(chosen.settings.autoSplitOnAdopt, true, 'a choice made on the new switch is kept');
 });
