@@ -24,12 +24,12 @@ import {
 } from './state.js';
 import { freshContext } from './ctx.js';
 import {
-    compose, composePicked, composeFrom, hasDiverged, headingLine,
+    compose, composePicked, composeFrom, hasDiverged, headingLine, validTemplate,
     readPlacement, writePlacement,
 } from './compose.js';
 import { addLog, snapshot, enforceGlobalBudget, restore, diffWords, expireOldHistory } from './history.js';
 import { toggleMember, modifiedAt } from './roster.js';
-import { itemsWithText, planResplit, applyResplit } from './classify.js';
+import { itemsWithText, planResplit, applyResplit, splitOwnSections, seedOwnSections, sameText } from './classify.js';
 import {
     validCrop, clampView, cropFromView, viewFromCrop, previewBox, cropPixels, MAX_ZOOM as MAX_FRAMING_ZOOM,
 } from './framing.js';
@@ -2109,6 +2109,71 @@ async function doResplit() {
     }
 }
 
+/* [원래 항목대로] (user request, 2026-11-03). For a persona already managed whose
+   whole description sits in one item: when that text is divided by its own
+   titles, the items are rebuilt from it, named as written, titles printed in
+   its own style. The same rule 관리 시작 now applies by default (state.js
+   seedDescription), offered here for personas taken in before it.
+
+   Refused unless exactly one item holds text, in its live choice only: with
+   text anywhere else, rebuilding would have to decide what to do with it.
+   Refused too when composing the result does not give the same text back. The
+   old body goes into the first new item's history, so 이력 can bring it back. */
+function ownSplitSource(persona) {
+    const holders = (persona.sections ?? []).filter(section =>
+        (persona.variants?.[section.id] ?? []).some(variant => String(variant?.text ?? '').trim()));
+    if (holders.length !== 1) return null;
+    const section = holders[0];
+    const live = (persona.variants?.[section.id] ?? []).find(v => v.id === persona.activePicks?.[section.id]);
+    const others = (persona.variants?.[section.id] ?? []).filter(v => v !== live && String(v?.text ?? '').trim());
+    if (!live || others.length) return null;
+    return { section, variant: live };
+}
+
+async function doOwnSplit() {
+    const s = guardTarget();
+    if (!s) return;
+    const startAvatar = targetAvatar;
+    if (hasUnsavedBody(startAvatar, s.persona)) { notify('warning', STRINGS.manager.resplitDraft); return; }
+    const source = ownSplitSource(s.persona);
+    if (!source) { notify('warning', STRINGS.manager.ownSplitNotOnly); return; }
+    const body = source.variant.text;
+    const own = splitOwnSections(body);
+    if (!own) { notify('info', STRINGS.manager.ownSplitNothing); return; }
+    const trial = structuredClone(s.persona);
+    seedOwnSections(trial, own, freshContext()?.uuidv4);
+    if (!sameText(compose(trial).text, body)) { notify('warning', STRINGS.manager.ownSplitNotExact); return; }
+    const names = trial.sections.map(section => section.name).join(', ');
+    if (!(await askConfirm(STRINGS.manager.confirmOwnSplit(trial.sections.length, names)))) return;
+    const after = guardTarget(startAvatar);
+    if (!after) return;
+    if (hasUnsavedBody(startAvatar, after.persona)) { notify('warning', STRINGS.manager.resplitDraft); return; }
+    const again = ownSplitSource(after.persona);
+    if (!again || again.variant.text !== body) { notify('error', STRINGS.manager.ownSplitNotOnly); scheduleDraw(); return; }
+    const persona = ensureShape(after.persona);
+    const now = Date.now();
+    const oldVariantId = again.variant.id;
+    seedOwnSections(persona, own, freshContext()?.uuidv4, now);
+    // The old body's history follows its text into the first new item, with the
+    // whole old body on top, so 이력 can put everything back.
+    const firstId = persona.activePicks[persona.sections[0].id];
+    const kept = Array.isArray(persona.history?.[oldVariantId]) ? persona.history[oldVariantId] : [];
+    if (!persona.history) persona.history = {};
+    delete persona.history[oldVariantId];
+    if (kept.length) persona.history[firstId] = kept;
+    snapshotKeepingIndex(persona, firstId, body, now, after.settings, { force: true });
+    // Every saved version points at the new items; the old ones are gone.
+    for (const version of persona.versions ?? []) {
+        if (version && typeof version === 'object') version.picks = { ...persona.activePicks };
+    }
+    if (expireOldHistory(after.root, after.settings, now) + enforceGlobalBudget(after.root, after.settings, now)) {
+        historyIndex = null;
+    }
+    openVariant = null;
+    expandedRow = null;
+    if (commit('split-own', names, startAvatar)) notify('success', STRINGS.manager.ownSplitDone(persona.sections.length));
+}
+
 /* ── Size (user request) ─────────────────────────────────────────────────────
    Characters and bytes are ours to count. Tokens are not: the number that
    matters is whatever tokenizer the user's model uses, and this project has
@@ -2377,9 +2442,10 @@ function fullTextScreen(s, writable, reason) {
         wrap.append(foot);
         return wrap;
     }
-    if (headingLine(format, 'x')) wrap.append(noteOf(STRINGS.manager.fullTextHeadingNote));
+    if (headingLine(format, 'x', persona.headingTemplate)) wrap.append(noteOf(STRINGS.manager.fullTextHeadingNote));
+    const untitled = new Set((persona.sections ?? []).filter(section => section?.untitled).map(section => section.id));
     blocks.forEach((block, index) => {
-        const head = headingLine(format, block.sectionName);
+        const head = untitled.has(block.sectionId) ? '' : headingLine(format, block.sectionName, persona.headingTemplate);
         const variant = (persona.variants?.[block.sectionId] ?? []).find(entry => entry.id === block.variantId);
         const caption = head || STRINGS.manager.editorHeading(block.sectionName, variant?.label ?? '');
         wrap.append(el('div', `pm-revise-caption${head ? ' pm-full-heading' : ''}`, caption));
@@ -3813,6 +3879,7 @@ function composeTab(s, writable, reason) {
         actionButton(STRINGS.manager.fullTextOpen, () => openFullText(), true),
         actionButton(STRINGS.manager.fillDefaults, () => doFillDefaults(), writable, '', reason),
         actionButton(STRINGS.manager.resplit, () => doResplit(), writable, STRINGS.manager.resplitTitle, reason),
+        actionButton(STRINGS.manager.ownSplit, () => doOwnSplit(), writable, STRINGS.manager.ownSplitTitle, reason),
     ]));
     if (listUi.compose.open) box.append(listSearchRow('compose'));
 
@@ -3837,24 +3904,30 @@ function headingFormatRow(persona, writable, reason) {
     const row = el('div', 'pm-row pm-manager-headingrow');
     row.append(el('span', 'pm-manager-name', STRINGS.manager.headingFormatLabel));
     const select = el('select', 'pm-manager-select');
-    for (const key of HEADING_FORMATS) {
-        const option = el('option', null, STRINGS.manager.headingFormatNames[key]);
+    // The description's own title style is offered only to a persona that has one.
+    const own = validTemplate(persona.headingTemplate);
+    const formats = own ? [...HEADING_FORMATS, 'own'] : [...HEADING_FORMATS];
+    const formatName = key => (key === 'own'
+        ? STRINGS.manager.headingFormatOwn(persona.headingTemplate.open)
+        : STRINGS.manager.headingFormatNames[key]);
+    for (const key of formats) {
+        const option = el('option', null, formatName(key));
         option.value = key;
         select.append(option);
     }
-    select.value = HEADING_FORMATS.includes(persona.headingFormat) ? persona.headingFormat : 'none';
+    select.value = formats.includes(persona.headingFormat) ? persona.headingFormat : 'none';
     select.disabled = !writable;
     select.setAttribute('aria-label', STRINGS.manager.headingFormatAria);
     select.addEventListener('change', () => {
         const wanted = select.value;
-        if (!HEADING_FORMATS.includes(wanted)) return;
+        if (!formats.includes(wanted)) return;
         // Re-resolved rather than written through the persona this row was drawn
         // from: the header can move the target between the draw and the tap, and
         // this write changes what the prompt says.
         const after = guardTarget();
         if (!after) return;
         ensureShape(after.persona).headingFormat = wanted;
-        commit('heading-format', STRINGS.manager.headingFormatNames[wanted]);
+        commit('heading-format', formatName(wanted));
     });
     row.append(select);
     const box = el('div', 'pm-manager-headingbox');

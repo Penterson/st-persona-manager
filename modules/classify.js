@@ -388,7 +388,7 @@ export function applyResplit(persona, plan, makeIdFn, now, defaultFormat, snapsh
     }
     // The titles were part of the text until now. Taken out of the bodies under a
     // heading format of none, the item names would vanish from the prompt.
-    if (persona.headingFormat !== 'markdown' && persona.headingFormat !== 'plain') {
+    if (persona.headingFormat !== 'markdown' && persona.headingFormat !== 'plain' && persona.headingFormat !== 'own') {
         const written = plan.sources.map(source => source.split.format).find(Boolean);
         persona.headingFormat = written ?? (defaultFormat && defaultFormat !== 'none' ? defaultFormat : 'plain');
         // Items that already carried their own title as their first line would
@@ -408,4 +408,125 @@ export function applyResplit(persona, plan, makeIdFn, now, defaultFormat, snapsh
         if (text && typeof snapshotFn === 'function') snapshotFn(variantId, text);
     }
     return [...before.keys()];
+}
+
+/* ── 설명문의 원래 항목 그대로 (user request, 2026-11-03) ──────────────────────
+   A description that is already divided keeps its own division: the items are
+   its own sections, named exactly as its titles are written, in its order, and
+   the titles keep their own look. Nothing is matched to the shipped item names
+   and no empty shipped items are added.
+
+   Only one title style counts, the first of these the text uses at least twice:
+   markdown headings (at the shallowest level used twice), <이름>…</이름> pairs,
+   [이름] lines, **이름** lines, 이름: lines. Mixing styles, or using one only
+   once, is not taken for a division.
+
+   Answers null, or { preamble, parts: [{ name, body }], template: { open, close } }.
+   The caller checks that composing the result gives the original text back
+   (sameText below) and keeps the description whole when it does not. */
+const OWN_FORMS = [
+    { kind: 'markdown', re: /^(#{1,6})\s+(.+?)\s*$/ },
+    { kind: 'angle', re: /^()<\s*([^<>/=]+?)\s*>$/ },
+    { kind: 'bracket', re: /^()\[\s*([^\][:：,，{}]+?)\s*\]$/ },
+    { kind: 'bracket', re: /^()【\s*(.+?)\s*】$/ },
+    { kind: 'bold', re: /^()\*\*\s*([^*:：]+?)\s*[:：]?\s*\*\*$/ },
+    { kind: 'plain', re: /^()([^:：#*\[\]<>]{1,30}?)\s*[:：]$/ },
+];
+const OWN_ORDER = ['markdown', 'angle', 'bracket', 'bold', 'plain'];
+
+function ownTitle(line) {
+    const trimmed = line.trim();
+    if (!trimmed) return null;
+    for (const form of OWN_FORMS) {
+        const m = form.re.exec(trimmed);
+        if (!m) continue;
+        const name = m[2].trim();
+        if (!name || name.length > TITLE_MAX) return null;
+        return { kind: form.kind, level: m[1].length, name, raw: trimmed };
+    }
+    return null;
+}
+
+export function splitOwnSections(text) {
+    const lines = String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
+    const titles = lines.map(ownTitle);
+    const closes = lines.map(line => /^<\/\s*([^<>]+?)\s*>$/.exec(line.trim())?.[1]?.trim() ?? null);
+    const isTitle = (title, kind, level) => !!title && title.kind === kind && (kind !== 'markdown' || title.level === level);
+    let chosen = null;
+    for (const kind of OWN_ORDER) {
+        if (kind === 'markdown') {
+            const levels = [...new Set(titles.filter(t => t?.kind === 'markdown').map(t => t.level))].sort((a, b) => a - b);
+            const level = levels.find(l => titles.filter(t => isTitle(t, 'markdown', l)).length >= 2);
+            if (level) { chosen = { kind, level }; break; }
+            continue;
+        }
+        let count = titles.filter(t => isTitle(t, kind)).length;
+        // An opening tag counts only when its closing tag follows.
+        if (kind === 'angle') {
+            count = titles.filter((t, i) => isTitle(t, 'angle') && closes.slice(i + 1).includes(t.name)).length;
+        }
+        if (count >= 2) { chosen = { kind }; break; }
+    }
+    if (!chosen) return null;
+
+    const preamble = [];
+    const parts = [];
+    let current = null;
+    lines.forEach((line, i) => {
+        const title = titles[i];
+        if (isTitle(title, chosen.kind, chosen.level)) {
+            current = { name: title.name, raw: title.raw, lines: [], closed: false, closeRaw: null };
+            parts.push(current);
+            return;
+        }
+        if (current && !current.closed && chosen.kind === 'angle' && closes[i] === current.name) {
+            current.closed = true;
+            current.closeRaw = line.trim();
+            return;
+        }
+        (current ? current.lines : preamble).push(line);
+    });
+    // The pattern is read off the first title, with its name taken out.
+    const first = parts[0];
+    const template = {
+        open: first.raw.replace(first.name, '{name}'),
+        close: first.closeRaw ? first.closeRaw.replace(first.name, '{name}') : '',
+    };
+    return {
+        preamble: preamble.join('\n').trim(),
+        parts: parts.map(part => ({ name: part.name, body: part.lines.join('\n').trim() })),
+        template,
+    };
+}
+
+/* Replaces the persona's items with the description's own. Every item gets one
+   choice holding its text, picked. The text before the first title becomes an
+   untitled first item, so it is printed without a title, as it was written. */
+export function seedOwnSections(persona, split, makeIdFn, now = Date.now()) {
+    persona.sections = [];
+    persona.variants = {};
+    persona.activePicks = {};
+    const add = (name, body, untitled) => {
+        const sid = makeId(makeIdFn);
+        const vid = makeId(makeIdFn);
+        persona.sections.push(untitled ? { id: sid, name, untitled: true } : { id: sid, name });
+        persona.variants[sid] = [{ id: vid, label: STRINGS.manager.defaultChoiceLabel, text: body, updatedAt: now }];
+        persona.activePicks[sid] = vid;
+    };
+    if (split.preamble) add(STRINGS.classify.preambleName, split.preamble, true);
+    for (const part of split.parts) add(part.name, part.body, false);
+    persona.headingFormat = 'own';
+    persona.headingTemplate = { open: split.template.open, close: split.template.close ?? '' };
+    return persona.sections.length;
+}
+
+// Whether two descriptions say the same thing line for line. Blank lines and
+// trailing spaces do not count: the prompt reads the same either way, and the
+// composer always separates items with one blank line.
+export function sameText(a, b) {
+    const lines = text => String(text ?? '').replace(/\r\n?/g, '\n').split('\n')
+        .map(line => line.replace(/[ \t]+$/, '')).filter(line => line.trim() !== '');
+    const left = lines(a);
+    const right = lines(b);
+    return left.length === right.length && left.every((line, i) => line === right[i]);
 }

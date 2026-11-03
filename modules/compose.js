@@ -25,22 +25,47 @@ export function markComposed(persona, text) {
 // adds none. Exported because the 전문 screen shows the composed text the way the
 // prompt receives it, and a second copy of this rule over there would be free to
 // drift away from the one the prompt actually uses.
-export function headingLine(format, name) {
+/* 'own' is the description's own title pattern, kept when 관리 시작 found the
+   description already divided (classify.js splitOwnSections): template.open is
+   the title line with the name replaced by {name} ("[{name}]", "### {name}",
+   "<{name}>"), template.close the line that ends a block ("</{name}>") or ''.
+   A template that cannot be read prints the markdown title, never nothing. */
+export function validTemplate(template) {
+    return !!template && typeof template.open === 'string' && template.open.includes('{name}')
+        && (template.close === undefined || typeof template.close === 'string');
+}
+
+const fill = (pattern, name) => String(pattern ?? '').split('{name}').join(name);
+
+export function headingLine(format, name, template) {
     if (format === 'plain') return `${name}:`;
     if (format === 'markdown') return `## ${name}`;
+    if (format === 'own') return validTemplate(template) ? fill(template.open, name) : `## ${name}`;
     return '';
 }
 
+// The line that closes a block, for the own format only.
+export function closingLine(format, name, template) {
+    if (format !== 'own' || !validTemplate(template) || !template.close) return '';
+    return fill(template.close, name);
+}
+
 // The one join rule, so nothing that renders the composed description can
-// disagree with what gets written into SillyTavern. parts are {name, text} in
-// prompt order, and an empty body contributes nothing at all, heading included.
-function joinBlocks(headingFormat, parts) {
+// disagree with what gets written into SillyTavern. parts are {name, text,
+// untitled} in prompt order, and an empty body contributes nothing at all,
+// heading included. An untitled part (the text before the first title, under
+// the own format) prints its body alone.
+function joinBlocks(persona, parts) {
+    const format = persona?.headingFormat;
+    const template = persona?.headingTemplate;
     const out = [];
     for (const part of parts) {
         const body = (part?.text ?? '').trim();
         if (!body) continue;
-        const head = headingLine(headingFormat, part?.name ?? '');
-        out.push(head ? `${head}\n${body}` : body);
+        const name = part?.name ?? '';
+        const head = part?.untitled ? '' : headingLine(format, name, template);
+        const close = part?.untitled ? '' : closingLine(format, name, template);
+        out.push([head, body, close].filter(Boolean).join('\n'));
     }
     return out.join('\n\n');
 }
@@ -123,9 +148,9 @@ export function composePicked(persona, picks) {
         const pick = picks?.[section.id];
         const variant = (persona.variants?.[section.id] ?? []).find(v => v.id === pick);
         if (!variant) { missing.push(section.name); continue; }
-        parts.push({ name: section.name, text: variant.text ?? '' });
+        parts.push({ name: section.name, text: variant.text ?? '', untitled: section.untitled === true });
     }
-    return { text: joinBlocks(persona?.headingFormat, parts), missing };
+    return { text: joinBlocks(persona, parts), missing };
 }
 
 // The same composition over the working copies held by a screen that is editing
@@ -134,11 +159,13 @@ export function composePicked(persona, picks) {
 // it was stored. The answer is what the prompt would carry if the screen saved
 // right now, which is the number the size line reports.
 export function composeFrom(persona, blocks, texts) {
+    const untitled = new Set((persona?.sections ?? []).filter(section => section?.untitled === true).map(section => section.id));
     const parts = (blocks ?? []).map((block, index) => ({
         name: block?.sectionName ?? '',
         text: typeof texts?.[index] === 'string' ? texts[index] : (block?.text ?? ''),
+        untitled: untitled.has(block?.sectionId),
     }));
-    return joinBlocks(persona?.headingFormat, parts);
+    return joinBlocks(persona, parts);
 }
 
 function ensureDescriptor(pu, avatarId) {

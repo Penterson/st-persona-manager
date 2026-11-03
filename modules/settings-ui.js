@@ -10,7 +10,7 @@
 // Same rule as the other two screens: no handler here closes over a context, a
 // state snapshot or a node. Everything is looked up again when it runs, which is
 // why refreshSettings queries the panel rather than keeping the fields it built.
-import { MODULE_NAME, makeId, pruneEmpty, HEADING_FORMATS, TILE_SHAPES } from './store.js';
+import { MODULE_NAME, makeId, pruneEmpty, HEADING_FORMATS, TILE_SHAPES, ADOPT_MODES } from './store.js';
 import { getRoot, getState, readUsageBytes, refresh } from './state.js';
 import { freshContext, getPrecisePath, avatarBlockReport } from './ctx.js';
 import { addLog, expireOldHistory, enforceGlobalBudget } from './history.js';
@@ -271,6 +271,26 @@ function tileShapeField() {
         syncFields();
     });
     return rowOf(STRINGS.settings.rosterTileShape, select, STRINGS.settings.rosterTileShapeHint);
+}
+
+// How 관리 시작 takes a description in (state.js seedDescription).
+function adoptModeField() {
+    const select = el('select', 'pm-settings-select');
+    select.dataset.pmKey = 'adoptSplitMode';
+    for (const value of ADOPT_MODES) {
+        const option = el('option', null, STRINGS.settings.adoptModeNames[value]);
+        option.value = value;
+        select.append(option);
+    }
+    select.addEventListener('change', () => {
+        const root = getRoot();
+        if (!root || root.readOnly) { syncFields(); return; }
+        if (!ADOPT_MODES.includes(select.value)) { syncFields(); return; }
+        root.settings.adoptSplitMode = select.value;
+        save();
+        syncFields();
+    });
+    return rowOf(STRINGS.settings.splitOnAdopt, select, STRINGS.settings.splitOnAdoptHint);
 }
 
 function headingFormatField() {
@@ -777,7 +797,7 @@ function buildPanel() {
     /* 설명문: what happens to the text itself. */
     content.append(sectionHead(sections.text));
     content.append(toggleField('autoLocalName', STRINGS.settings.autoLocalName, STRINGS.settings.autoLocalNameHint));
-    content.append(toggleField('autoSplitOnAdopt', STRINGS.settings.splitOnAdopt, STRINGS.settings.splitOnAdoptHint));
+    content.append(adoptModeField());
     content.append(headingFormatField());
 
     /* 에셋: the two macros. */
