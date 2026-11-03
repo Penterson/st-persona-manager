@@ -90,8 +90,8 @@ export function labelOf(filename) {
    can group joy-1.png and joy-2.png as one emotion (src/endpoints/sprites.js,
    read 2026-11-03). For this extension that grouping is destructive:
    pm-backup-1730000000000.png listed as "pm", so the backup filter never
-   recognised it, [원본 되돌리기] could not find it, and deleting "포즈-1" sent
-   spriteName "포즈", which matches no file. The file name is exact on every
+   recognised it, [원본 되돌리기] could not find it, and deleting 포즈-1 sent
+   spriteName 포즈, which matches no file. The file name is exact on every
    build, so it is the identity every screen and every request uses. */
 export function assetNameFromPath(path) {
     const raw = String(path ?? '').split('?')[0].split('#')[0];
@@ -106,15 +106,45 @@ export function assetNameFromPath(path) {
     return labelOf(decoded) || null;
 }
 
+/* SillyTavern's own grouping of a file name (sprites.js): lowercased and cut at
+   the first dash or dot. Only used to recognise names saved under it by 0.2.0
+   and earlier. */
+export function groupLabelOf(name) {
+    const lower = String(name ?? '').toLowerCase();
+    return lower.match(/^(.+?)(?:[-.].*?)?$/)?.[1] ?? lower;
+}
+
+/* The files a stored asset selection covers, out of allNames. Compared without
+   case, because selections saved under 0.2.0 and earlier hold the server's
+   lowercased label. Such a label can also be SillyTavern's group of several
+   files (pose for pose-1.png and pose-2.png), and then it covers the whole group:
+   matched one to one, it matched nothing, and both pictures silently left the
+   prompt. Only when no file carries that name itself, so a selection of
+   pose.png never reaches pose-1.png. */
+export function selectedNames(selection, allNames) {
+    const names = (Array.isArray(allNames) ? allNames : []).filter(name => typeof name === 'string');
+    const exact = new Set(names.map(name => name.toLowerCase()));
+    const out = new Set();
+    for (const entry of Array.isArray(selection) ? selection : []) {
+        const wanted = String(entry ?? '').toLowerCase();
+        const covers = exact.has(wanted)
+            ? name => name.toLowerCase() === wanted
+            : name => groupLabelOf(name) === wanted;
+        for (const name of names) if (covers(name)) out.add(name);
+    }
+    return out;
+}
+
 /* Finds an entry in a listing by name. Exact first; then without case, because
    bindings saved under 0.2.0 and earlier hold the server's lowercased label;
    then by that server label, when exactly one file carries it, for the same
-   reason. A label that could mean two files means neither. */
-export function findAsset(list, label) {
+   reason. A label that could mean two files means neither. exact (a binding
+   made from 0.3.3 on, manager-pure.js bindingIsExact) skips both fallbacks. */
+export function findAsset(list, label, exactOnly = false) {
     if (!Array.isArray(list) || !label) return null;
     const wanted = String(label);
     const exact = list.find(asset => asset?.label === wanted);
-    if (exact) return exact;
+    if (exact || exactOnly) return exact ?? null;
     const lower = wanted.toLowerCase();
     const folded = list.filter(asset => String(asset?.label ?? '').toLowerCase() === lower);
     if (folded.length === 1) return folded[0];
@@ -268,17 +298,6 @@ export async function listAssets(ctx, folderKey) {
    needs. The first entry is what this extension has always sent. */
 const SPRITE_FILE_FIELDS = Object.freeze(['file', 'avatar', 'spriteFile', 'image']);
 let spriteFileField = null;
-/* Set when a full round of the list failed on its own terms - every field name
-   tried and every one rejected for a reason that was ABOUT the field. That is an
-   answer about the server, not about the file, so the next file does not ask it
-   again: five photos chosen at once put twenty uploads of the same bytes onto
-   the wire from a phone to a Termux server and answered with five failures.
-
-   Deliberately not set when the loop broke early. A 401, or a server that is not
-   there, says nothing about field names, and the next attempt has to start the
-   list from the top - which is the same reason spriteFileField is forgotten on
-   failure a few lines below. */
-let spriteFieldsExhausted = false;
 
 function spriteBody(field, folderKey, file) {
     const body = new FormData();
@@ -288,12 +307,22 @@ function spriteBody(field, folderKey, file) {
     return body;
 }
 
-export async function uploadAsset(ctx, folderKey, file) {
+/* `batch` is one object shared by the files of one selection. When a full round
+   of the list fails for one file, the batch is marked and the next file of the
+   same selection asks once instead of four times: five photos chosen at once
+   used to put twenty uploads of the same bytes onto the wire from a phone to a
+   Termux server. The mark lives only as long as the selection. It used to be
+   module state, so one bad round (a full disk, a proxy 502, a file the server
+   refuses) left every later upload of the session trying only the first field
+   name, which this device rejects, until a reload. Deliberately not set when the
+   loop broke early: a 401, or a server that is not there, says nothing about
+   field names. */
+export async function uploadAsset(ctx, folderKey, file, batch = {}) {
     const fields = spriteFileField ? [spriteFileField]
-        // One field, not four, once the list has been through and failed. The
-        // first entry is what this extension has always sent, so the message the
-        // user gets is still about the request they would have made anyway.
-        : spriteFieldsExhausted ? [SPRITE_FILE_FIELDS[0]]
+        // One field, not four, once the list has been through and failed for
+        // this selection. The first entry is what this extension has always
+        // sent, so the message is still about the request the user would expect.
+        : batch.exhausted ? [SPRITE_FILE_FIELDS[0]]
             : SPRITE_FILE_FIELDS;
     let lastStatus = 0;
     let ranOut = true;
@@ -307,7 +336,7 @@ export async function uploadAsset(ctx, folderKey, file) {
             // Remembered only on a real success, so a build that answers 200 to
             // the first field never pays for the rest of the list again.
             spriteFileField = field;
-            spriteFieldsExhausted = false;
+            batch.exhausted = false;
             markFolderChanged(folderKey);
             return field;
         }
@@ -323,7 +352,7 @@ export async function uploadAsset(ctx, folderKey, file) {
     spriteFileField = null;
     // Every name tried, every one rejected over the name itself. Recorded so the
     // next file in the same selection asks once instead of four times.
-    if (ranOut && fields.length > 1) spriteFieldsExhausted = true;
+    if (ranOut && fields.length > 1) batch.exhausted = true;
     // The folder goes in the message. Every field name failing means the problem
     // is not the field, and the next thing anybody would ask is what folder the
     // server was asked to write into. A failure the user can screenshot is worth
@@ -337,7 +366,6 @@ export function resetAssetProbes() {
     // load that a picture was kept when nothing was written down.
     backedUpThisSession.clear();
     spriteFileField = null;
-    spriteFieldsExhausted = false;
     shownSizes.clear();
     folderStamps.clear();
 }
@@ -511,18 +539,31 @@ export async function fetchAssetFile(path, label) {
    it. A fixed name meant every backup landed on the same label, so a second
    backup would replace the first - and the first is the only one holding the
    picture that existed before this extension touched it. */
+/* The picture on the avatar now, for the backup. The file itself first, from
+   where SillyTavern's own persona list draws it (personas.js getUserAvatar:
+   'User Avatars/' + file, read in the 1.19.0 source). The thumbnail is
+   SillyTavern's resized and cropped copy (src/endpoints/thumbnails.js), so a
+   backup taken from it came back from [원본 되돌리기] as a small picture, not
+   the original. It stays as the fallback for a build that serves the file
+   somewhere else. source says which one was kept. */
 export async function captureAvatarFile(ctx, avatarId, stamp) {
-    if (typeof ctx?.getThumbnailUrl !== 'function') return null;
-    let url;
-    try { url = ctx.getThumbnailUrl('persona', avatarId); } catch { return null; }
-    if (!url) return null;
+    const urls = [{ url: `User Avatars/${encodeURIComponent(avatarId)}`, source: 'original' }];
     try {
-        const res = await fetch(url, { cache: 'no-store' });
-        if (!res.ok) return null;
-        const blob = await res.blob();
-        const label = `${BACKUP_PREFIX}${stamp}`;
-        return { file: new File([blob], `${label}.png`, { type: blob.type || 'image/png' }), label };
-    } catch { return null; }
+        const thumb = typeof ctx?.getThumbnailUrl === 'function' ? ctx.getThumbnailUrl('persona', avatarId) : null;
+        if (thumb) urls.push({ url: thumb, source: 'thumbnail' });
+    } catch { /* the original alone */ }
+    const label = `${BACKUP_PREFIX}${stamp}`;
+    for (const { url, source } of urls) {
+        try {
+            const res = await fetch(url, { cache: 'no-store' });
+            if (!res.ok) continue;
+            const blob = await res.blob();
+            // A server that answers a missing file with a page is not a picture.
+            if (!blob.size || (blob.type && !blob.type.startsWith('image/'))) continue;
+            return { file: new File([blob], `${label}.png`, { type: blob.type || 'image/png' }), label, source };
+        } catch { /* the next address */ }
+    }
+    return null;
 }
 
 /* One picture write at a time.
@@ -547,6 +588,19 @@ function queueImageWrite(job) {
     // Never rejects, so one failure cannot poison every later write.
     imageChain = run.then(() => undefined, () => undefined);
     return run;
+}
+
+/* [교체]: the picked picture onto the avatar, with or without a crop. It writes
+   the same file a version's picture and a restore write, so it takes its turn in
+   the same queue: two POSTs to one file racing left avatarWritten naming a
+   picture the file no longer held. onWritten runs inside the turn, after a
+   successful write, so the next job in the queue sees what it changed. */
+export function replacePersonaAvatar(ctx, avatarId, file, crop, onWritten) {
+    return queueImageWrite(async () => {
+        const result = await uploadPersonaAvatar(ctx, avatarId, file, crop);
+        if (result?.ok) onWritten?.();
+        return result;
+    });
 }
 
 /* Puts a kept picture back onto the avatar.
@@ -617,7 +671,7 @@ export async function imageSize(file) {
      { ok: true, backup }     written; backup is the record of a backup made now
    Every answer past the backup step also carries `backup`, because by then the
    copy is on the server whatever happened next. */
-export async function applyBoundImage({ ctx, root, persona, avatarId, label, crop, force, known, now }) {
+export async function applyBoundImage({ ctx, root, persona, avatarId, label, exact = false, crop, force, known, now }) {
     if (!label) return { skipped: 'none' };
     // The label alone said nothing about framing: the same picture framed anew
     // has to be written again.
@@ -638,7 +692,7 @@ export async function applyBoundImage({ ctx, root, persona, avatarId, label, cro
             // listAssets hands back the server's own entries, and .label is the name
             // every other screen here shows, so a binding stored from one of those
             // screens matches on the same field it was taken from.
-            const hit = findAsset(list, label);
+            const hit = findAsset(list, label, exact);
             if (!hit) return { error: 'missing', detail: label };
 
             /* The avatar file is overwritten, so the picture that is there now is
@@ -665,7 +719,7 @@ export async function applyBoundImage({ ctx, root, persona, avatarId, label, cro
                     backedUpThisSession.delete(avatarId);
                     return { error: 'backup', detail: String(e?.message ?? e) };
                 }
-                backup = { label: captured.label, at: now, source: 'thumbnail' };
+                backup = { label: captured.label, at: now, source: captured.source };
             }
 
             /* Every exit from here on carries the backup, because by here the file
@@ -718,13 +772,13 @@ function activeAssetNames(s) {
     // picture the user replaced, and naming one in the prompt invites the model
     // to draw it back into the chat.
     const names = withoutBackups(s.assetNames);
+    // v?.id: a hand-edited null version entry survives migrate, and a throw here
+    // happens inside SillyTavern's prompt building.
     const selection = (s.persona?.versions ?? [])
-        .find(v => v.id === s.persona?.activeVersionId)?.assetSelection;
+        .find(v => v?.id === s.persona?.activeVersionId)?.assetSelection;
     if (!Array.isArray(selection)) return names;
-    // Without case: selections saved under 0.2.0 and earlier hold the server's
-    // lowercased label rather than the file name.
-    const chosen = new Set(selection.map(name => String(name).toLowerCase()));
-    return names.filter(name => chosen.has(String(name).toLowerCase()));
+    const chosen = selectedNames(selection, s.assetNames);
+    return names.filter(name => chosen.has(name));
 }
 
 export function registerAssetMacros(ctx, getState) {

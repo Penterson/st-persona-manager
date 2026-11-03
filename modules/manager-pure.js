@@ -2,10 +2,11 @@
 // Nothing here touches the DOM, so 검사/manager.test.mjs can import it in plain
 // Node. The DOM half lives in manager.js and must never be imported by a test.
 import { addLog } from './history.js';
-import { DEFAULT_SETTINGS, DEFAULT_SECTION_NAMES, SCHEMA_VERSION, makeId, migrate } from './store.js';
+import { DEFAULT_SETTINGS, DEFAULT_SECTION_NAMES, SCHEMA_VERSION, makeId, migrate, HEADING_FORMATS, TILE_SHAPES } from './store.js';
+import { SORT_KEYS } from './roster.js';
 import { STRINGS } from './strings.js';
 import { validCrop, writtenKey } from './framing.js';
-import { findAsset } from './assets.js';
+import { findAsset, groupLabelOf, selectedNames } from './assets.js';
 
 // What a version's slot reads when its pick names nothing that still exists.
 // The slot says 없음 and is never filled in for the user.
@@ -449,6 +450,17 @@ export function serializeRoot(root) {
 //
 // Nothing here writes anywhere. The caller installs the root it gets back, which
 // is what keeps the decision testable without a SillyTavern to install into.
+// The settings that are one of a fixed set, with the set the drawer and the
+// screens offer.
+const SETTING_CHOICES = Object.freeze({
+    assetStyle: ['plain', 'bordered', 'polaroid'],
+    rosterTileShape: TILE_SHAPES,
+    defaultHeadingFormat: HEADING_FORMATS,
+    sortBy: SORT_KEYS,
+    rosterViewMode: ['list', 'tiles', 'tilesNamed'],
+    pickerViewMode: ['list', 'tiles', 'tilesNamed'],
+});
+
 export function parseImportedRoot(text) {
     let parsed;
     try {
@@ -509,6 +521,16 @@ export function parseImportedRoot(text) {
             root.settings.rosterTileColumns = DEFAULT_SETTINGS.rosterTileColumns;
         } else {
             root.settings.rosterTileColumns = Number(root.settings.rosterTileColumns);
+        }
+        // Choices and switches get the same gate the numbers get: a file saying
+        // rosterTileShape 'hexagon' or autoLocalName 'yes' installed as written,
+        // and the drawer showed a blank select or a ticked box for something that
+        // is not a choice at all, so it could not say what was in effect.
+        for (const [key, allowed] of Object.entries(SETTING_CHOICES)) {
+            if (Object.hasOwn(root.settings, key) && !allowed.includes(root.settings[key])) root.settings[key] = DEFAULT_SETTINGS[key];
+        }
+        for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
+            if (typeof value === 'boolean' && typeof root.settings[key] !== 'boolean') root.settings[key] = value;
         }
     }
     // Groups and versions that are not objects crash the roster and the version
@@ -814,6 +836,15 @@ export function boundAsset(version) {
     return typeof label === 'string' && label ? label : null;
 }
 
+/* Whether the binding is a real file name to be matched exactly. Set by every
+   binding made from 0.3.3 on. Bindings older than that may hold 0.2.0's
+   lowercased server label, so they keep findAsset's loose matching; an exact
+   one does not, or deleting pose.png sent its version to pose-1.png, the one
+   file left under the same server label. */
+export function bindingIsExact(version) {
+    return version?.avatarAssetExact === true;
+}
+
 // Returns whether anything changed, so the caller only logs and saves on a real
 // edit. An empty label clears the binding rather than storing an empty string.
 export function bindAsset(version, label, now) {
@@ -821,6 +852,8 @@ export function bindAsset(version, label, now) {
     const next = typeof label === 'string' && label.trim() ? label.trim() : null;
     if (boundAsset(version) === next) return false;
     version.avatarAsset = next;
+    if (next) version.avatarAssetExact = true;
+    else delete version.avatarAssetExact;
     // A framing belongs to the picture it was made on. Kept across a change of
     // picture it would cut the new one where the old face was.
     version.avatarCrop = null;
@@ -852,22 +885,25 @@ export function versionImageState(version, assetLabels, listingOk) {
     // The file the binding names, matched the way the write matches it
     // (assets.js findAsset), so the screen and the write cannot disagree about
     // whether a binding saved under an older label still points at a file.
-    const hit = findAsset((assetLabels ?? []).map(name => ({ label: name, serverLabel: groupLabel(name) })), label);
+    const hit = resolveBinding(label, assetLabels, bindingIsExact(version));
     return hit ? { label: hit.label, state: 'ok' } : { label, state: 'missing' };
 }
 
-// SillyTavern's own grouping of a file name (sprites.js): lowercased and cut at
-// the first dash or dot. Only used to recognise bindings saved under it.
-function groupLabel(name) {
-    const lower = String(name ?? '').toLowerCase();
-    return lower.match(/^(.+?)(?:[-\\.].*?)?$/)?.[1] ?? lower;
-}
+const resolveBinding = (label, assetLabels, exact) =>
+    findAsset((assetLabels ?? []).map(name => ({ label: name, serverLabel: groupLabelOf(name) })), label, exact);
 
 // Which versions point at one asset. The delete confirmation counts them, so a
-// user is told what a removal costs before it happens rather than after.
-export function versionsBindingAsset(persona, label) {
+// user is told what a removal costs before it happens rather than after. With
+// the listing in hand a binding is resolved the way the screen and the write
+// resolve it, so a binding saved under 0.2.0's lowercased label is counted too;
+// compared exactly, deleting Smile.png warned about none of the versions that
+// showed it.
+export function versionsBindingAsset(persona, label, assetLabels = null) {
     if (!label) return [];
-    return (persona?.versions ?? []).filter(version => boundAsset(version) === label);
+    const points = Array.isArray(assetLabels)
+        ? version => resolveBinding(boundAsset(version), assetLabels, bindingIsExact(version))?.label === label
+        : version => boundAsset(version) === label;
+    return (persona?.versions ?? []).filter(version => version && points(version));
 }
 
 /* Drag reorder */
@@ -1117,15 +1153,16 @@ export function fillDefaultSections(persona, makeIdFn, now) {
 // The full file list is a parameter because null cannot be turned into "all but
 // this one" without knowing what all is. Passing what the screen is showing keeps
 // the decision in one place.
-// Names compare without case, the way the {{persona_assets}} macro reads them
-// (assets.js activeAssetNames): selections saved under 0.2.0 and earlier hold
-// SillyTavern's lowercased label, and the box and the prompt must agree.
-const sameName = (a, b) => String(a ?? '').toLowerCase() === String(b ?? '').toLowerCase();
-
-export function assetSelected(version, filename) {
+// Names are read the way the {{persona_assets}} macro reads them (assets.js
+// selectedNames): selections saved under 0.2.0 and earlier hold SillyTavern's
+// lowercased label, sometimes a group of files, and the box and the prompt must
+// agree. allFilenames is what the screen lists; without it a group label cannot
+// be told from a file of that name.
+export function assetSelected(version, filename, allFilenames = []) {
     const selection = version?.assetSelection;
     if (!Array.isArray(selection)) return true;
-    return selection.some(name => sameName(name, filename));
+    const all = Array.isArray(allFilenames) && allFilenames.includes(filename) ? allFilenames : [...(allFilenames ?? []), filename];
+    return selectedNames(selection, all).has(filename);
 }
 
 export function toggleAssetSelection(version, filename, allFilenames = []) {
@@ -1134,11 +1171,17 @@ export function toggleAssetSelection(version, filename, allFilenames = []) {
     for (const name of allFilenames ?? []) {
         if (typeof name === 'string' && !all.includes(name)) all.push(name);
     }
-    // Stored names are brought to the folder's own spelling first, so the rest
-    // of this function can compare exactly.
+    // Stored names are brought to the folder's own spelling first, a 0.2.0 group
+    // label becoming the files it covers, so the rest of this function can compare
+    // exactly. A name that matches no file (deleted since) is kept as written, so
+    // the same file uploaded again is selected again.
     const raw = Array.isArray(version.assetSelection) ? version.assetSelection : null;
-    const current = raw === null ? null
-        : raw.map(name => all.find(file => sameName(file, name)) ?? name);
+    let current = null;
+    if (raw !== null) {
+        const covered = selectedNames(raw, all);
+        const orphans = raw.filter(entry => typeof entry === 'string' && !selectedNames([entry], all).size);
+        current = [...all.filter(name => covered.has(name)), ...orphans];
+    }
 
     let next;
     if (current === null) {

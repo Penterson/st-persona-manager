@@ -29,10 +29,11 @@ export function validCrop(crop) {
     if (!crop || typeof crop !== 'object') return null;
     const { x, y, w, h } = crop;
     if (![x, y, w, h].every(finite)) return null;
-    if (w <= 0 || h <= 0 || x < 0 || y < 0) return null;
-    // A rounding hair past the edge is still the edge.
+    // A rounding hair past an edge is still the edge, on both sides: a frame
+    // dragged against the left edge comes out of the arithmetic as x = -2e-17.
+    if (w <= 0 || h <= 0 || x < -0.000001 || y < -0.000001) return null;
     if (x + w > 1.000001 || y + h > 1.000001) return null;
-    return { x, y, w, h };
+    return { x: Math.max(0, x), y: Math.max(0, y), w, h };
 }
 
 // The largest frame-shaped rectangle the picture holds, in pixels: what zoom 1
@@ -62,8 +63,8 @@ export function cropFromView(nw, nh, view, aspect = FRAME_ASPECT) {
     const w = base.w / v.zoom;
     const h = base.h / v.zoom;
     return {
-        x: (v.cx * nw - w / 2) / nw,
-        y: (v.cy * nh - h / 2) / nh,
+        x: Math.max(0, (v.cx * nw - w / 2) / nw),
+        y: Math.max(0, (v.cy * nh - h / 2) / nh),
         w: w / nw,
         h: h / nh,
     };

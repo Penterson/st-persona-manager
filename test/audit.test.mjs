@@ -144,7 +144,12 @@ test('own split: renaming an item renames its printed title, and new items follo
     assert.match(compose(r.p).text, /^<looks>\n검은 머리\n<\/looks>/);
 });
 
-test('own split refuses one title, mixed styles and markdown that only nests one heading', () => {
+test('own split: one title or plain prose stays whole, nested markdown splits at its repeated level, mixed styles split by the first repeated style', () => {
+    // Mixed title styles: the first style used twice, in the order markdown,
+    // <tag>, [ ], **, 이름:, divides the text; the other titles stay as text.
+    const mixed = splitOwnSections('[A]\na\n[B]\nb\n## C\nc\n## D\nd');
+    assert.deepEqual(mixed.parts.map(p => p.name), ['C', 'D']);
+    assert.equal(mixed.preamble, '[A]\na\n[B]\nb');
     assert.equal(splitOwnSections('## 외모\n키 큼'), null);
     assert.equal(splitOwnSections('그냥 문장입니다.\n두 번째 문장.'), null);
     // One level-1 heading over two level-2 ones splits at level 2, keeping the

@@ -138,6 +138,71 @@ export function compose(persona) {
     return composePicked(persona, persona?.activePicks);
 }
 
+/* An outside edit, divided back into the items it was composed from: the
+   reverse of joinBlocks over the live picks. [가져오기] could only take an
+   outside edit into a persona with ONE item holding text, and a description
+   adopted with its own titles (the default since 0.3.2) has several, so the
+   button refused in the common case.
+
+   Answers [{ sectionId, text }] for every item the composition prints, when the
+   text still carries each of their title lines in the same order (and each
+   closing line, for a format that has one); null when it does not, or when text
+   in front of the first title has no untitled item to hold it. A title the user
+   added in SillyTavern stays inside the body of the item above it, so composing
+   the result gives the same text back. Bodies are trimmed, as joinBlocks trims
+   them. Items with an empty body print nothing and are not read. */
+export function splitByComposition(persona, text) {
+    const format = persona?.headingFormat;
+    const template = persona?.headingTemplate;
+    const blocks = [];
+    for (const section of persona?.sections ?? []) {
+        const pick = persona?.activePicks?.[section.id];
+        const variant = (persona?.variants?.[section.id] ?? []).find(v => v?.id === pick);
+        if (!variant || !String(variant.text ?? '').trim()) continue;
+        const untitled = section.untitled === true;
+        blocks.push({
+            sectionId: section.id,
+            head: untitled ? '' : headingLine(format, section.name ?? '', template),
+            close: untitled ? '' : closingLine(format, section.name ?? '', template),
+        });
+    }
+    if (!blocks.length) return null;
+    const lines = String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
+    const same = (line, wanted) => line.replace(/[ \t]+$/, '') === wanted;
+    // Where each block's title line sits. An untitled block is only ever the
+    // first one, the text in front of every title.
+    const starts = [];
+    let cursor = 0;
+    for (const [index, block] of blocks.entries()) {
+        if (!block.head) {
+            if (index !== 0) return null;
+            starts.push(-1);
+            continue;
+        }
+        let at = cursor;
+        while (at < lines.length && !same(lines[at], block.head)) at++;
+        if (at >= lines.length) return null;
+        starts.push(at);
+        cursor = at + 1;
+    }
+    const out = [];
+    for (const [index, block] of blocks.entries()) {
+        const from = starts[index] + 1;
+        const to = index + 1 < blocks.length ? starts[index + 1] : lines.length;
+        let body = lines.slice(from, to);
+        if (block.close) {
+            const last = body.map(line => line.trim()).lastIndexOf(block.close.trim());
+            if (last === -1 || body.slice(last + 1).some(line => line.trim())) return null;
+            body = body.slice(0, last);
+        }
+        out.push({ sectionId: block.sectionId, text: body.join('\n').trim() });
+    }
+    // Text in front of the first title belongs to nobody unless an untitled
+    // block starts at the top.
+    if (starts[0] > 0 && lines.slice(0, starts[0]).some(line => line.trim())) return null;
+    return out;
+}
+
 // The same composition over an arbitrary pick set: a version's
 // language is judged from the text ITS picks produce, which is not necessarily
 // the live combination. compose() above is this with the live picks.

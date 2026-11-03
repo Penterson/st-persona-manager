@@ -46,7 +46,11 @@ export function resetState() {
 }
 
 function rootOf(ctx) {
-    if (!ctx.extensionSettings[MODULE_NAME]) ctx.extensionSettings[MODULE_NAME] = {};
+    const stored = ctx.extensionSettings[MODULE_NAME];
+    // Anything but a plain object is no root at all. A hand edit that left [] or a
+    // string there made migrate hand back a fresh object on every call, so adopt
+    // wrote into a copy nobody kept and getRoot() !== getRoot().
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) ctx.extensionSettings[MODULE_NAME] = {};
     return migrate(ctx.extensionSettings[MODULE_NAME]);
 }
 
@@ -222,21 +226,28 @@ export function adopt() {
    수정 banner, offering 되돌리기 and 가져오기) that silently threw the edit
    away, no snapshot, on a tap that had nothing to do with the text; and on every
    other tap it emitted PERSONA_UPDATED and redrew both screens for a text that had
-   not changed. These save our record and leave ST's fields alone. */
-export const KEEP_DESCRIPTION_KINDS = Object.freeze(new Set([
+   not changed. These save our record and leave ST's fields alone.
+
+   Read-only by shape: a frozen Set still answers .add(), so the set itself stays
+   private and only the question is exported. */
+const KEEP_KINDS = new Set([
     'version-create', 'version-rename', 'version-duplicate', 'version-overwrite',
     'version-repick', 'version-move', 'version-delete',
     'variant-add', 'variant-rename', 'variant-duplicate',
     'tag-add', 'tag-remove', 'asset-select', 'image-bind', 'image-crop',
-]));
+]);
+export const KEEP_DESCRIPTION_KINDS = Object.freeze({ has: kind => KEEP_KINDS.has(kind) });
 
 // The result has writeDescription's shape, so a caller reads missing the same
-// way. The text is what ST was last given, not a fresh composition.
+// way. The text is the current composition; SillyTavern's own field is left as
+// it is.
 function keepDescription(ctx, persona) {
     const { text, missing } = compose(persona);
     ctx.saveSettingsDebounced();
     return { text, missing, kept: true };
 }
+
+const unchangedSinceWrite = persona => textSignature(compose(persona).text) === baselineSignature(persona);
 
 /* The kind is the caller's claim that the text did not change, and a claim can be
    wrong: 고쳐서 새 버전 saved under version-create while moving every edited
@@ -244,11 +255,30 @@ function keepDescription(ctx, persona) {
    showed the new version applied. Checked here instead of trusted: when the
    composition is not what SillyTavern was last given, the write happens - unless
    an outside edit is pending, which a write would throw away and which the
-   banner already offers to resolve. */
+   banner already offers to resolve.
+
+   One more case is not a change: right after 관리 시작 the baseline is the
+   original description, and the composition may lay the same lines out with
+   other blank lines. A tag or a version rename then rewrote SillyTavern's
+   description and announced PERSONA_UPDATED for a text nobody touched. Equal
+   line for line (classify.js sameText) counts as unchanged. */
 function mustWrite(ctx, avatarId, persona, write) {
     if (write) return true;
-    if (textSignature(compose(persona).text) === baselineSignature(persona)) return false;
-    return !hasDiverged(ctx, avatarId, persona);
+    if (unchangedSinceWrite(persona)) return false;
+    if (hasDiverged(ctx, avatarId, persona)) return false;
+    const current = ctx.powerUserSettings?.persona_descriptions?.[avatarId]?.description ?? '';
+    return !sameText(compose(persona).text, current);
+}
+
+/* A write that would only put back what SillyTavern was last given, while an
+   outside edit is pending, is no write. An empty item added, a choice nobody
+   picked edited, a rename under a format that prints no titles: none of them
+   change the composition, yet each one rewrote the description with the old
+   text and turned the edit made in SillyTavern into a hidden choice. The banner
+   is how that edit gets resolved. Applying a version passes force, because
+   asking for that version's text is the point of the tap. */
+function leaveOutsideEdit(ctx, avatarId, persona, outside, force) {
+    return outside === 'keep' && !force && unchangedSinceWrite(persona) && hasDiverged(ctx, avatarId, persona);
 }
 
 /* An outside edit is never overwritten without a copy.
@@ -259,8 +289,9 @@ function mustWrite(ctx, avatarId, persona, write) {
    SillyTavern's own persona screen was gone, with no snapshot anywhere. Now the
    outside text is kept as a new choice in the item that holds the text (or the
    first item), not picked, so the prompt is what the user just did here and the
-   other text is one tap away. [되돌리기] and [가져오기] pass outside: 'discard',
-   because resolving the edit is what they are. */
+   other text is one tap away. [가져오기] passes outside: 'discard', because
+   taking the edit in is what it does; [되돌리기] keeps the copy too and forces
+   the write, since putting the composition back is the whole of its job. */
 function keepOutsideText(ctx, avatarId, persona) {
     const text = ctx.powerUserSettings?.persona_descriptions?.[avatarId]?.description;
     if (typeof text !== 'string' || !text.trim()) return null;
@@ -278,7 +309,7 @@ function keepOutsideText(ctx, avatarId, persona) {
     return { section: section.name ?? '', label };
 }
 
-export function saveAndCompose(expectedAvatar, { write = true, outside = 'keep' } = {}) {
+export function saveAndCompose(expectedAvatar, { write = true, outside = 'keep', force = false } = {}) {
     const ctx = provider();
     if (!ctx) return null;
     const s = getState();
@@ -302,7 +333,7 @@ export function saveAndCompose(expectedAvatar, { write = true, outside = 'keep' 
     if (active.avatar !== s.avatar) {
         return { ok: false, reason: 'persona-changed', expected: s.avatar, actual: active.avatar };
     }
-    if (!mustWrite(ctx, s.avatar, s.persona, write)) {
+    if (leaveOutsideEdit(ctx, s.avatar, s.persona, outside, force) || !mustWrite(ctx, s.avatar, s.persona, write)) {
         const kept = keepDescription(ctx, s.persona);
         refreshWith(ctx);
         return kept;
@@ -348,7 +379,7 @@ export function adoptFor(avatarId) {
 // never which persona this call writes. The singular prompt field is written only
 // when the target happens to be the live active persona, which writeDescription
 // already decides from its fourth argument.
-export function saveAndComposeFor(avatarId, { write = true, outside = 'keep' } = {}) {
+export function saveAndComposeFor(avatarId, { write = true, outside = 'keep', force = false } = {}) {
     const ctx = provider();
     if (!ctx) return null;
     const root = getRoot();
@@ -360,7 +391,7 @@ export function saveAndComposeFor(avatarId, { write = true, outside = 'keep' } =
     // With duplicate names and no precise path, which persona is
     // active is unknowable, so whether to write the singular field is unknowable.
     if (active.ambiguous) return null;
-    if (!mustWrite(ctx, avatarId, persona, write)) {
+    if (leaveOutsideEdit(ctx, avatarId, persona, outside, force) || !mustWrite(ctx, avatarId, persona, write)) {
         const kept = keepDescription(ctx, persona);
         refreshWith(ctx);
         return kept;
@@ -373,7 +404,13 @@ export function saveAndComposeFor(avatarId, { write = true, outside = 'keep' } =
         ctx.saveSettingsDebounced();
     }
     refreshWith(ctx);
-    return keptOutside ? { ...result, keptOutside } : result;
+    // No persona could be confirmed as active (no precise path, no marked row in
+    // SillyTavern's list, and a list name that no longer matches the chat's name),
+    // so only the stored copy was written. If this persona is the one playing,
+    // the prompt keeps its old text until it is selected again, and a plain
+    // success would have said otherwise.
+    const activeUnknown = !active.avatar;
+    return keptOutside || activeUnknown ? { ...result, keptOutside, activeUnknown } : result;
 }
 
 export async function refreshAssets() {

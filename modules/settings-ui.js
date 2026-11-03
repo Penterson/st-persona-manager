@@ -548,7 +548,11 @@ function doExportRegex() {
 function doExportSettings() {
     const root = getRoot();
     if (!root) { notify('error', STRINGS.settings.noRoot); return; }
-    if (!downloadJson(`persona-manager-${stamp()}.json`, serializeRoot(root))) return;
+    // A root a newer build owns is shown through a normalised copy, which turns
+    // shapes this build does not know into empty ones. The backup is the stored
+    // object itself, untouched, or it would quietly lose what it exists to keep.
+    const stored = root.readOnly ? freshContext()?.extensionSettings?.[MODULE_NAME] : null;
+    if (!downloadJson(`persona-manager-${stamp()}.json`, serializeRoot(stored ?? root))) return;
     notify('info', STRINGS.settings.settingsExported);
 }
 
@@ -747,7 +751,9 @@ function buildPanel() {
         // A hangul composition commits with an Enter whose keyCode is
         // 229, and firing on that opens the drawer while the user is still typing.
         if (isComposingKey(e)) return;
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleDrawer(); }
+        // stopPropagation for the reason buildButton gives: SillyTavern's document
+        // keydown also turns Enter into a click, and the drawer toggled twice.
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggleDrawer(); }
     });
     header.setAttribute('role', 'button');
     header.setAttribute('aria-expanded', 'false');

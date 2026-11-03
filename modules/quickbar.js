@@ -6,7 +6,7 @@ import {
     getState, saveAndCompose, adopt, getPreciseApi, getRoot, adoptFor, refresh, KEEP_DESCRIPTION_KINDS,
 } from './state.js';
 import { freshContext } from './ctx.js';
-import { compose, headingLine, closingLine } from './compose.js';
+import { compose, headingLine, closingLine, splitByComposition } from './compose.js';
 import { addLog, snapshot, enforceGlobalBudget, expireOldHistory } from './history.js';
 import { toggleMember, SORT_KEYS, livingLabels } from './roster.js';
 import {
@@ -21,7 +21,7 @@ import { STRINGS } from './strings.js';
 // keeps both screens comparing the empty section set the same way. A second copy
 // of the rule would be a second chance to get it wrong.
 import {
-    missingSignature, addTag, removeTag, tagsAcross, boundAsset, pictureSettled,
+    missingSignature, addTag, removeTag, tagsAcross, boundAsset, bindingIsExact, pictureSettled,
     renameVersionIn, duplicateVersionIn, overwriteVersionPicks, dropVersionFrom, moveVersion,
 } from './manager-pure.js';
 // assets.js imports nothing at all, so reaching it from here adds no cycle.
@@ -145,9 +145,18 @@ function liftToasts() {
 // whichever of our screens is still standing.
 export function releaseToasts() {
     const box = toastContainer();
-    if (!box || !toastHome) return;
-    if (box.parentElement !== toastHome) toastHome.append(box);
+    if (!box) return;
+    const home = toastHome;
     toastHome = null;
+    if (home) {
+        if (box.parentElement !== home) home.append(box);
+        return;
+    }
+    // No home recorded, yet inside one of our hosts: SillyTavern's own
+    // fixToastrForDialogs moves the container into an open dialog, ours included,
+    // before liftToasts ever runs. Left there, removing the host deleted the
+    // container with the toasts on screen.
+    if (box.closest?.('dialog[id^="pm-"]')) document.body.append(box);
 }
 
 // getThumbnailUrl's third argument was never measured. On some SillyTavern builds
@@ -301,7 +310,10 @@ function buildButton(host) {
     btn.addEventListener('click', e => { e.stopPropagation(); togglePanel(); });
     btn.addEventListener('keydown', e => {
         if (isComposingKey(e)) return;
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); togglePanel(); }
+        // stopPropagation: SillyTavern's own document keydown (keyboard.js) turns
+        // Enter on an .interactable into a click, so the panel opened here and
+        // that click closed it again.
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); togglePanel(); }
     });
     return btn;
 }
@@ -358,7 +370,10 @@ function syncButton() {
     // The setting exists so a QuickPersona user can drop one of the
     // two icons. It is read on every state change, not only at mount.
     if (s && s.settings?.showQuickBar === false) {
-        closePanel();
+        // Only an open panel: closing hands the toast container back, and with
+        // the icon off the manager (opened from the drawer) lost its toasts to the
+        // page under its modal on every state change.
+        if (isPanelOpen()) closePanel();
         existing?.remove();
         return;
     }
@@ -448,6 +463,11 @@ export function openPanel() {
     // what was written to the old one must not stand in for it.
     forgetSizing();
     bannerDismissed = false;
+    // A fold opened while the data could not be written to is that panel's own
+    // state, not a stored choice; left set, the 버전 fold stayed open on every
+    // later panel although the stored choice said closed.
+    versionOpenOverride = null;
+    namesOpenOverride = null;
     editMode = false;
     selectMode = false;
     selectedAvatars = [];
@@ -651,14 +671,21 @@ export function guardStartAvatar(startAvatar) {
     return writableOrSay(s);
 }
 
-function commit(kind, detail, { outside } = {}) {
+// force defaults to on for a version apply: with an outside edit pending,
+// state.js leaves SillyTavern's text alone when the composition did not change,
+// and asking for a version's text is exactly the tap that must write it anyway.
+function commit(kind, detail, { outside, force } = {}) {
     // Read before the save, used after it. The log line describes an accepted write,
     // so writing it first grows persona.log by one line every time state.js refuses,
     // and a refused write is exactly the case where nothing happened to record.
     const persona = getState()?.persona ?? null;
     // Second line of defence: state.js refuses the write outright when the active
     // persona is no longer the one this panel was drawn for.
-    const result = saveAndCompose(panelAvatar, { write: !KEEP_DESCRIPTION_KINDS.has(kind), outside });
+    const result = saveAndCompose(panelAvatar, {
+        write: !KEEP_DESCRIPTION_KINDS.has(kind),
+        outside,
+        force: force ?? kind === 'version-apply',
+    });
     if (!result) { notify('error', STRINGS.common.cannotSaveNow); return false; }
     if (result.ok === false) {
         notify('error', STRINGS.common.personaChangedNotSaved);
@@ -744,13 +771,17 @@ function dropHost(host) {
     // a dialog that is no longer being painted.
     releaseToasts();
     if (!host || !host.isConnected || typeof host.close !== 'function') return false;
-    try { host.close(); return true; } catch { return false; }
+    // Marked, so the manager's close listener can tell this close from one that
+    // means the screen is gone (manager.js); raiseHost takes the mark off.
+    host.dataset.pmDropped = '1';
+    try { host.close(); return true; } catch { delete host.dataset.pmDropped; return false; }
 }
 
 function raiseHost(host) {
     // Only if it is still in the document: the screen may have been closed while
     // the popup was up, and reopening a host nobody wants would put an orphaned
     // dialog back on top of everything.
+    if (host) delete host.dataset.pmDropped;
     if (!host || !host.isConnected || host.open || typeof host.showModal !== 'function') return;
     try { host.showModal(); } catch { host.setAttribute('open', ''); }
 }
@@ -862,12 +893,25 @@ function fallbackBlocked() {
     notify('info', STRINGS.common.popupBlocked);
 }
 
+/* What a popup is handed. SillyTavern's popup puts a string in with innerHTML
+   (popup.js, 1.19.0), so a version, tag, group or persona name holding <...>
+   vanished from the question or became markup in it, and the line breaks of a
+   numbered choice list collapsed into one line (.popup-content keeps
+   white-space: normal). An element carrying the message as text keeps both. */
+function popupContent(message) {
+    if (typeof document === 'undefined' || typeof document.createElement !== 'function') return message;
+    const box = document.createElement('div');
+    box.style.whiteSpace = 'pre-line';
+    box.textContent = String(message ?? '');
+    return box;
+}
+
 export async function askConfirm(message) {
     // Popup, POPUP_TYPE and callGenericPopup are all measured present, but the
     // member names inside POPUP_TYPE were not, so they are checked at runtime.
     const ctx = freshContext();
     if (typeof ctx?.callGenericPopup === 'function' && ctx.POPUP_TYPE?.CONFIRM !== undefined) {
-        return !!(await runPopup(() => ctx.callGenericPopup(message, ctx.POPUP_TYPE.CONFIRM)));
+        return !!(await runPopup(() => ctx.callGenericPopup(popupContent(message), ctx.POPUP_TYPE.CONFIRM)));
     }
     if (typeof globalThis.confirm !== 'function') { fallbackBlocked(); return false; }
     const answer = globalThis.confirm(message);
@@ -928,7 +972,7 @@ export async function askChoice(message, options) {
 export async function askText(message, initial) {
     const ctx = freshContext();
     if (typeof ctx?.callGenericPopup === 'function' && ctx.POPUP_TYPE?.INPUT !== undefined) {
-        const value = await runPopup(() => ctx.callGenericPopup(message, ctx.POPUP_TYPE.INPUT, initial ?? ''));
+        const value = await runPopup(() => ctx.callGenericPopup(popupContent(message), ctx.POPUP_TYPE.INPUT, initial ?? ''));
         return typeof value === 'string' ? value : null;
     }
     if (typeof globalThis.prompt !== 'function') { fallbackBlocked(); return null; }
@@ -1014,7 +1058,7 @@ export async function runBoundImageWrite(avatarId, versionId, force, known) {
     if (!ctx) return null;
     const now = Date.now();
     const result = await applyBoundImage({
-        ctx, root: before, persona: first, avatarId, label, crop, force, known, now,
+        ctx, root: before, persona: first, avatarId, label, exact: bindingIsExact(version), crop, force, known, now,
     });
     if (!result.ok) {
         /* A failure that still took a backup. The file is ON THE SERVER by then -
@@ -1109,10 +1153,13 @@ async function saveAsVersion() {
 function revertOutsideEdit() {
     const s = guardAvatar();
     if (!s?.persona) return;
-    // Rewriting the composed text is enough: writeDescription updates lastComposed,
-    // which is what made the state look diverged. The outside text is dropped on
-    // purpose here; that is what the button says.
-    commit('diverge-revert', '', { outside: 'discard' });
+    // Rewriting the composed text is what the button says: writeDescription
+    // updates the baseline, which is what made the state look diverged. The
+    // outside text is kept first, as a choice of the item that holds the text
+    // (state.js keepOutsideText), and the toast says where. It used to be dropped
+    // in one tap beside the harmless [나중에], with no copy anywhere. Forced,
+    // because the composition did not change and the write is the whole point.
+    commit('diverge-revert', '', { outside: 'keep', force: true });
 }
 
 // The own format's closing line (</외모>) at the very end, removed the same way.
@@ -1142,27 +1189,50 @@ function absorbOutsideEdit() {
     if (!s?.persona) return;
     const text = freshContext()?.powerUserSettings?.persona_descriptions?.[s.avatar]?.description ?? '';
     const sections = s.persona.sections ?? [];
-    /* Absorbing puts the WHOLE description into one item, and the description is
-       the concatenation of every item. So it is only lossless when that item is
-       the only one carrying text: with anything else filled, what those items
-       hold is now written twice and every prompt from here on carries it twice.
+    /* The description is the concatenation of every item, so the edit made
+       outside goes back the way it was put together.
 
-       The item that receives the text is therefore the one that already holds
-       it, or the first item when none does. It used to be the LAST item with a
-       refusal if any other item had text, which contradicted 관리 시작: that puts
-       an adopted description into the FIRST item, so the common case (one item
-       filled, the one 관리 시작 filled) was refused every time.
+       Several items holding text (the usual case since 관리 시작 keeps a
+       divided description's own items): the edit is divided along the title
+       lines the composition prints (compose.js splitByComposition) and every
+       item takes its own part. Refused when a title line is gone or out of
+       order, because then nothing says which part belongs to which item; the
+       banner keeps [되돌리기] and the manager is one tap away.
 
-       Refused rather than absorbed-and-deduplicated when more than one item has
-       text, because there is no honest way to tell which part of an edit made
-       outside belongs to which item. The banner keeps [되돌리기] and the manager
-       is one tap away, so the user still has two ways out. */
+       One item holding text, or none: the whole edit goes into that item, or
+       into the first. It used to be the LAST item, which contradicted 관리 시작
+       putting an undivided description into the FIRST. */
     const liveBody = sec => {
         const pick = s.persona.activePicks?.[sec.id];
         return (s.persona.variants?.[sec.id] ?? []).find(v => v.id === pick) ?? null;
     };
     const filled = sections.filter(sec => !!(liveBody(sec)?.text ?? '').trim());
-    if (filled.length > 1) { notify('warning', STRINGS.quick.absorbNotOnly); return; }
+    if (filled.length > 1) {
+        // With no titles printed (항목 제목 없음, the shipped default) there is
+        // nothing to divide along, and saying the titles changed would be wrong.
+        if (!headingLine(s.persona.headingFormat, 'x', s.persona.headingTemplate)) {
+            notify('warning', STRINGS.quick.absorbNoTitles);
+            return;
+        }
+        const parts = splitByComposition(s.persona, text);
+        if (!parts) { notify('warning', STRINGS.quick.absorbNoMatch); return; }
+        const now = Date.now();
+        const changed = [];
+        for (const part of parts) {
+            const section = sections.find(sec => sec.id === part.sectionId);
+            const variant = section ? liveBody(section) : null;
+            if (!variant || (variant.text ?? '') === part.text) continue;
+            // Into history first, forced past the merge window, as below.
+            snapshot(s.persona, variant.id, variant.text ?? '', now, s.settings, { force: true });
+            variant.text = part.text;
+            variant.updatedAt = now;
+            changed.push(section.name ?? '');
+        }
+        expireOldHistory(s.root, s.settings, now);
+        enforceGlobalBudget(s.root, s.settings, now);
+        commit('diverge-absorb', changed.join(', '), { outside: 'discard' });
+        return;
+    }
     const target = filled[0] ?? sections[0] ?? null;
     const variant = target ? liveBody(target) : null;
     if (!target || !variant) { notify('error', STRINGS.quick.absorbNoItem); return; }
@@ -1698,13 +1768,22 @@ function inPlaceAllowed() {
     return !!s && s.avatar === panelAvatar;
 }
 
+// Controls a keyboard can land on, in document order.
+const focusablesIn = node => [...node.querySelectorAll('button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])')];
+
 function redrawGroup(name) {
     if (!inPlaceAllowed()) return false;
     const entry = groupNodes.get(name);
     if (!entry || !entry.node.isConnected) return false;
+    // Focus inside the old group follows to the same control in the new one.
+    // replaceWith took the focused node away, and after Enter on a fold head or
+    // [⋯] the next Tab started again from the top of the dialog.
+    const focused = typeof document !== 'undefined' && entry.node.contains(document.activeElement) ? document.activeElement : null;
+    const at = focused ? focusablesIn(entry.node).indexOf(focused) : -1;
     const fresh = entry.build();
     entry.node.replaceWith(fresh);
     entry.node = fresh;
+    if (at !== -1) focusablesIn(fresh)[at]?.focus?.({ preventScroll: true });
     return true;
 }
 
@@ -1752,7 +1831,9 @@ function toggleVersionOpen() {
 function foldHead(title, open, onToggle) {
     const head = el('div', 'pm-quickbar-head pm-quickbar-foldhead');
     head.append(el('span', 'pm-quickbar-headlabel', title));
-    head.append(el('span', 'pm-quickbar-foldmark', open ? '↑' : '↗'));
+    // ↓ opens downward, ↑ folds back. It was ↗, which reads as "opens somewhere
+    // else" rather than as a fold.
+    head.append(el('span', 'pm-quickbar-foldmark', open ? '↑' : '↓'));
     head.setAttribute('role', 'button');
     head.tabIndex = 0;
     head.setAttribute('aria-expanded', open ? 'true' : 'false');
@@ -2350,9 +2431,11 @@ function bulkBar(view, writable) {
 }
 
 function selectToggleButton(writable) {
-    const btn = el('button', `pm-quickbar-btn${selectMode ? ' pm-manager-primary' : ''}`,
-        STRINGS.quick.selectToggle(selectMode));
+    // One label, the state shown by the fill and aria-pressed: a label that grew
+    // to 선택 완료 squeezed the sort and view selects beside it (style.css).
+    const btn = el('button', `pm-quickbar-btn${selectMode ? ' pm-manager-primary' : ''}`, STRINGS.quick.selectToggle);
     btn.type = 'button';
+    btn.setAttribute('aria-pressed', selectMode ? 'true' : 'false');
     if (writable) {
         btn.addEventListener('click', () => {
             selectMode = !selectMode;
@@ -2375,8 +2458,9 @@ function toggleSelected(avatarId) {
 }
 
 function editToggleButton(writable) {
-    const btn = el('button', 'pm-quickbar-btn', STRINGS.quick.groupEditToggle(editMode));
+    const btn = el('button', 'pm-quickbar-btn', STRINGS.quick.groupEditToggle);
     btn.type = 'button';
+    btn.setAttribute('aria-pressed', editMode ? 'true' : 'false');
     if (writable) {
         btn.addEventListener('click', () => {
             editMode = !editMode;
@@ -2557,7 +2641,7 @@ function personaTile(ctx, entry, s, named) {
 let focusRosterSearch = false;
 
 function searchToggleButton() {
-    const btn = el('button', 'pm-quickbar-btn', rosterSearchOpen ? STRINGS.common.searchClose : STRINGS.common.search);
+    const btn = el('button', 'pm-quickbar-btn', STRINGS.common.search);
     btn.type = 'button';
     btn.setAttribute('aria-pressed', rosterSearchOpen ? 'true' : 'false');
     btn.addEventListener('click', () => {
@@ -2597,9 +2681,21 @@ function fillRosterListNow() {
     const panel = document.getElementById(PANEL_ID);
     const container = panel?.querySelector('[data-pm-roster-list]');
     if (!container) return;
+    // A group name typed in a row's editor, kept the way drawPanel keeps it: a
+    // search keystroke or a page turn rebuilds the rows, and the field came back
+    // empty. Plain values only; no node of the old list is kept.
+    const typing = container.querySelector('.pm-quickbar-newlabel-input');
+    const typed = typing?.value ? { value: typing.value, start: typing.selectionStart, end: typing.selectionEnd } : null;
     harvestThumbs(container);
     fillRosterList(container);
     thumbPool.clear();
+    const rebuilt = typed ? container.querySelector('.pm-quickbar-newlabel-input') : null;
+    if (rebuilt) {
+        rebuilt.value = typed.value;
+        if (typed.start != null && typed.end != null && typeof rebuilt.setSelectionRange === 'function') {
+            rebuilt.setSelectionRange(typed.start, typed.end);
+        }
+    }
 }
 
 /* Persona pictures carried across a redraw. Every tap rebuilds the list, and each

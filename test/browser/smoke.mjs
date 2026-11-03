@@ -25,12 +25,17 @@ const PORT = 8765;
 fs.mkdirSync(OUT, { recursive: true });
 
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json' };
+// Serves the extension under /ext/ and this folder at the root, and nothing
+// else: a raw request for /ext/../../ must not read files outside the repo.
+const inside = (root, file) => file === root || file.startsWith(root + path.sep);
 const server = http.createServer((req, res) => {
-    const url = req.url.split('?')[0];
-    const file = url.startsWith('/ext/') ? path.join(EXT, url.slice(5))
+    let url;
+    try { url = decodeURIComponent(req.url.split('?')[0]); } catch { res.writeHead(400); res.end(); return; }
+    const file = url.startsWith('/ext/') ? path.resolve(EXT, `.${url.slice(4)}`)
         : (url === '/' || url === '/host.html') ? path.join(here, 'host.html')
-            : path.join(here, url);
-    if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); res.end(); return; }
+            : path.resolve(here, `.${url}`);
+    const allowed = url.startsWith('/ext/') ? inside(EXT, file) : inside(here, file);
+    if (!allowed || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); res.end(); return; }
     res.writeHead(200, { 'Content-Type': types[path.extname(file)] ?? 'application/octet-stream' });
     fs.createReadStream(file).pipe(res);
 });
@@ -81,8 +86,12 @@ async function slowClick(page, locator) {
     await page.waitForTimeout(250);
 }
 
+// PW_CHANNEL=chrome or msedge runs on an installed browser, so the smoke works
+// without downloading Playwright's own Chromium.
+const LAUNCH = process.env.PW_CHANNEL ? { channel: process.env.PW_CHANNEL } : {};
+
 async function tour(width, label, light) {
-    const browser = await chromium.launch();
+    const browser = await chromium.launch(LAUNCH);
     const page = await browser.newPage({ viewport: { width, height: 800 }, hasTouch: width < 600, isMobile: width < 600 });
     const errors = [];
     page.on('console', m => { if (m.type() === 'error' && !/404/.test(m.text())) errors.push(m.text()); });
@@ -129,7 +138,10 @@ async function tour(width, label, light) {
     await slowClick(page, page.locator('.pm-quickbar-newlabel .pm-quickbar-btn'));
     const labels = (await ctxEval(page)).extensionSettings['persona-manager'].labels;
     expect(`${label} slow click on [추가] creates the group`, labels.length === 1 && labels[0].members.includes(ALICE), labels);
-    await page.locator('.pm-quickbar-rosterhead-controls .pm-quickbar-btn', { hasText: '완료' }).click();
+    // The group toggle keeps its label and shows that it is on as pressed.
+    const groupToggle = page.locator('.pm-quickbar-rosterhead-controls .pm-quickbar-btn[aria-pressed="true"]', { hasText: '그룹' });
+    expect(`${label} the group toggle reads as pressed while on`, await groupToggle.count() === 1);
+    await groupToggle.click();
     await page.waitForTimeout(100);
     await shot('03-panel-group');
 
@@ -186,7 +198,7 @@ async function tour(width, label, light) {
     await page.waitForTimeout(900);
     expect(`${label} picked image opens the framing editor`, await page.locator('.pm-framing .pm-framing-frame').count() === 1);
     await shot('07b-framing-upload');
-    await page.locator('.pm-framing .pm-manager-btn', { hasText: '이 위치로 적용' }).click();
+    await page.locator('.pm-framing .pm-manager-btn', { hasText: '현재 위치로 적용' }).click();
     await page.waitForTimeout(400);
     const uploads = await page.evaluate(() => window.__fetches.filter(u => u.startsWith('/api/avatars/upload')));
     expect(`${label} framed upload sends a crop`, uploads.some(u => u.includes('crop=')), uploads);
@@ -228,6 +240,54 @@ async function tour(width, label, light) {
     await page.keyboard.press('Escape');
     await page.waitForTimeout(150);
     expect(`${label} escape closes the panel`, await page.evaluate(() => !document.getElementById('pm-quickbar-panel')));
+
+    /* Outside edit on a persona whose text sits in several items: each item takes
+       its own part back, and an edit that lost a title is refused untouched. */
+    await page.evaluate(() => {
+        const c = window.SillyTavern.getContext();
+        const p = c.extensionSettings['persona-manager'].personas['1700000000000-alice.png'];
+        for (const s of p.sections) p.variants[s.id][0].text = '';
+        p.variants[p.sections[0].id][0].text = '검은 머리';
+        p.variants[p.sections[1].id][0].text = '조용함';
+        p.headingFormat = 'markdown';
+    });
+    await page.evaluate(() => document.dispatchEvent(new CustomEvent('pm:changed')));
+    await openPanel(page);
+    await ensureOpen(page, 0);
+    await page.locator('.pm-quickbar-row', { hasText: 'v1' }).first().click();
+    await page.waitForTimeout(200);
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(100);
+    const outside = async text => page.evaluate(async t => {
+        const c = window.SillyTavern.getContext();
+        c.powerUserSettings.persona_descriptions['1700000000000-alice.png'].description = t;
+        c.powerUserSettings.persona_description = t;
+        await c.eventSource.emit(c.event_types.PERSONA_UPDATED, '1700000000000-alice.png');
+    }, text);
+    const liveTexts = () => page.evaluate(() => {
+        const p = window.SillyTavern.getContext().extensionSettings['persona-manager'].personas['1700000000000-alice.png'];
+        return p.sections.map(s => p.variants[s.id].find(v => v.id === p.activePicks[s.id])?.text ?? '');
+    });
+    await outside('## 외모\n검은 머리\n\n성격 제목이 지워진 글');
+    await openPanel(page);
+    await page.waitForTimeout(100);
+    await page.locator('.pm-quickbar-banner .pm-quickbar-btn', { hasText: '가져오기' }).click();
+    await page.waitForTimeout(200);
+    const refused = await liveTexts();
+    expect(`${label} absorb refuses an edit that lost a title`, refused[0] === '검은 머리' && refused[1] === '조용함', refused);
+    expect(`${label} a refused absorb keeps the banner`, await page.locator('.pm-quickbar-banner', { hasText: '외부' }).count() === 1);
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(100);
+    await outside('## 외모\n검은 머리\n\n## 성격\n조용하고 다정함');
+    await openPanel(page);
+    await page.waitForTimeout(100);
+    await page.locator('.pm-quickbar-banner .pm-quickbar-btn', { hasText: '가져오기' }).click();
+    await page.waitForTimeout(200);
+    const split = await liveTexts();
+    expect(`${label} absorb gives every item its own part`, split[0] === '검은 머리' && split[1] === '조용하고 다정함', split);
+    expect(`${label} a split absorb clears the banner`, await page.locator('.pm-quickbar-banner', { hasText: '외부' }).count() === 0);
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(100);
 
     /* Outside edit, absorbed into the item that holds the text */
     await page.evaluate(() => {
@@ -293,7 +353,7 @@ async function tour(width, label, light) {
     await page.keyboard.press('Escape');
     await page.evaluate(async () => {
         const c = window.SillyTavern.getContext();
-        c.extensionSettings['persona-manager'].schemaVersion = 2;
+        c.extensionSettings['persona-manager'].schemaVersion = 3;
         await c.eventSource.emit(c.event_types.PERSONA_CHANGED);
     });
 
@@ -337,7 +397,7 @@ async function tour(width, label, light) {
     await browser.close();
 }
 
-await new Promise(resolve => server.listen(PORT, resolve));
+await new Promise(resolve => server.listen(PORT, '127.0.0.1', resolve));
 try {
     await tour(411, 'phone', false);
     await tour(1280, 'desktop', true);

@@ -1,4 +1,5 @@
-// The writing rules strings.js states at its top, checked rather than remembered.
+// The confirm-dialog rule strings.js states at its top, checked rather than
+// remembered. The clause-ending rules are in wording.test.mjs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { STRINGS } from '../modules/strings.js';
@@ -14,7 +15,9 @@ function* leaves(node, path = []) {
 
 test('confirm dialogs name the act and stop: no 까?, at most 60 characters', () => {
     for (const [path, text] of leaves(STRINGS)) {
-        if (!/\bconfirm/i.test(path)) continue;
+        // Anywhere in the key: copyConfirm and fullTextConfirmLeave are confirms
+        // too, and a word boundary in front skipped them.
+        if (!/confirm/i.test(path)) continue;
         assert.equal(/까\?/.test(text), false, `${path} asks a question: ${text}`);
         assert.ok(text.length <= 60, `${path} is ${text.length} characters: ${text}`);
     }

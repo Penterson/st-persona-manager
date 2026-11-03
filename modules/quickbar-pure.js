@@ -274,7 +274,9 @@ function picksEqual(a, b, living) {
 // treating it as the saved version is how a user's combination disappears.
 export function describeSelection(persona) {
     if (!persona) return NO_VERSION_LABEL;
-    const version = (persona.versions ?? []).find(v => v.id === persona.activeVersionId);
+    // v?.id like every other reader: a hand-edited null entry survives migrate,
+    // and this runs on every paint of the icon.
+    const version = (persona.versions ?? []).find(v => v?.id === persona.activeVersionId);
     if (!version) return NO_VERSION_LABEL;
     const name = version.name ?? '';
     // A version whose picks name a variant that was later deleted is not special

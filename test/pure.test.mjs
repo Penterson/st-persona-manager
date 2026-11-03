@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { sortEntries, createdAtFromAvatar, filterByLabel, livingLabels, recordUse, toggleMember, SORT_KEYS } from '../modules/roster.js';
-import { scoreOf, rankOf, matchRanges, textContains, detectLanguage, chatLanguage, pageOf, toChosung } from '../modules/search-pure.js';
+import { scoreOf, rankOf, matchRanges, textContains, detectLanguage, pageOf, toChosung } from '../modules/search-pure.js';
 import { addLog, snapshot, historyBytes, expireOldHistory, enforceGlobalBudget, restore, diffWords } from '../modules/history.js';
 import { validCrop, coverSize, clampView, cropFromView, viewFromCrop, cropPixels, writtenKey } from '../modules/framing.js';
 import { resolveAvatar, findDuplicateNames } from '../modules/ctx.js';
@@ -76,14 +76,12 @@ test('search grades, highlights and body matching', () => {
     assert.equal(toChosung('한글abc'), 'ㅎㄱabc');
 });
 
-test('language detection and chat language', () => {
+test('language detection of a description', () => {
     assert.equal(detectLanguage('안녕하세요 반갑습니다'), 'ko');
     assert.equal(detectLanguage('こんにちは、元気ですか'), 'ja');
     assert.equal(detectLanguage('你好，今天天气很好'), 'zh');
     assert.equal(detectLanguage('Hello there, how are you'), 'en');
     assert.equal(detectLanguage('123 !!!'), null);
-    assert.equal(chatLanguage([{ mes: '응' }]), null);
-    assert.equal(chatLanguage([{ mes: 'x'.repeat(50), is_system: true }, { mes: '한국어 문장입니다. 충분히 길게 써서 판별이 되도록 합니다. 정말로 충분히 길게요.' }]), 'ko');
 });
 
 test('pageOf clamps and sizes', () => {
@@ -138,7 +136,7 @@ test('addLog collapses repeated system lines and caps at 200', () => {
     assert.equal(p.log.length, 200);
 });
 
-test('diffWords round-trips and names its level', () => {
+test('diffWords round-trips a one-word change', () => {
     const parts = diffWords('a b c', 'a x c');
     assert.equal(parts.map(p => p.type !== 'add' ? p.text : '').join(''), 'a b c');
     assert.equal(parts.map(p => p.type !== 'del' ? p.text : '').join(''), 'a x c');

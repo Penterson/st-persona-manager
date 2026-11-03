@@ -301,40 +301,18 @@ export function detectLanguage(text) {
    자동 적용). The chat, not the description: the description is what the persona
    IS, and it does not change when the user starts typing English.
 
-   Read from the newest messages backwards until there is enough text to judge
-   by, because the answer decides whether to rename a persona and a two word
-   reply is not evidence. System messages are skipped: they are SillyTavern's
-   own text, in SillyTavern's language, and counting them would let the UI
-   language outvote the conversation. */
-export const CHAT_LANGUAGE_MIN_CHARS = 40;
+   Messages are read from the newest backwards. System messages are skipped:
+   they are SillyTavern's own text, in SillyTavern's language, and counting them
+   would let the UI language outvote the conversation. Six messages and 800
+   characters per speaker, so a block of the old language stops counting within
+   a few turns of the user switching: judging one message alone would flip the
+   name on a single quoted line, and judging the whole chat would never notice
+   the switch at all. */
 export const CHAT_LANGUAGE_SCAN_CHARS = 800;
-// Six, so a block of the old language stops counting within a few turns of the
-// user switching. Judging one message alone would flip the name on a single
-// quoted line; judging the whole chat would never notice the switch at all.
 export const CHAT_LANGUAGE_SCAN_MESSAGES = 6;
 
-export function chatLanguage(chat, minChars = CHAT_LANGUAGE_MIN_CHARS) {
-    if (!Array.isArray(chat) || !chat.length) return null;
-    const parts = [];
-    let total = 0;
-    for (let i = chat.length - 1; i >= 0; i--) {
-        if (total >= CHAT_LANGUAGE_SCAN_CHARS || parts.length >= CHAT_LANGUAGE_SCAN_MESSAGES) break;
-        const message = chat[i];
-        if (!message || message.is_system) continue;
-        const text = typeof message.mes === 'string' ? message.mes.trim() : '';
-        if (!text) continue;
-        parts.push(text);
-        total += text.length;
-    }
-    const joined = parts.join(' ');
-    // Not enough to be sure. Answering null here is what keeps a rename from
-    // happening on the strength of one 응 or one ok.
-    if (joined.length < minChars) return null;
-    return detectLanguage(joined);
-}
-
 /* ── Context-aware language (user request 2026-11-03) ─────────────────────────
-   chatLanguage above judged the conversation by its newest text alone and
+   The first version judged the conversation by its newest text alone and
    needed 40 characters of it. In a chat that has only just opened, the one
    message there is the greeting, so the greeting decided on its own - or, when
    it was short, nothing did. A Korean card whose greeting opens with an English
@@ -369,10 +347,13 @@ export const LANGUAGE_WEIGHTS = Object.freeze({
 const FULL_AT = Object.freeze({ user: 30, reply: 40, greeting: 60, card: 80, name: 2, persona: 60 });
 const MIN_EVIDENCE = 1;
 
+/* Only tag shapes go: a letter right after < (or </). A bare <[^>]*> also ate
+   text that is not markup - from the < of "I <3 this" to the > of a later "->",
+   whole sentences between them, and a Korean aside written as <이게 뭐지?>. */
 export function stripMarkup(text) {
     return String(text ?? '')
         .replace(/\{\{[^{}]*\}\}/g, ' ')
-        .replace(/<[^>]*>/g, ' ')
+        .replace(/<\/?[a-z][^<>]*>/gi, ' ')
         .replace(/https?:\/\/\S+/g, ' ')
         .replace(/```[\s\S]*?```/g, ' ');
 }
@@ -395,15 +376,15 @@ function letterCount(text) {
 
 /* Splits a chat into the three conversational sources. The greeting is the
    character message at the very start, before the user has said anything;
-   system messages are SillyTavern's own and never count. Newest first, bounded
-   the same way chatLanguage is, so an old stretch in another language stops
-   counting within a few turns of a switch. */
+   system messages are SillyTavern's own and never count. Newest first, and each
+   speaker has a budget of its own: with one shared budget a single long reply
+   used it up, and the user's own message just before it - the heaviest vote -
+   was never read. */
 export function chatSources(chat) {
     const out = { user: [], reply: [], greeting: '' };
     if (!Array.isArray(chat)) return out;
     const firstUser = chat.findIndex(m => m && !m.is_system && m.is_user);
-    let used = 0;
-    let total = 0;
+    const budget = { user: { used: 0, total: 0 }, reply: { used: 0, total: 0 } };
     for (let i = chat.length - 1; i >= 0; i--) {
         const message = chat[i];
         if (!message || message.is_system) continue;
@@ -416,12 +397,43 @@ export function chatSources(chat) {
             out.greeting = out.greeting ? `${text} ${out.greeting}` : text;
             continue;
         }
-        if (used >= CHAT_LANGUAGE_SCAN_MESSAGES || total >= CHAT_LANGUAGE_SCAN_CHARS) continue;
-        (message.is_user ? out.user : out.reply).push(text);
-        used++;
-        total += text.length;
+        const role = message.is_user ? 'user' : 'reply';
+        const spent = budget[role];
+        if (spent.used >= CHAT_LANGUAGE_SCAN_MESSAGES || spent.total >= CHAT_LANGUAGE_SCAN_CHARS) continue;
+        out[role].push(text);
+        spent.used++;
+        spent.total += text.length;
     }
     return out;
+}
+
+/* The language a source is written in, compared in the unit the confidence is
+   measured in: a hangul syllable, a kana or a kanji as three Latin letters.
+   detectLanguage counts raw characters, which made "Seraphina와 Gregory가 마을에
+   도착했다" (9 hangul, 16 Latin) an English sentence. Kana keeps detectLanguage's
+   rule: a twentieth of the letters marks Japanese, since Japanese text is mostly
+   kanji. */
+function sourceLanguage(text) {
+    let hangul = 0;
+    let kana = 0;
+    let han = 0;
+    let latin = 0;
+    for (let i = 0; i < text.length; i++) {
+        const c = text.charCodeAt(i);
+        if ((c >= 0xAC00 && c <= 0xD7A3) || (c >= 0x3130 && c <= 0x318F) || (c >= 0x1100 && c <= 0x11FF)) hangul++;
+        else if ((c >= 0x3040 && c <= 0x30FF) || (c >= 0x31F0 && c <= 0x31FF) || (c >= 0xFF66 && c <= 0xFF9D)) kana++;
+        else if ((c >= 0x4E00 && c <= 0x9FFF) || (c >= 0x3400 && c <= 0x4DBF)) han++;
+        else if ((c >= 0x41 && c <= 0x5A) || (c >= 0x61 && c <= 0x7A) || (c >= 0xFF21 && c <= 0xFF3A) || (c >= 0xFF41 && c <= 0xFF5A)) latin++;
+    }
+    const letters = hangul + kana + han + latin;
+    if (!letters) return null;
+    if (kana > 0 && kana * 20 >= letters) return 'ja';
+    const ko = hangul * CJK_LETTER_WEIGHT;
+    const zh = han * CJK_LETTER_WEIGHT;
+    if (hangul > 0 && ko >= zh && ko >= latin) return 'ko';
+    if (han > 0 && zh >= latin) return 'zh';
+    if (latin > 0) return 'en';
+    return null;
 }
 
 /* The decision. sources is { user, reply, greeting, card, name, persona }, each
@@ -431,11 +443,13 @@ export function contextLanguage(sources = {}) {
     const scores = {};
     for (const [key, weight] of Object.entries(LANGUAGE_WEIGHTS)) {
         const raw = sources[key];
-        const text = stripMarkup(Array.isArray(raw) ? raw.join(' ') : raw);
+        // Markup is stripped per message, so a stray < in one message cannot
+        // pair with a > in the next.
+        const text = (Array.isArray(raw) ? raw : [raw]).map(stripMarkup).join(' ');
         if (!text.trim()) continue;
         const letters = letterCount(text);
         if (!letters) continue;
-        const lang = detectLanguage(text);
+        const lang = sourceLanguage(text);
         if (!lang) continue;
         const confidence = Math.min(1, letters / FULL_AT[key]);
         scores[lang] = (scores[lang] ?? 0) + weight * confidence;

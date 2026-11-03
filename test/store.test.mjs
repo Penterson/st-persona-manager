@@ -25,8 +25,11 @@ test('migrate keeps a user-set value and only backfills missing ones', () => {
 });
 
 test('migrate marks a newer schema read-only without rewriting it', () => {
-    const root = migrate({ schemaVersion: SCHEMA_VERSION + 1, personas: { a: { versions: 3 } } });
+    const stored = { schemaVersion: SCHEMA_VERSION + 1, personas: { a: { versions: 3 } } };
+    const root = migrate(stored);
     assert.equal(root.readOnly, true);
+    assert.equal(stored.personas.a.versions, 3, 'the stored object keeps its own value');
+    assert.equal('readOnly' in stored, false);
     assert.equal(root.schemaVersion, SCHEMA_VERSION + 1);
     // Containers are still backfilled so read-only screens cannot throw.
     assert.deepEqual(root.personas.a.versions, []);

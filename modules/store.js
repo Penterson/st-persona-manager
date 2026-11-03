@@ -7,8 +7,13 @@ export const MODULE_NAME = 'persona-manager';
 /* 2 (0.1.24): lastComposed, a full copy of the composed description per persona,
    became composedSig, a fingerprint of it. A build on 1 reading a 2 root would
    find no baseline and call every persona's description an outside edit, so it
-   is kept off this root the way every older build is kept off a newer one. */
-export const SCHEMA_VERSION = 2;
+   is kept off this root the way every older build is kept off a newer one.
+
+   3 (0.3.3): 0.3.2 added the heading format 'own' (headingFormat 'own',
+   headingTemplate, sections[].untitled) without a new number. A build on 2
+   prints no titles for a format it does not know, so its next write would strip
+   every title from such a description. Nothing else changes between 2 and 3. */
+export const SCHEMA_VERSION = 3;
 
 /* What this extension last gave SillyTavern, as a fingerprint rather than a copy.
    The copy was a fifth of everything this extension stores (measured 21% of an
@@ -161,6 +166,21 @@ function futureView(stored) {
     return view;
 }
 
+function backfillVersionPicks(persona) {
+    if (!persona || typeof persona !== 'object') return;
+    if (!Array.isArray(persona.sections) || !Array.isArray(persona.versions)) return;
+    const live = persona.activePicks && typeof persona.activePicks === 'object' ? persona.activePicks : {};
+    for (const version of persona.versions) {
+        if (!version || typeof version !== 'object') continue;
+        if (!version.picks || typeof version.picks !== 'object') version.picks = {};
+        for (const section of persona.sections) {
+            const id = section?.id;
+            if (typeof id !== 'string' || Object.hasOwn(version.picks, id)) continue;
+            if (typeof live[id] === 'string') version.picks[id] = live[id];
+        }
+    }
+}
+
 export function migrate(root) {
     if (!root || typeof root !== 'object' || Array.isArray(root)) root = {};
     if (typeof root.schemaVersion !== 'number') root.schemaVersion = SCHEMA_VERSION;
@@ -177,6 +197,14 @@ export function migrate(root) {
             persona.composedSig = typeof persona.lastComposed === 'string' ? textSignature(persona.lastComposed) : null;
         }
         delete persona.lastComposed;
+    }
+    // Schema 2 to 3, once: a version saved before an item existed has no pick for
+    // it, and applying that version dropped the item from the prompt. 0.3.0 gives
+    // every new item a pick in every version (manager-pure.js pickInEveryVersion);
+    // the versions saved before that get the same here, with the item's current
+    // choice, which is what pickInEveryVersion would have given them.
+    if (root.schemaVersion < 3) {
+        for (const persona of Object.values(root.personas)) backfillVersionPicks(persona);
     }
     root.schemaVersion = SCHEMA_VERSION;
     for (const persona of Object.values(root.personas)) {
@@ -235,9 +263,10 @@ export function migrate(root) {
     return root;
 }
 
-// The three composition headings. Exported so the two screens that
-// offer them and the migration that validates a stored value all read one list
-// rather than three copies of the same three strings.
+// The composition headings a user can pick, read by the settings drawer and the
+// 편집 tab from one list. The fourth, 'own', is not offered: it exists only on a
+// persona whose description arrived already divided (state.js seedDescription),
+// and the 편집 tab adds it to that persona's own select.
 export const HEADING_FORMATS = Object.freeze(['none', 'plain', 'markdown']);
 export const ADOPT_MODES = Object.freeze(['own', 'whole', 'defaults']);
 

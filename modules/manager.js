@@ -46,13 +46,13 @@ import {
 // DOM helpers shared with the quick panel and the settings drawer.
 import {
     el, track, runCleanups, blockDrawerClose, isComposingKey, makeRowActivatable,
-    checkMark, emptyBlock, bannerOf as sharedBanner, groupOf as sharedGroup, afterGesture,
+    checkMark, emptyBlock, bannerOf as sharedBanner, afterGesture,
 } from './dom.js';
 // Matching, language detection and paging.
 import { rankOf, textContains, detectLanguage, pageOf } from './search-pure.js';
 import {
     resolveFolderKey, claimFolderKey, listAssets, uploadAsset, deleteAsset, withoutBackups,
-    uploadPersonaAvatar, feedPersonaImage, restoreAvatarBackup, findAsset, imageSize,
+    replacePersonaAvatar, feedPersonaImage, restoreAvatarBackup, findAsset, imageSize,
 } from './assets.js';
 import {
     canDeleteSection, removeSection, moveSection, reorderSection, deleteVariant,
@@ -64,7 +64,7 @@ import {
     addTag, removeTag, missingDefaultSections, fillDefaultSections,
     planFullTextSave, readSelectOptions, parseDepth, copyPersonaOnto,
     setLocalName, localName, countSize,
-    boundAsset, bindAsset, versionImageState, versionsBindingAsset, pictureSettled, pickInEveryVersion,
+    boundAsset, bindingIsExact, bindAsset, versionImageState, versionsBindingAsset, pictureSettled, pickInEveryVersion,
     renameVersionIn, duplicateVersionIn, overwriteVersionPicks, dropVersionFrom, moveVersion,
 } from './manager-pure.js';
 // Every sentence the user reads on this screen comes from there,
@@ -321,7 +321,22 @@ function openManager(tab) {
     // host, redrew into a closed dialog and returned, so the manager could not be
     // reopened until a reload. A close we did not start runs our teardown.
     host.addEventListener('close', () => {
-        if (document.getElementById(HOST_ID) === host) { stashDraft(); closeManager(false); }
+        if (document.getElementById(HOST_ID) !== host) return;
+        // Closed by the quick panel so a SillyTavern popup that is not a dialog can
+        // be answered (quickbar.js dropHost), which raises this host again after
+        // the answer. Tearing the screen down here lost it, and the popup's caller
+        // found a removed host.
+        if (host.dataset.pmDropped === '1') return;
+        // A close nobody asked for used to throw away the 전문 and 고쳐서 새 버전
+        // working copies, and a picture waiting in the framing editor, without a
+        // word. With one of those open the screen comes back and asks first.
+        if (hasWorkingCopies()) {
+            try { host.showModal(); } catch { host.setAttribute('open', ''); }
+            void requestClose();
+            return;
+        }
+        stashDraft();
+        closeManager(false);
     });
     host.append(panel);
     document.body.append(host);
@@ -396,8 +411,20 @@ async function confirmDropWorking() {
     return !!document.getElementById(HOST_ID);
 }
 
+// What a close would lose that the draft store does not keep.
+function hasWorkingCopies() {
+    return reviseDirtyCount() > 0 || fullDirtyCount() > 0 || (framing?.mode === 'upload' && !framingBusy);
+}
+
 async function requestClose() {
     if (closeAsked) return;
+    // A picture picked for [이미지 교체] and not yet applied. Not asked while it
+    // is on the wire: closing does not stop an upload, so there is nothing to
+    // cancel by then.
+    if (framing?.mode === 'upload' && !framingBusy) {
+        const ok = await askOnce(STRINGS.manager.framingConfirmLeave);
+        if (!ok || !document.getElementById(HOST_ID)) return;
+    }
     const revising = reviseDirtyCount();
     const fullDirty = fullDirtyCount();
     if (editorDirty || revising > 0 || fullDirty > 0) {
@@ -459,6 +486,10 @@ function closeManager(reopenPanel = true) {
     closeAsked = false;
     lastScreen = null;
     scrollByScreen.clear();
+    // Detached rows and thumbnails, with the closures that built them, would
+    // otherwise stay alive until the next open's first draw.
+    rowNodes.clear();
+    pickerThumbs.clear();
     dropFraming();
     gestureHeld = false;
     drawWaitingOnGesture = false;
@@ -521,6 +552,9 @@ function targetState() {
         avatar: targetAvatar,
         persona: targetAvatar ? getPersona(root, targetAvatar) : null,
         readOnly: !!root.readOnly,
+        // Deleted in SillyTavern behind the open screen: every write would be
+        // refused at commit, after the record had already been changed.
+        listed: !targetAvatar || Object.hasOwn(freshContext()?.powerUserSettings?.personas ?? {}, targetAvatar),
         // With two personas sharing a name and no precise path,
         // which persona is ACTIVE is unknowable, and saveAndComposeFor refuses
         // for exactly that reason. It is not about the target, so it is read from
@@ -580,13 +614,19 @@ function ensureShape(persona) {
 // would make the log read as two operations.
 // write overrides what the kind says about the text. A kind names what the log
 // line reads as; whether the prompt changed is a property of the write itself.
+// Applying a version is forced: with an outside edit pending, state.js leaves
+// SillyTavern's text alone when the composition did not change, and asking for a
+// version's text is exactly the tap that must write it anyway.
 function commit(kind, detail, expectedAvatar, { write } = {}) {
     const avatar = expectedAvatar ?? targetAvatar;
     // Read before the save, used after it. The log line describes an accepted
     // write, so writing it first grows persona.log by one line every time state.js
     // refuses, and a refused write is exactly the case with nothing to record.
     const persona = getPersona(getRoot(), avatar);
-    const result = saveAndComposeFor(avatar, { write: write ?? !KEEP_DESCRIPTION_KINDS.has(kind) });
+    const result = saveAndComposeFor(avatar, {
+        write: write ?? !KEEP_DESCRIPTION_KINDS.has(kind),
+        force: kind === 'version-apply',
+    });
     if (!result) { notify('error', refusalMessage(avatar)); scheduleDraw(); return false; }
     if (persona) {
         if (kind) addLog(persona, kind, detail, Date.now());
@@ -594,6 +634,9 @@ function commit(kind, detail, expectedAvatar, { write } = {}) {
         freshContext()?.saveSettingsDebounced?.();
     }
     if (result.keptOutside) notify('warning', STRINGS.common.outsideKept(result.keptOutside.section));
+    // Only the stored copy could be written (state.js says why): the prompt has
+    // the old text until the persona is selected again, and the user is told so.
+    if (result.activeUnknown && !result.kept) notify('warning', STRINGS.common.savedActiveUnknown);
     // No PERSONA_UPDATED for a kept description, so the icon and an open quick
     // panel hear about a renamed or deleted version from here.
     if (result.kept) document.dispatchEvent(new CustomEvent('pm:changed'));
@@ -787,10 +830,20 @@ async function dropVariant(sectionId, variantId, label) {
    the front was dropped, which is exactly when the indices moved. The two expiry
    passes are still counted separately by their callers, because those can drop
    entries this cap did not. */
+// Answers whether a snapshot was kept: with 이력 보관 개수 at 0 nothing is.
 function snapshotKeepingIndex(persona, variantId, previous, now, settings, options) {
     const first = persona.history?.[variantId]?.[0];
-    snapshot(persona, variantId, previous, now, settings, options);
+    const kept = snapshot(persona, variantId, previous, now, settings, options);
     if (historyVariant === variantId && persona.history?.[variantId]?.[0] !== first) historyIndex = null;
+    return kept;
+}
+
+// The history caps apply whenever snapshots were written. historyIndex is a
+// POSITION into a variant's list and both passes drop entries from the FRONT, so
+// a tick left on "3일 전" would silently come to mean a different snapshot; any
+// trim clears it.
+function trimHistory(root, settings, now) {
+    if (expireOldHistory(root, settings, now) + enforceGlobalBudget(root, settings, now)) historyIndex = null;
 }
 
 // The one path that writes a variant body. The text being replaced
@@ -816,13 +869,7 @@ function saveVariantText(sectionId, variantId, text) {
     // The per variant cap does not bound the total, and the
     // total is what fills settings.json. A snapshot is the only moment the total
     // can grow, so it is the moment to enforce the cap.
-    // historyIndex is a POSITION into a variant's list and both passes drop
-    // entries from the FRONT, so a tick left on "3일 전" silently comes to mean a
-    // different snapshot. The bounds check downstream only catches an index that
-    // fell off the end, not one that shifted under it.
-    if (expireOldHistory(s.root, s.settings, now) + enforceGlobalBudget(s.root, s.settings, now)) {
-        historyIndex = null;
-    }
+    trimHistory(s.root, s.settings, now);
     editorDirty = false;
     // The text is on the variant now. A draft left behind would be restored over
     // the saved text the next time this body is opened.
@@ -1070,11 +1117,14 @@ async function uploadAssets(files) {
     // needs the entry, which guardTarget just proved exists.
     const key = claimFolderKey(s.root, startAvatar, () => freshContext()?.saveSettingsDebounced?.());
     let ok = 0;
+    // One per selection: once every field name has failed for one file, the
+    // rest of this selection asks once each (assets.js uploadAsset).
+    const batch = {};
     for (const file of files) {
         try {
             const ctx = freshContext();
             if (!ctx) throw new Error(STRINGS.manager.noContext);
-            await uploadAsset(ctx, key, file);
+            await uploadAsset(ctx, key, file, batch);
             ok++;
         } catch (e) {
             // The status code goes on screen with the file name.
@@ -1102,8 +1152,11 @@ async function dropAsset(label) {
        this file keeps pointing at it, and the next time that version is opened
        the row reads 지정된 그림 없음 - which is a sentence about a file the user
        deleted on purpose two screens ago and has no reason to connect to this.
-       versionsBindingAsset was written for this and had never been called. */
-    const bound = versionsBindingAsset(s.persona, label);
+       versionsBindingAsset was written for this and had never been called.
+       With the listing, so a binding saved under 0.2.0's lowercased label is
+       counted as well. */
+    const bound = versionsBindingAsset(s.persona, label, assetLabels());
+    const boundIds = new Set(bound.map(version => version.id));
     const question = bound.length
         ? STRINGS.manager.confirmDropAssetBound(label, bound.length)
         : STRINGS.manager.confirmDropAsset(label);
@@ -1120,6 +1173,15 @@ async function dropAsset(label) {
         // closed, and every later overwrite would then keep nothing.
         const persona = getPersona(root, startAvatar);
         if (persona?.avatarBackup?.label === label) persona.avatarBackup = null;
+        // The versions that showed this file keep naming it, now as an exact
+        // name: matched loosely, a binding to pose.png moved on to pose-1.png,
+        // the one file left under the same server label, and applied that
+        // picture as if nothing had been deleted.
+        for (const version of persona?.versions ?? []) {
+            if (!version || !boundIds.has(version.id)) continue;
+            version.avatarAsset = label;
+            version.avatarAssetExact = true;
+        }
     } catch (e) {
         notify('error', STRINGS.manager.assetDeleteFailed(String(e?.message ?? e)));
         return;
@@ -1140,6 +1202,10 @@ async function refreshAssetViews(avatar) {
     await loadAssets(avatar);
     if (getState()?.avatar !== avatar) return;
     await refreshAssets();
+    // loadAssets drew before state.js's listing came back, and that listing's
+    // error is what the failure banner reads too: a retry that succeeded kept
+    // showing the failure until a second tap.
+    scheduleDraw();
     // Pictures already drawn in the chat point at the file as it was. index.js
     // re-points the ones whose file was just replaced.
     document.dispatchEvent(new CustomEvent('pm:assets-changed'));
@@ -1243,20 +1309,14 @@ async function selectTarget(avatar) {
     // every way out of them gets the one question: without this, a save after the
     // switch dropped a junk version on the new persona and quietly lost every
     // revision.
-    if (reviseDirtyCount() > 0) {
-        const ok = await askConfirm(STRINGS.manager.reviseConfirmLeave(reviseDirtyCount()));
-        // Re-checked like requestClose: the screen, or the moment, may be gone.
-        if (!ok || !document.getElementById(HOST_ID)) return;
-        if (avatar === targetAvatar) { pickerOpen = false; scheduleDraw(); return; }
-    }
     // The 전문 window's working copies are the same case, and worse if unasked:
     // its bodies are edits to text that EXISTS, so carrying them to another
-    // persona would write one persona's paragraphs over another's.
-    if (fullDirtyCount() > 0) {
-        const ok = await askConfirm(STRINGS.manager.fullTextConfirmLeave(fullDirtyCount()));
-        if (!ok || !document.getElementById(HOST_ID)) return;
-        if (avatar === targetAvatar) { pickerOpen = false; scheduleDraw(); return; }
-    }
+    // persona would write one persona's paragraphs over another's. Both questions
+    // go through confirmDropWorking, which also keeps a second tap from stacking
+    // a second question on the first.
+    if (!(await confirmDropWorking())) return;
+    // Re-checked like requestClose: the moment may be gone.
+    if (avatar === targetAvatar) { pickerOpen = false; scheduleDraw(); return; }
     resetFullText();
     placementOpen = false;
     namesOpen = false;
@@ -1317,6 +1377,12 @@ function stashDraft() {
     if (!editorDirty || !openVariant || !targetAvatar) return;
     const text = readEditorText();
     if (text === null) return;
+    // Typed and then taken back: the stored body is the draft, so there is
+    // nothing to keep, and a kept copy made [제목별 분류] refuse over an edit that
+    // no badge showed.
+    const stored = getPersona(getRoot(), targetAvatar)?.variants?.[openVariant.sectionId]
+        ?.find(variant => variant?.id === openVariant.variantId)?.text ?? '';
+    if (text === stored) { takeDraft(targetAvatar, openVariant.sectionId, openVariant.variantId); return; }
     putDraft(targetAvatar, openVariant.sectionId, openVariant.variantId, text);
 }
 
@@ -1379,6 +1445,7 @@ function writeReason(s) {
     if (!s) return STRINGS.manager.refusalNoRoot;
     if (s.readOnly) return STRINGS.manager.refusalReadOnly;
     if (s.ambiguous) return STRINGS.manager.refusalAmbiguous;
+    if (s.listed === false) return STRINGS.manager.refusalUnknownPersona;
     return '';
 }
 
@@ -1494,10 +1561,12 @@ function rowName(key, parts, summary) {
     return btn;
 }
 
-// Which row is open is drawn, never hovered, so the mark changes
-// with the state instead of appearing on a hover a touch screen cannot make.
+// Which row is open is drawn, never hovered: aria-expanded and the open row
+// below say it, instead of a mark that appears on a hover a touch screen cannot
+// make. ⋯ like the quick panel's row tools; it was ↗, which reads as "opens
+// somewhere else".
 function foldMark(open, onToggle) {
-    const btn = actionButton(open ? '↑' : '↗', onToggle, true, STRINGS.common.more);
+    const btn = actionButton('⋯', onToggle, true, STRINGS.common.more);
     btn.classList.add('pm-manager-more');
     btn.setAttribute('aria-expanded', open ? 'true' : 'false');
     return btn;
@@ -1557,8 +1626,6 @@ function rowHead() {
 }
 
 function bannerOf(className, message) { return sharedBanner('pm-manager', className, message); }
-
-function groupOf(title) { return sharedGroup('pm-manager', title); }
 
 // The locale is named, like every number in strings.js: this screen is Korean,
 // and the host browser's default put an English date beside Korean captions.
@@ -2079,8 +2146,13 @@ function hasUnsavedBody(avatar, persona) {
     // The two working screens hold copies of the bodies too. A revision saved
     // after the split would write its pre-split text back as new choices.
     if (reviseDirtyCount() > 0 || fullDirtyCount() > 0) return true;
+    // A draft equal to the stored body is no unsaved edit (pendingDraft draws no
+    // badge for one either).
     return (persona.sections ?? []).some(section =>
-        (persona.variants?.[section?.id] ?? []).some(variant => peekDraft(avatar, section.id, variant?.id) !== null));
+        (persona.variants?.[section?.id] ?? []).some(variant => {
+            const draft = peekDraft(avatar, section.id, variant?.id);
+            return draft !== null && draft !== (variant?.text ?? '');
+        }));
 }
 
 async function doResplit() {
@@ -2098,14 +2170,15 @@ async function doResplit() {
     if (!fresh) { notify('info', STRINGS.manager.resplitNothing); scheduleDraw(); return; }
     const now = Date.now();
     const uuid = freshContext()?.uuidv4;
+    let kept = false;
     const changed = applyResplit(after.persona, fresh, uuid, now, after.settings?.defaultHeadingFormat,
-        (variantId, text) => snapshotKeepingIndex(after.persona, variantId, text, now, after.settings, { force: true }));
+        (variantId, text) => { kept = snapshotKeepingIndex(after.persona, variantId, text, now, after.settings, { force: true }) || kept; });
     // Snapshots were written, which is when the history caps apply.
-    if (expireOldHistory(after.root, after.settings, now) + enforceGlobalBudget(after.root, after.settings, now)) {
-        historyIndex = null;
-    }
+    trimHistory(after.root, after.settings, now);
     if (commit('split-headings', STRINGS.manager.logDetails.resplit(changed.length), startAvatar)) {
-        notify('success', STRINGS.manager.resplitDone(changed.length));
+        // The toast promises 이력 only when 이력 kept something: with 이력 보관 개수
+        // at 0 the text before the split is stored nowhere.
+        notify('success', kept ? STRINGS.manager.resplitDone(changed.length) : STRINGS.manager.resplitDoneNoHistory(changed.length));
     }
 }
 
@@ -2153,25 +2226,33 @@ async function doOwnSplit() {
     const persona = ensureShape(after.persona);
     const now = Date.now();
     const oldVariantId = again.variant.id;
+    // Every choice the rebuild replaces. Their history would stay under ids
+    // nothing can open any more, still counted against the total cap.
+    const replaced = Object.values(persona.variants).flatMap(list => (Array.isArray(list) ? list : []).map(variant => variant?.id));
     seedOwnSections(persona, own, freshContext()?.uuidv4, now);
     // The old body's history follows its text into the first new item, with the
     // whole old body on top, so 이력 can put everything back.
     const firstId = persona.activePicks[persona.sections[0].id];
     const kept = Array.isArray(persona.history?.[oldVariantId]) ? persona.history[oldVariantId] : [];
     if (!persona.history) persona.history = {};
-    delete persona.history[oldVariantId];
+    for (const id of replaced) if (id && id !== firstId) delete persona.history[id];
     if (kept.length) persona.history[firstId] = kept;
-    snapshotKeepingIndex(persona, firstId, body, now, after.settings, { force: true });
+    const snapped = snapshotKeepingIndex(persona, firstId, body, now, after.settings, { force: true });
+    // The 이력 tab pointed at a choice that no longer exists.
+    historyVariant = null;
+    historyIndex = null;
     // Every saved version points at the new items; the old ones are gone.
     for (const version of persona.versions ?? []) {
         if (version && typeof version === 'object') version.picks = { ...persona.activePicks };
     }
-    if (expireOldHistory(after.root, after.settings, now) + enforceGlobalBudget(after.root, after.settings, now)) {
-        historyIndex = null;
-    }
+    trimHistory(after.root, after.settings, now);
     openVariant = null;
     expandedRow = null;
-    if (commit('split-own', names, startAvatar)) notify('success', STRINGS.manager.ownSplitDone(persona.sections.length));
+    if (commit('split-own', names, startAvatar)) {
+        notify('success', snapped || kept.length
+            ? STRINGS.manager.ownSplitDone(persona.sections.length)
+            : STRINGS.manager.ownSplitDoneNoHistory(persona.sections.length));
+    }
 }
 
 /* ── Size (user request) ─────────────────────────────────────────────────────
@@ -2358,9 +2439,7 @@ function saveFullText() {
         // just saved, the same reason saveVariantText clears one.
         takeDraft(startAvatar, write.sectionId, write.variantId);
     }
-    if (expireOldHistory(s.root, s.settings, now) + enforceGlobalBudget(s.root, s.settings, now)) {
-        historyIndex = null;
-    }
+    trimHistory(s.root, s.settings, now);
     // The variant-edit lines are written above, where the loop is, so commit only
     // saves and composes.
     if (!commit(null, '', startAvatar)) return;
@@ -3174,6 +3253,9 @@ async function changeTargetImage(file) {
     const s = guardTarget();
     if (!s) return;
     if (s.readOnly || s.ambiguous) { notify('error', writeReason(s)); return; }
+    // One picture on the wire at a time: a second file picked now would open a
+    // new editor while the first upload still lands on the avatar.
+    if (framingBusy) { notify('info', STRINGS.manager.framingUploading); return; }
     const startAvatar = targetAvatar;
     const size = await imageSize(file);
     if (!guardTarget(startAvatar)) return;
@@ -3202,19 +3284,21 @@ async function changeTargetImage(file) {
 // The write behind [교체], with or without a crop. crop is pixels, as the
 // endpoint takes it, or null for the picture whole.
 async function uploadTargetImage(startAvatar, file, crop) {
-    const result = await uploadPersonaAvatar(freshContext(), startAvatar, file, crop);
-    if (result.ok) {
-        /* avatarWritten is a cache of "which asset label is on the avatar file
-           right now", and applyBoundImage skips its whole write when the label it
-           was asked for matches. The user has just put a different picture there
-           by hand, so that cache is wrong, and leaving it meant the version whose
-           picture was replaced could never put its own back. Cleared here for the
-           same reason [원본 되돌리기] clears it. */
+    /* avatarWritten is a cache of "which asset label is on the avatar file right
+       now", and applyBoundImage skips its whole write when the label it was asked
+       for matches. The user has just put a different picture there by hand, so
+       that cache is wrong, and leaving it meant the version whose picture was
+       replaced could never put its own back. Cleared inside the write queue, for
+       the same reason [원본 되돌리기] clears it, so a version apply queued behind
+       this upload already reads it cleared. */
+    const result = await replacePersonaAvatar(freshContext(), startAvatar, file, crop, () => {
         const live = getPersona(getRoot(), startAvatar);
         if (live && live.avatarWritten !== null) {
             live.avatarWritten = null;
             freshContext()?.saveSettingsDebounced?.();
         }
+    });
+    if (result.ok) {
         personaImageChanged(startAvatar);
         notify('success', STRINGS.manager.changeImageDone);
         return true;
@@ -3348,10 +3432,14 @@ function versionImageBlock(version, writable, reason) {
     }
     // Why the picture's own buttons are dead, said for the state it is in: no
     // picture bound, a bound file that is gone, or a listing still on its way.
+    // 'unknown' covers a listing that failed as well as one on its way, and a
+    // failure must not read as 준비 중 next to the 읽기 실패 shown below it.
+    const listingError = assetState.avatar === targetAvatar ? assetState.error : null;
     const deadReason = view.state === 'ok' ? reason
         : view.state === 'none' ? STRINGS.manager.versionImageNoBinding
             : view.state === 'missing' ? STRINGS.manager.versionImageMissing(view.label)
-                : STRINGS.manager.assetListLoading;
+                : listingError ? STRINGS.manager.imageListingFailed(listingError)
+                    : STRINGS.manager.assetListLoading;
     box.append(actionsRow([
         actionButton(STRINGS.manager.versionImagePickButton, () => pickBoundAsset(version.id), writable, '', reason),
         actionButton(STRINGS.manager.versionImageNow, () => runBoundImage(targetAvatar, version.id, true),
@@ -3409,7 +3497,7 @@ function openFraming(versionId) {
     if (!s) return;
     const version = (s.persona?.versions ?? []).find(entry => entry?.id === versionId);
     const label = boundAsset(version);
-    const path = findAsset(assetState.list, label)?.path;
+    const path = findAsset(assetState.list, label, bindingIsExact(version))?.path;
     if (!version || !label || !path) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
     const avatar = targetAvatar;
     // The picture's own size, which the crop is a fraction of. The path carries
@@ -3458,7 +3546,10 @@ function framingEditor(writable, reason) {
         img.style.width = `${placed.width}px`;
         img.style.height = `${placed.height}px`;
         img.style.transform = `translate(${placed.left}px, ${placed.top}px)`;
-        if (document.activeElement !== zoom) zoom.value = String(state.view.zoom);
+        // Written even while the slider has focus: a touched slider keeps focus,
+        // and skipping it then left the slider at 3 after a wheel zoom back to 2,
+        // so the next nudge jumped. Writing the value it already has is harmless.
+        zoom.value = String(state.view.zoom);
     };
     // Pointer moves arrive faster than frames on a phone; one style write per frame.
     const schedulePaint = () => { if (!frameRequest) frameRequest = requestAnimationFrame(paint); };
@@ -3523,11 +3614,13 @@ function framingEditor(writable, reason) {
         frame.addEventListener('pointercancel', lift);
         // A frame taken out of the document loses its capture and hears no up.
         frame.addEventListener('lostpointercapture', lift);
-        // Desktop: the wheel zooms, ten percent a notch, instead of scrolling the
-        // screen out from under the picture.
+        // Desktop: the wheel zooms instead of scrolling the screen out from under
+        // the picture, by as much as the wheel moved. A mouse notch (deltaY 100)
+        // is about twenty percent; a touchpad sends many small deltas, and a fixed
+        // step per event took twelve of them from 2.5x to the 5x limit.
         frame.addEventListener('wheel', e => {
             e.preventDefault();
-            setView({ ...state.view, zoom: state.view.zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1) });
+            setView({ ...state.view, zoom: state.view.zoom * Math.exp(-e.deltaY * 0.002) });
         }, { passive: false });
     } else {
         zoom.disabled = true;
@@ -3537,7 +3630,10 @@ function framingEditor(writable, reason) {
     box.append(el('div', 'pm-manager-hint', STRINGS.manager.framingHint));
     box.append(el('div', 'pm-manager-hint', STRINGS.manager.framingGuide));
     const reset = actionButton(STRINGS.manager.framingReset, () => setView({ zoom: 1, cx: 0.5, cy: 0.5 }), writable, '', reason);
-    const cancel = actionButton(STRINGS.common.cancel, () => closeFraming(), true);
+    // Not while the picture is on the wire: closing the editor did not stop the
+    // upload, which then replaced the avatar after the user had walked away.
+    const cancel = actionButton(STRINGS.common.cancel, () => closeFraming(), !framingBusy, '',
+        framingBusy ? STRINGS.manager.framingUploading : '');
     if (state.mode === 'upload') {
         const busyReason = framingBusy ? STRINGS.manager.framingUploading : reason;
         box.append(actionsRow([
@@ -3685,7 +3781,10 @@ async function duplicateTargetPersona() {
     // roll back; what it is is a persona carrying the description SillyTavern
     // copied rather than the one this extension just built for it, and the user
     // has to be told which of the two they are looking at.
-    const composed = copy ? saveAndComposeFor(destAvatar) : null;
+    // outside 'discard': the description on the new persona is SillyTavern's copy
+    // of the source's, not an edit anybody made, and keeping it left every
+    // duplicate with a redundant 외부 수정 choice holding the same text.
+    const composed = copy ? saveAndComposeFor(destAvatar, { outside: 'discard' }) : null;
     freshContext()?.saveSettingsDebounced?.();
     const newName = freshContext()?.powerUserSettings?.personas?.[destAvatar] ?? destAvatar;
     // Onto the copy, which is what the user made and what they will edit next.
@@ -3753,7 +3852,10 @@ async function createTargetPersona() {
         // Refused when the copy's name is shared and the active persona cannot be
         // told apart: then it still carries the source's description, which the
         // duplicate path already reports and this one used to pass over.
-        composed = saveAndComposeFor(destAvatar);
+        // outside 'discard', for the duplicate path's reason: kept, the source's
+        // whole description sat in the "blank" persona as a 외부 수정 choice,
+        // and with an empty composition nothing would be written at all.
+        composed = saveAndComposeFor(destAvatar, { outside: 'discard' });
     }
     freshContext()?.saveSettingsDebounced?.();
     // Onto the new persona, exactly as the duplicate lands on its copy.
@@ -4805,7 +4907,7 @@ function versionAssetBlock(version, writable) {
         const row = el('label', 'pm-quickbar-labelrow');
         const checkbox = el('input', 'pm-checkbox');
         checkbox.type = 'checkbox';
-        checkbox.checked = assetSelected(version, label);
+        checkbox.checked = assetSelected(version, label, labels);
         checkbox.disabled = !writable;
         checkbox.addEventListener('change', () => toggleVersionAsset(version.id, label));
         row.append(checkbox, el('span', 'pm-quickbar-labelname', label));
@@ -5604,7 +5706,7 @@ function drawManager() {
     // what saveAndComposeFor refuses on, and readOnly means a newer build owns
     // this data. Writing in either case would land somewhere we cannot vouch for,
     // so every control that writes is disabled and the reason is on screen.
-    const writable = !s.ambiguous && !s.readOnly;
+    const writable = !s.ambiguous && !s.readOnly && s.listed !== false;
     // Computed once and handed to every tab, so a disabled
     // button anywhere on this screen can say why in the same words.
     const reason = writeReason(s);
@@ -5624,11 +5726,16 @@ function drawManager() {
     // held behind 관리 시작: with an unadopted persona on screen, making a group
     // used to mean adopting a persona first.
     if (!s.persona && managerTab === 'labels') {
-        const group = groupOf(STRINGS.manager.tabs.labels);
+        // No heading of its own: the tab strip and the band above already name
+        // the tab, and a third copy of 그룹 under them was noise.
+        const group = el('div', 'pm-manager-group');
         group.append(el('div', 'pm-manager-tabdesc', STRINGS.manager.tabDescriptions.labels));
         group.append(labelsTab(ctx, s));
         body.append(group);
         if (scroll.scrollTop !== scrollTop) scroll.scrollTop = scrollTop;
+        // This branch returns before the tail of drawManager too, and 검색 here
+        // opened its field with no caret and no keyboard.
+        if (focusSearch) takeSearchFocus();
         return;
     }
 
@@ -5653,7 +5760,8 @@ function drawManager() {
         body.append(bannerOf('pm-manager-warn', STRINGS.manager.missingBanner(missing.length, missing.join(', '))));
     }
 
-    const group = groupOf(STRINGS.manager.tabs[managerTab] ?? '');
+    // No heading of its own, as above: the tab strip and the band name the tab.
+    const group = el('div', 'pm-manager-group');
     // One line under the tab name saying what the
     // tab is for, always drawn. It used to be nowhere at all, and a title attribute
     // would have put it somewhere a phone cannot reach.

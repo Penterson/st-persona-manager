@@ -249,6 +249,9 @@ async function init() {
     safely('settings', mountSettings);
 
     await initPrecise();
+    // Torn down while waiting (a newer load of this file took over): stop here, or
+    // the rest of init would register listeners that nothing can take back off.
+    if (!alive) return;
     // The precise api can name a persona that name1 alone cannot (two personas with
     // the same name resolve to nothing without it), so the cache built above has to
     // be built again now that the import has landed. Cheap: no request, no DOM.
@@ -260,6 +263,7 @@ async function init() {
     // first event would then skip the refetch that move actually needs.
     const assetsAvatar = getState()?.avatar ?? null;
     await refreshAssets();
+    if (!alive) return;
     // Read after the awaits above, and used only to register. The macro callbacks
     // themselves close over getState, not over a context.
     const ctx = freshContext();
@@ -401,10 +405,13 @@ async function init() {
     // the page loaded with until the next event. onPersona refreshes, refetches
     // the listing only if the persona moved, and sends the event.
     void onPersona();
-    globalThis.__personaManagerDestroy = destroy;
 }
 
+// False once destroy() has run, so an init still waiting on its awaits stops.
+let alive = true;
+
 function destroy() {
+    alive = false;
     stopChatObserver();
     document.removeEventListener('pm:assets-changed', repointChatAssets);
     unmountQuickbar();
@@ -429,11 +436,22 @@ function destroy() {
     resetGestureTracking();
     resetState();
     document.getElementById(`${MODULE_NAME}_settings`)?.remove();
-    delete globalThis.__personaManagerDestroy;
+    if (globalThis.__personaManagerDestroy === destroy) delete globalThis.__personaManagerDestroy;
 }
 
 // In a function, so the context read here cannot outlive the decision it is read for.
 function boot() {
+    // A second evaluation of this file (an extension reload without a page
+    // reload) tears the first one down before it registers anything. Two
+    // instances used to answer every event twice, and the second overwrote the
+    // hook, which left the first one's listeners with no way to be removed.
+    // Published here rather than at the end of init, so an instance still waiting
+    // for APP_READY can be torn down too.
+    const previous = globalThis.__personaManagerDestroy;
+    if (typeof previous === 'function') {
+        try { previous(); } catch (e) { console.warn(`[${MODULE_NAME}] previous instance teardown`, e); }
+    }
+    globalThis.__personaManagerDestroy = destroy;
     // Registered through on() so destroy() can take it back off. A subscription made
     // outside the helper is invisible to the listener list and survives teardown.
     if (freshContext()?.event_types?.APP_READY) on('APP_READY', init);

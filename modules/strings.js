@@ -29,13 +29,13 @@
 // CONFIRM DIALOGS name the act and stop (2026-08-27, from the user, with their own
 // example): 변경 기록 13줄 삭제, not 변경 기록 13줄을 전부 지울까? 선택지 본문과
 // 이력은 그대로 유지. 지웠다는 줄 하나만 기록. The two buttons already ask; what
-// cannot be undone goes in brackets and nothing else goes in at all. 검사/wording
+// cannot be undone goes in brackets and nothing else goes in at all. test/strings.test.mjs
 // holds both halves: no 까? anywhere, and nothing in the confirm family past 60
-// characters.
+// characters. test/wording.test.mjs checks the clause endings and the demonstrative.
 //
 // Pure data plus a few formatters. Nothing here reads the DOM, a context or the
 // state, so importing it from every screen keeps no reference alive past its
-// moment, and 검사 can read it in plain Node.
+// moment, and the tests can read it in plain Node.
 
 function deepFreeze(value) {
     if (value && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -102,16 +102,17 @@ export const STRINGS = deepFreeze({
         create: '만들기',
         more: '더 보기',
         // The count is what the user acts on, so it leads.
-        emptyItems: n => `빈 항목 ${n}개`,
+        emptyItems: n => `선택지 미지정 항목 ${n}개`,
         cannotSaveNow: '현재 저장 불가',
         personaChanged: '페르소나 변경으로 패널 새로고침',
         personaChangedNotSaved: '페르소나 변경으로 저장 취소',
         readOnly: '더 새로운 판이 만든 데이터라 읽기 전용',
         versionNotApplicable: '해당 버전은 현재 페르소나에 적용 불가',
         // After 관리 시작 split the description by its titles.
-        adoptSplit: n => `기존 설명문을 항목 ${n}개로 나눠 가져오기 완료`,
+        adoptSplit: n => `관리 시작 완료. 기존 설명문을 항목 ${n}개로 분리`,
         // An outside edit kept as a choice before a write replaced it.
         outsideKept: section => `SillyTavern에서 고친 설명문을 '${section}' 항목의 선택지로 보관`,
+        savedActiveUnknown: '저장 완료. 활성 페르소나 미확인으로 프롬프트 반영 보류. SillyTavern에서 페르소나 재선택 필요',
         outsideKeptLabel: stamp => {
             const d = new Date(Number(stamp) || 0);
             const two = n => String(n).padStart(2, '0');
@@ -175,7 +176,7 @@ export const STRINGS = deepFreeze({
             tiles: '타일',
             tilesNamed: '타일+이름',
         },
-        autoNameApplied: name => `채팅 언어에 맞춰 이름 변경: ${name}`,
+        autoNameApplied: name => `대화 언어에 맞춰 이름 변경: ${name}`,
         headCurrent: '현재',
         headVersion: '버전',
         headPersona: '페르소나',
@@ -189,8 +190,10 @@ export const STRINGS = deepFreeze({
         headNames: '언어별 이름',
         noLocalNames: '등록된 이름 없음',
         localNamesElsewhere: '편집 탭에서 이름 등록',
-        autoNameRow: '채팅 언어에 맞춰 자동 적용',
-        confirmNameClash: (name, who) => `이름 "${name}" 적용 (대화 속 "${who}"와 동명)`,
+        autoNameRow: '대화 언어에 맞춰 자동 적용',
+        // The clash is found by the name itself (quickbar-pure.js nameCollides),
+        // so a second quoted name would only print the same word again.
+        confirmNameClash: name => `이름 "${name}" 적용 (대화 속 동명 인물 있음)`,
         namesNeedWritable: '현재 상태에서 이름 변경 불가',
         saveCurrentAsVersion: '+ 현재 구성을 버전으로 저장',
         // [⋯] beside a version row: the screen reader hears which version's tools.
@@ -198,11 +201,11 @@ export const STRINGS = deepFreeze({
         chipAll: '전체',
         // Named for what it opens: the checkboxes that put this persona in groups.
         // Plain 편집 would now read as the manager's 편집 tab.
-        groupEditToggle: on => (on ? '완료' : '그룹'),
+        groupEditToggle: '그룹',
         // Multi select (user request). A dedicated button turns it on, the same
         // way 그룹 편집 does, rather than a long press: a long press on a list of
         // portraits is also how a phone starts a text selection or an image save.
-        selectToggle: on => (on ? '선택 완료' : '선택'),
+        selectToggle: '선택',
         selectedCount: n => `${n}개 선택`,
         selectNone: '선택 해제',
         selectAll: '전체 선택',
@@ -232,13 +235,14 @@ export const STRINGS = deepFreeze({
         footerVersions: '버전',
         footerHistory: '이력',
         footerGroups: '그룹',
-        footerSearch: '검색',
+        footerSearch: '항목 검색',
         managerMissing: '관리자 화면 미구현',
         stateUnread: '상태 미확인',
         ambiguous: '이름이 같은 페르소나가 여럿이라 대상 판별 불가. 편집 잠금',
         divergedBanner: '외부에서 설명문 직접 수정. 관리자 내용과 불일치',
         absorbNoItem: '가져올 항목 없음',
-        absorbNotOnly: '다른 항목에 본문이 있어 가져오기 불가. 되돌리기 또는 직접 편집',
+        absorbNoMatch: '항목 제목이 바뀌어 항목별 가져오기 불가. 되돌리기 또는 직접 편집',
+        absorbNoTitles: '항목 제목 "없음" 설정으로 항목별 가져오기 불가. 되돌리기 또는 직접 편집',
         switchAmbiguous: name => `${name}${iRaneun(name)} 이름이 여럿이라 전환 대상 확정 불가`,
         noSwitchCommand: '현재 빌드에 페르소나 전환 슬래시 커맨드 없음',
         switchFailed: name => `${name}${euRo(name)} 페르소나 전환 실패`,
@@ -270,7 +274,7 @@ export const STRINGS = deepFreeze({
         // The structure log stores a machine kind, and these are only how it reads.
         // The keys are the stored values and never change.
         logKinds: {
-            import: '가져오기',
+            import: '관리 시작',
             'persona-create': '페르소나 생성',
             'image-bind': '이미지 바인딩',
             'image-apply': '이미지 교체',
@@ -298,7 +302,7 @@ export const STRINGS = deepFreeze({
             'history-evicted': '이력 정리',
             'history-expired': '이력 기간 만료',
             'history-clear': '이력 전체 삭제',
-            'compose-missing': '빈 항목',
+            'compose-missing': '선택지 미지정 항목',
             'diverge-revert': '외부 수정 되돌리기',
             'diverge-absorb': '외부 수정 가져오기',
             'diverge-kept': '외부 수정 보관',
@@ -310,7 +314,7 @@ export const STRINGS = deepFreeze({
             'asset-select': '버전 에셋 선택',
             'image-crop': '이미지 위치 조절',
             'split-headings': '제목별 분류',
-            'split-own': '원래 항목대로 구성',
+            'split-own': '원래 항목으로 재구성',
             placement: '프롬프트 배치 변경',
             lorebook: '월드인포 연결',
             'name-local': '언어별 이름 변경',
@@ -334,8 +338,8 @@ export const STRINGS = deepFreeze({
             // reason.
             trimmed: n => `보관 개수 상한으로 이력 ${n}건 정리`,
             restored: n => `${n}번째 이력으로 복원`,
-            imported: '기존 설명문에서 가져오기',
-            importedSplit: n => `기존 설명문에서 가져오기 (항목 ${n}개로 분류)`,
+            imported: '기존 설명문 그대로',
+            importedSplit: n => `기존 설명문을 항목 ${n}개로 분리`,
             resplit: n => `본문 ${n}개`,
         },
 
@@ -351,8 +355,8 @@ export const STRINGS = deepFreeze({
         stateUnread: '상태 미확인',
         ambiguous: '이름이 같은 페르소나가 여럿이라 활성 대상 판별 불가. 편집 잠금',
         personaGone: 'SillyTavern에 존재하지 않는 페르소나. 위에서 다른 페르소나 고르기',
-        divergedBanner: '외부에서 설명문 직접 수정. 관리자 내용과 불일치. 여기서 저장하면 바깥 내용은 선택지로 보관',
-        missingBanner: (n, names) => `프롬프트에서 빠지는 빈 항목 ${n}개: ${names}`,
+        divergedBanner: '외부에서 설명문 직접 수정. 관리자 내용과 불일치. 관리자에서 저장 시 외부 수정 내용은 선택지로 보관',
+        missingBanner: (n, names) => `선택지 미지정으로 프롬프트에서 빠지는 항목 ${n}개: ${names}`,
         noContext: 'SillyTavern 연결 실패',
 
         /* 편집 tab */
@@ -393,15 +397,17 @@ export const STRINGS = deepFreeze({
         resplitNothing: '나눌 제목 줄 없음',
         /* 원래 항목대로 (user request): rebuild the items from the description's
            own sections, keeping their names and title style. */
-        ownSplit: '원래 항목대로',
+        ownSplit: '원래 항목으로 재구성',
         ownSplitTitle: '본문이 이미 제목으로 나뉘어 있으면 그 제목 이름 그대로 항목을 다시 구성',
         confirmOwnSplit: (n, names) => `항목 ${n}개로 다시 구성: ${names}`.slice(0, 60),
-        ownSplitNothing: '같은 모양의 제목 줄이 두 개 이상 없어 나눌 수 없음',
+        ownSplitNothing: '같은 모양의 제목 줄 2개 미만. 재구성 불가',
         ownSplitNotOnly: '본문이 한 항목에만 있을 때 사용 가능. 지금은 여러 항목에 본문 있음',
-        ownSplitNotExact: '그대로 재현되지 않는 형식이라 나누지 않음 (제목 모양이 섞여 있음)',
+        ownSplitNotExact: '원래 형식 재현 불가로 재구성 취소 (본문 없는 제목, 같은 모양을 다르게 쓴 제목 등)',
         ownSplitDone: n => `항목 ${n}개로 다시 구성 완료. 이전 본문은 이력 탭에서 복구 가능`,
+        ownSplitDoneNoHistory: n => `항목 ${n}개로 다시 구성 완료. 이력 보관 개수 0으로 이전 본문 미보관`,
         resplitDraft: '저장하지 않은 본문 편집이 있어 분류 불가',
         resplitDone: n => `본문 ${n}개 정리 완료. 이전 내용은 이력 탭에서 복구 가능`,
+        resplitDoneNoHistory: n => `본문 ${n}개 정리 완료. 이력 보관 개수 0으로 이전 내용 미보관`,
         newItemName: '새 항목 이름',
         itemName: '항목 이름',
         itemGone: '삭제된 항목',
@@ -428,7 +434,7 @@ export const STRINGS = deepFreeze({
         // The editor: its own header, its own footer.
         editorHeading: (itemName, choiceLabel) => `${itemName} · ${choiceLabel}`,
         editorAria: label => `${label} 내용`,
-        editorRestored: '임시 보관된 편집 복원. [저장]해야 실제 반영',
+        editorRestored: '임시 보관된 편집 복원. [저장] 전까지 미반영',
         editorDiscard: '임시 편집 버리기',
         editorDiscardTitle: '저장된 내용으로 되돌리기',
         editorCloseTitle: '편집기 닫기 (내용은 임시 보관)',
@@ -509,14 +515,14 @@ export const STRINGS = deepFreeze({
            everywhere at once. */
         localNamesHead: '언어별 이름',
         localNamesEmpty: '등록된 다른 이름 없음',
-        localNameEditHint: '행을 누르면 해당 언어 이름 수정',
+        localNameEditHint: '언어 행 누르기 → 이름 수정',
         localNamePrompt: lang => `${lang} 이름 (빈 칸은 삭제)`,
         localNameSaved: '이름 저장 완료',
         localNameRemoved: '이름 삭제 완료',
         /* What the check on the LANGUAGE rows means, and it has to say which rows:
            the same box draws a second check, on 자동 적용, that means a switch is
-           on. autoLocalName ships true and chatLanguage answers nothing under 40
-           characters, so a new chat routinely shows no ticked language row at all
+           on. autoLocalName ships true and a chat that has barely begun can leave
+           the conversation language undecided, so it can show no ticked language row at all
            and the only check on screen is that switch.
 
            Named as the SillyTavern name rather than 현재 적용된 이름, because the
@@ -545,15 +551,15 @@ export const STRINGS = deepFreeze({
         applyChatOnlyActive: '활성 페르소나가 아니라 채팅 반영 불가. 먼저 전환 필요',
         confirmApplyNameList: (from, to) => `목록 이름 "${from}" → "${to}"`,
         confirmApplyNameChat: (from, to) => `채팅 이름 "${from}" → "${to}" ({{user}} 포함)`,
-        confirmApplyNameClash: (to, who) => `채팅 이름 "${to}" 적용 (대화 속 "${who}"와 동명)`,
+        confirmApplyNameClash: to => `채팅 이름 "${to}" 적용 (대화 속 동명 인물 있음)`,
         listNameApplied: name => `목록 이름 "${name}" 변경 완료`,
-        autoNameClashSkipped: (name, who) => `"${who}"와 동명이라 자동 적용 건너뜀: ${name}`,
+        autoNameClashSkipped: name => `대화 속 동명 인물 있음. 자동 적용 생략: ${name}`,
         // 자동 적용의 상태와 그 상태를 뒤집는 버튼. 설정 서랍에도 같은 스위치가
         // 있지만, 이름을 적어 넣는 자리에서 바로 켜고 끌 수 있어야 한다.
         autoNameRow: '자동 적용',
         autoNameTurnOn: '켜기',
         autoNameTurnOff: '끄기',
-        autoNameHint: '대화 언어를 보고 그 언어의 이름으로 자동 변경. 내 메시지, 캐릭터 답장, 첫 메시지, 캐릭터 이름과 설명을 함께 보고 판단. 등록된 이름이 있는 언어에만 작동',
+        autoNameHint: '대화 언어를 보고 해당 언어의 이름으로 자동 변경. 내 메시지, 캐릭터 답장, 첫 메시지, 캐릭터 카드, 캐릭터 이름, 페르소나 설명을 함께 보고 판단. 등록된 이름이 있는 언어에만 작동',
         localNameNone: '해당 언어에 등록된 이름 없음',
         localNameTaken: '같은 이름의 페르소나가 이미 있음. 이름 판별 불가로 변경 취소',
         localNameApplied: name => `${name}${euRo(name)} 이름 변경 완료`,
@@ -594,7 +600,7 @@ export const STRINGS = deepFreeze({
         createPersona: '새 페르소나 생성',
         createNamePrompt: '새 페르소나 이름',
         createNameTaken: name => `이미 있는 이름: "${name}"`,
-        confirmCreatePersona: name => `"${name}" 새 페르소나 생성 (빈 구성, 현재 페르소나 이미지 복사됨)`,
+        confirmCreatePersona: name => `"${name}" 새 페르소나 생성 (빈 구성, 현재 페르소나 이미지 복사)`,
         createNoCommand: '페르소나 생성 불가: 현재 빌드에 복제 커맨드 없음',
         createManyFound: '새 페르소나가 여럿 늘어 판별 불가. 기본 구성 생략',
         createRenameFailed: name => `생성 완료. 이름 변경 실패로 "${name}" 유지`,
@@ -605,7 +611,7 @@ export const STRINGS = deepFreeze({
            lists, and what gets replaced is our record for it. */
         copyOpen: '다른 페르소나로 복사',
         copyHead: '복사 대상 고르기',
-        copyGuide: 'SillyTavern에 이미 있는 페르소나로만 복사 가능. 새 페르소나 만들기는 미구현',
+        copyGuide: 'SillyTavern에 이미 있는 페르소나로만 복사 가능. 새 페르소나는 [새 페르소나 생성]',
         copyCancel: '복사 취소',
         copyConfirm: (from, to) => `"${from}" 구성을 "${to}"에 복사 ("${to}"의 기존 데이터 대체)`,
         copyDone: name => `${name}${euRo(name)} 복사 완료`,
@@ -644,9 +650,10 @@ export const STRINGS = deepFreeze({
         framingSavedLater: '위치·크기 저장 완료. 해당 버전 적용 시 반영',
         framingDecodeFailed: label => `이미지 크기 확인 실패로 교체 취소: ${label}`,
         framingUploadHead: '새 이미지 위치·크기',
-        framingApply: '이 위치로 적용',
-        framingWhole: '자르지 않고 그대로',
+        framingApply: '현재 위치로 적용',
+        framingWhole: '원본 그대로 적용',
         framingUploading: '올리는 중',
+        framingConfirmLeave: '고른 이미지 버리고 닫기',
         // Replacing the picture overwrites SillyTavern's avatar file, so the one
         // that was there is copied into the asset folder first. Said out loud
         // because it happens once and silently changes what the folder holds.
@@ -677,7 +684,7 @@ export const STRINGS = deepFreeze({
         // Rule 6 says a disabled control explains itself, and rule 4 says the
         // explanation names the next action: the repair select is inside this
         // row's own drawer, so the sentence says how to get there.
-        versionNotApplicableReason: '지정된 선택지 없음. [⋯]를 열어 다시 고르기',
+        versionNotApplicableReason: '지정된 선택지 없음. 버전 행 열기 → 다시 고르기',
         noItemsInVersion: '항목 없음',
         // An empty state is a bare negation; the button standing right under it is
         // already the statement of the next action, so the sentence does not
@@ -714,7 +721,7 @@ export const STRINGS = deepFreeze({
         // A snapshot whose body is empty still needs a row the eye can land on.
         previewEmpty: '(빈 내용)',
         historyRestore: '해당 시점으로 되돌리기',
-        historyRestoreNote: '되돌리기 전 내용도 이력에 보관되므로 되돌린 작업의 재취소 가능',
+        historyRestoreNote: '되돌리기 전 내용도 이력에 보관. 되돌리기 취소 가능',
         confirmRestore: '해당 시점으로 되돌리기 (현재 내용도 이력 보관)',
         snapshotGone: '삭제된 이력',
         diffLineOnly: '본문이 길어 줄 단위로만 비교',
@@ -746,9 +753,9 @@ export const STRINGS = deepFreeze({
         // leads the bracket. What follows it is the same warning as above.
         confirmDropAssetBound: (label, n) => `에셋 "${label}" 삭제 (버전 ${n}개 그림 해제 · 서버 파일 삭제)`,
         targetMovedNotDeleted: '대상 페르소나 변경으로 삭제 취소',
-        assetInsert: '채팅에 넣기',
+        assetInsert: '입력창에 넣기',
         assetInsertTitle: '입력창 커서 자리에 태그 삽입 후 현재 화면 닫기',
-        assetVersionNote: '버전마다 쓸 에셋은 버전 탭에서 고르기. 아무것도 고르지 않으면 전체 사용',
+        assetVersionNote: '버전마다 쓸 에셋은 버전 탭에서 고르기. 기본값은 전체, 모두 해제 시 에셋 없음',
         assetSelectionAll: '에셋: 전체',
         assetSelectionSome: n => `에셋: ${n}개 선택`,
         assetListLoading: '에셋 목록 준비 중',
@@ -778,10 +785,10 @@ export const STRINGS = deepFreeze({
         noPersona: '(페르소나 없음)',
         pickPersonaHere: '위에서 페르소나 고르기',
         personasUnavailable: 'SillyTavern 페르소나 목록 응답 없음',
-        notAdoptedTag: '미등록',
-        confirmAdopt: '현재 페르소나 관리 시작 (기존 설명문 보존)',
-        adoptButton: '기존 설명문 가져오기',
-        targetMovedNotAdopted: '대상 페르소나 변경으로 가져오기 취소',
+        notAdoptedTag: '관리 전',
+        confirmAdopt: '관리 시작 (기존 설명문 보존)',
+        adoptButton: '관리 시작',
+        targetMovedNotAdopted: '대상 페르소나 변경으로 관리 시작 취소',
     },
 
     /* The settings drawer. */
@@ -820,14 +827,14 @@ export const STRINGS = deepFreeze({
         defaultHeadingFormat: '새 페르소나의 항목 제목',
         defaultHeadingFormatHint: '관리를 새로 시작하는 페르소나가 쓸 형식. 이미 만든 페르소나는 편집 탭에서 각각 변경',
         splitOnAdopt: '관리 시작 시 설명문 가져오기',
-        splitOnAdoptHint: '원래 항목 그대로: 설명문이 이미 제목으로 나뉘어 있으면 그 제목 이름과 모양 그대로 항목을 만듦. 설명문 글자는 바뀌지 않음. 나뉘어 있지 않거나 그대로 재현되지 않으면 한 항목에 통째로. 기본 항목에 맞춰 분류: 외모·성격 같은 기본 이름으로 옮김',
+        splitOnAdoptHint: '원래 항목 그대로: 설명문에 이미 있는 제목의 이름·순서·모양으로 항목 구성, 설명문 글자 변경 없음. 같은 모양의 제목이 2개 미만이거나 그대로 재현되지 않는 설명문은 첫 항목에 전체 배치. 한 항목에 통째로: 항상 첫 항목에 전체 배치. 기본 항목에 맞춰 분류: 외모·성격 같은 기본 항목으로 이동',
         adoptModeNames: Object.freeze({
             own: '원래 항목 그대로',
             whole: '한 항목에 통째로',
             defaults: '기본 항목에 맞춰 분류',
         }),
         autoLocalName: '언어별 이름 자동 적용',
-        autoLocalNameHint: '대화 언어(내 메시지 > 캐릭터 답장 > 첫 메시지·캐릭터 이름과 설명 순으로 비중)를 보고 그 언어의 이름으로 페르소나 이름 자동 변경. 등록된 이름이 없거나 같은 이름의 페르소나가 있으면 그대로 유지',
+        autoLocalNameHint: '대화 언어(비중: 내 메시지 > 캐릭터 답장 > 첫 메시지·캐릭터 카드 > 캐릭터 이름 > 페르소나 설명)를 보고 해당 언어의 이름으로 페르소나 이름 자동 변경. 등록된 이름이 없거나, 같은 이름의 페르소나 또는 대화 속 동명 인물이 있으면 그대로 유지',
         injectAssetMacros: '에셋 매크로 주입',
         injectAssetMacrosHint: '끄면 {{persona_assets}}와 {{persona_asset_prompt}} 모두 빈 문자열',
         assetTemplate: '에셋 지시문 템플릿',

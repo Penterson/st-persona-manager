@@ -1,6 +1,6 @@
 {
   "name": "st-persona-manager",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "SillyTavern extension: compose persona descriptions from items and choices, keep versions and history, and attach per-persona image assets.",
   "private": true,
   "type": "module",
@@ -14,8 +14,8 @@
     "node": ">=20"
   },
   "scripts": {
-    "check": "node --check index.js && for f in modules/*.js; do node --check \"$f\" || exit 1; done",
-    "test": "npm run check && node --test test/*.test.mjs",
+    "check": "node test/run.mjs --check-only",
+    "test": "node test/run.mjs",
     "smoke": "node test/browser/smoke.mjs"
   },
   "devDependencies": {

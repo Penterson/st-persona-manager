@@ -22,6 +22,10 @@
 .pm-quickbar-panel,
 .pm-manager-panel,
 .pm-settings {
+    /* Korean breaks between words, not inside one (선/택지, 그/대로); a token too
+       long for its box still wraps rather than overflowing. */
+    word-break: keep-all;
+    overflow-wrap: break-word;
     /* Surfaces, in order of how far they sit above the panel's ground. */
     --pm-lift-1: color-mix(in srgb, currentColor 6%, transparent);
     --pm-lift-2: color-mix(in srgb, currentColor 11%, transparent);
@@ -43,8 +47,9 @@
     --pm-r-pill: 0;
     /* The grid line. One weight everywhere, drawn from the ink rather than from a
        washed out border colour, because in this reference the line IS the layout
-       and a faint line reads as an accident. */
-    --pm-rule: 1px solid color-mix(in srgb, currentColor 42%, transparent);
+       and a faint line reads as an accident. 55%, not 42%: the same line is the
+       only edge an unfilled input has, and 42% measured 2.6:1 on white. */
+    --pm-rule: 1px solid color-mix(in srgb, currentColor 55%, transparent);
     --pm-rule-strong: 1px solid currentColor;
 
     /* RHYTHM. Two distances, because there are two relationships.
@@ -1026,22 +1031,18 @@
 
 /* Rule 3's other half: [저장] and [목록으로] stay at the bottom edge while the
    body is scrolled. Sticky is relative to .pm-scroll, which is why the whole
-   editor is drawn inside it. The background is the panel's own theme tint, and
-   that tint is translucent by design, so one layer let the editor text show
-   through this strip on every scroll. Two gradient copies of the same variable
-   stack on the base coat: three layers of alpha a read as 1-(1-a)^3 without
-   inventing a colour the theme does not have. backdrop-filter was rejected for
-   this exact strip, because this device re-filters on every scrolled frame. */
+   editor is drawn inside it. The theme's blur tint is translucent by design and
+   let the scrolled text show through this strip, so the strip is painted in
+   --pm-on-mass: the same tint with its alpha set to 1 (see the @supports blocks).
+   backdrop-filter was rejected for this exact strip, because this device
+   re-filters on every scrolled frame. */
 .pm-manager-editorfoot {
     position: sticky;
     bottom: 0;
     z-index: 1;
     padding: 8px 0;
-    background-color: var(--SmartThemeBlurTintColor);
-    background-image:
-        linear-gradient(var(--SmartThemeBlurTintColor), var(--SmartThemeBlurTintColor)),
-        linear-gradient(var(--SmartThemeBlurTintColor), var(--SmartThemeBlurTintColor));
-    border-top: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+    background-color: var(--pm-on-mass);
+    border-top: var(--pm-rule-strong);
 }
 
 /* The panel is unselectable everywhere else; the editor is the one place text
@@ -1211,6 +1212,14 @@
     padding: 6px 12px 10px;
 }
 
+/* Inside a box that already has its 12px, a note's and a heading's own side
+   padding put them 12-16px further in than the buttons and rows beside them
+   (the restore note at 26px, 변경 기록 at 30px, the rows at 13px). */
+.pm-manager-historydetail .pm-manager-note,
+.pm-manager-logbox .pm-manager-loghead {
+    padding-inline: 0;
+}
+
 /* Same as the panels: the shell keeps the border and clips, the
    wrapper inside scrolls, so this box's own scrollbar stays inside its rounded
    edge. The cap comes from sizeToViewport's measured px (the 40vh this used to be
@@ -1261,6 +1270,12 @@
 }
 
 .pm-manager-logrow:last-child { border-bottom: none; }
+
+/* The row is already 0.8em; the time column's own 0.75em compounded to 0.6em
+   (about 9px). Inside a log row the time keeps the row's size. */
+.pm-manager-logrow > .pm-manager-historytime {
+    font-size: 1em;
+}
 
 .pm-manager-logkind {
     flex: 0 0 auto;
@@ -1403,6 +1418,10 @@
 .pm-checkbox {
     appearance: none;
     -webkit-appearance: none;
+    /* Border, fill and tick are all currentColor, and an input's own colour is
+       the browser's FieldText (black) unless something sets it: a black tick on
+       the gold fill measured 2.6:1 and the unticked border 1.07:1 on dark. */
+    color: inherit;
     position: relative;
     flex: none;
     box-sizing: border-box;
@@ -1436,7 +1455,6 @@
 
 .pm-settings-check:disabled,
 .pm-checkbox:disabled {
-    opacity: 0.4;
     cursor: default;
 }
 
@@ -2284,9 +2302,26 @@
 .pm-search-input,
 .pm-settings-select,
 .pm-settings-number,
-.pm-manager-select {
+.pm-manager-select,
+.pm-quickbar-sort,
+.pm-quickbar-newlabel-input {
     border: var(--pm-rule);
     background: none;
+}
+
+/* The browser's grey placeholder measured 3.06:1 on dark, and on the search and
+   new-group fields it is the only label there is. */
+.pm-panel ::placeholder,
+.pm-settings ::placeholder {
+    color: var(--pm-muted);
+    opacity: 1;
+}
+
+/* The search field's own clear button is a 9px blue cross outside the theme;
+   the search toggle beside it already clears and closes. */
+.pm-search-input::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+    appearance: none;
 }
 
 /* The search row and the pager are bands of the grid, not floating strips. */
@@ -2366,16 +2401,6 @@
     padding: 10px 14px;
 }
 
-.pm-manager-editorfoot {
-    border-top: var(--pm-rule-strong);
-    /* background-color, NOT the background shorthand. The rule further up stacks
-       two gradient copies of this same variable on top of the base coat, because
-       a SillyTavern blur tint is translucent by design and one layer let the
-       body text scroll through the [저장] strip. The shorthand here reset
-       background-image to none and gave that back, on every theme whose tint has
-       alpha, which is most of them. */
-    background-color: var(--SmartThemeBlurTintColor);
-}
 
 .pm-manager-editor-text,
 .pm-settings-textarea,
@@ -2579,21 +2604,28 @@
     .pm-dragging { opacity: 0.7; }
 }
 
-/* The quick panel's foot now carries six shortcuts rather than two, so it wraps
-   into a grid of cells instead of a single row that would squeeze each button
-   below the thumb floor on a 411px screen. */
+/* The quick panel's foot carries six shortcuts into the manager's tabs. It is
+   the way into the manager, so it stays pinned to the bottom of the scroll box:
+   at the end of the list it sat about 1,450px down with 20 personas. One row of
+   six cells keeps the pinned strip one thumb high; on a 411px screen a cell is
+   about 66px wide, and the labels are two to four letters. */
 .pm-quickbar-footer {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(6, 1fr);
     gap: 0;
+    padding: 0;
     border-top: var(--pm-rule-strong);
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    background-color: var(--pm-on-mass);
 }
 
 .pm-quickbar-footer .pm-quickbar-btn {
     border: none;
     border-left: var(--pm-rule);
-    border-top: var(--pm-rule);
     min-height: 46px;
+    padding: 4px 2px;
 }
 
 /* No reach at all here, because there is nowhere to reach into. This footer is a
@@ -2606,8 +2638,17 @@
     content: none;
 }
 
-.pm-quickbar-footer .pm-quickbar-btn:nth-child(3n + 1) { border-left: none; }
-.pm-quickbar-footer .pm-quickbar-btn:nth-child(-n + 3) { border-top: none; }
+.pm-quickbar-footer .pm-quickbar-btn:first-child { border-left: none; }
+
+/* A toggle that is on (검색, 선택, 그룹 in the persona list) is filled like
+   every other "you are in this state" control, and keeps its label: a label
+   that grew to 검색 닫기 or 선택 완료 squeezed the two selects beside it until
+   타일+이름 read as 타일+(. */
+.pm-quickbar-btn[aria-pressed="true"] {
+    background: var(--pm-mass);
+    color: var(--pm-on-mass);
+    border-color: var(--pm-mass);
+}
 
 /* ── Multi select and bulk actions ───────────────────────────────────────────
    A picked row is filled, the same fill every other "you are in this state"
@@ -2831,12 +2872,15 @@
 /* Focus was drawn by the browser's default ring alone, which lands on our filled
    ink blocks and vanishes. Inset rather than outside: these rows run the full
    width of a panel that clips, so an outward ring would be cut off at both ends.
-   :focus-visible, not :focus, so a tap does not leave a ring behind it. */
+   :focus-visible, not :focus, so a tap does not leave a ring behind it.
+   Ink ring plus an inset accent band, so the ring clears 3:1 on light and dark
+   themes alike; the accent alone measured 1.9:1 on dark ink. */
 .pm-panel :focus-visible,
 .pm-settings :focus-visible,
 .pm-quickbar:focus-visible {
-    outline: 2px solid var(--pm-accent);
+    outline: 2px solid var(--pm-mass, var(--SmartThemeBodyColor));
     outline-offset: -2px;
+    box-shadow: inset 0 0 0 4px var(--pm-accent, var(--SmartThemeQuoteColor));
 }
 
 /* On a filled block the accent is the one colour that can disappear, because the
@@ -2854,6 +2898,7 @@
 .pm-manager-tab-active:focus-visible,
 .pm-quickbar-chip-active:focus-visible,
 .pm-manager-primary:focus-visible,
+.pm-quickbar-btn[aria-pressed="true"]:focus-visible,
 .pm-row.pm-picked:focus-visible {
     outline-color: var(--pm-on-mass);
 }
@@ -3256,13 +3301,24 @@
    inside it and is clipped by it. touch-action none on the frame only: one finger
    drags the picture there, and everywhere else on the screen it still scrolls.
    The dashed square is the centre square a list or chat icon shows of a 2:3
-   picture, so it sits a sixth of the height down. */
+   picture, so it sits a sixth of the height down. Never wider than the screen,
+   centred. */
 .pm-framing {
     display: flex;
     flex-direction: column;
-    align-items: flex-start;
+    align-items: center;
     gap: 8px;
-    padding: 6px 0;
+    padding: 10px 12px;
+    max-width: 100%;
+    box-sizing: border-box;
+}
+
+.pm-framing .pm-manager-picklabel {
+    align-self: stretch;
+}
+
+.pm-framing-frame:active {
+    cursor: grabbing;
 }
 
 .pm-framing-frame {
@@ -3298,10 +3354,12 @@
     pointer-events: none;
 }
 
+/* accent-color follows currentColor, and an input's own colour is the
+   browser's FieldText (black) unless it inherits the panel's. */
 .pm-framing-zoom {
-    width: 240px;
-    max-width: 100%;
+    width: min(240px, 100%);
     min-height: 44px;
+    color: inherit;
     accent-color: currentColor;
 }
 
@@ -3360,9 +3418,9 @@
 }
 
 /* Disabled checkboxes vanished (1.4:1), so ticked and unticked looked alike in
-   the read-only drawer. */
-.pm-settings-check:disabled,
-.pm-checkbox:disabled {
+   the read-only drawer. Scoped like the general disabled rule above, which
+   would otherwise win on specificity and hold them at 0.6. */
+:is(.pm-panel, .pm-settings) :is(.pm-settings-check, .pm-checkbox):disabled {
     opacity: 0.7;
 }
 
@@ -3393,22 +3451,19 @@
 }
 
 /* Warning banners were told apart by an accent ring alone (1.9:1 on dark ink).
-   A thick on-mass rule on the leading edge says it without colour. */
+   A second ring in the ground colour, inside the accent one, says it by shape:
+   the banner is an ink block, so that inner line clears contrast on any theme.
+   A thick leading strip was tried in both colours: in the ground colour it read
+   as a gap beside the banner, in ink it vanished into the fill, and either way
+   it covered the left side of the ring. */
 .pm-quickbar-warn,
 .pm-manager-warn {
-    box-shadow: inset 6px 0 0 var(--pm-on-mass), inset 0 0 0 2px var(--pm-accent);
+    box-shadow: inset 0 0 0 2px var(--pm-accent), inset 0 0 0 4px var(--pm-on-mass);
 }
 
-/* Focus ring and the current-tile ring: ink inside, accent outside, so they
-   clear 3:1 on light and dark themes alike. */
-.pm-panel :focus-visible,
-.pm-settings :focus-visible,
-.pm-quickbar:focus-visible {
-    outline: 2px solid var(--pm-mass, var(--SmartThemeBodyColor));
-    outline-offset: -2px;
-    box-shadow: inset 0 0 0 4px var(--pm-accent, var(--SmartThemeQuoteColor));
-}
-
+/* The current-tile ring: ink inside, accent outside, so it clears 3:1 on light
+   and dark themes alike. (The focus ring is with the other focus rules above;
+   a copy here used to undo their ink-control exception.) */
 .pm-quickbar-tile-active .pm-quickbar-tileimgbox {
     box-shadow: 0 0 0 2px var(--pm-mass), 0 0 0 4px var(--pm-accent);
 }
@@ -3424,15 +3479,6 @@
 .pm-mass .pm-mark {
     background: var(--pm-on-mass);
     color: var(--pm-mass);
-}
-
-/* Input edges are the only edge an unfilled input has; 42% measured 2.6:1 on
-   white. 55% clears 3:1. */
-.pm-panel,
-.pm-quickbar-panel,
-.pm-manager-panel,
-.pm-settings {
-    --pm-rule: 1px solid color-mix(in srgb, currentColor 55%, transparent);
 }
 
 /* The browser's own dropdown list showed light text on its white list under a
@@ -3456,11 +3502,6 @@
         --pm-mass-muted: color-mix(in srgb, Canvas 68%, CanvasText);
         color-scheme: light dark;
     }
-}
-
-/* The save bar let a third of the scrolled text show through it. */
-.pm-manager-editorfoot {
-    background: var(--pm-on-mass);
 }
 
 /* Tap targets. Rows without a portrait were 37-44px and sat edge to edge. */
@@ -3520,31 +3561,3 @@
     .pm-grain::before { display: none; }
 }
 
-/* The picture framing editor: never wider than the screen, centred. */
-.pm-framing {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 12px;
-    max-width: 100%;
-    box-sizing: border-box;
-}
-
-.pm-framing .pm-manager-picklabel {
-    align-self: stretch;
-}
-
-.pm-framing-frame {
-    max-width: 100%;
-    touch-action: none;
-    cursor: grab;
-}
-
-.pm-framing-frame:active {
-    cursor: grabbing;
-}
-
-.pm-framing-zoom {
-    width: min(240px, 100%);
-}

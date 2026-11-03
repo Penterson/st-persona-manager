@@ -20,7 +20,7 @@
     --SmartThemeQuoteColor: #8a5a1c;
   }
   html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; background: #111; color: var(--SmartThemeBodyColor); }
-  body.light { background: #fff; }
+  body.light, html:has(body.light) { background: #fff; }
   #chat { padding: 12px; height: 60vh; overflow: auto; }
   .mes { padding: 6px; }
   #send_form { display: flex; gap: 6px; padding: 8px; }
