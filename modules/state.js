@@ -1,6 +1,6 @@
 // Single place that knows "which persona are we on and what is its data".
 // Everything the UI needs goes through here.
-import { MODULE_NAME, migrate, getPersona, ensurePersona, usageBytes, textSignature } from './store.js';
+import { MODULE_NAME, migrate, getPersona, ensurePersona, usageBytes, textSignature, makeId } from './store.js';
 import {
     resolveAvatar, findDuplicateNames, loadPreciseApi, freshContext, selectedAvatarFromDom,
 } from './ctx.js';
@@ -226,7 +226,34 @@ function mustWrite(ctx, avatarId, persona, write) {
     return !hasDiverged(ctx, avatarId, persona);
 }
 
-export function saveAndCompose(expectedAvatar, { write = true } = {}) {
+/* An outside edit is never overwritten without a copy.
+
+   With the 외부 수정 banner up, only applying a version used to ask first; every
+   other text write - a choice picked, a body saved, an item moved - rewrote
+   SillyTavern's description with the composed text and the edit made in
+   SillyTavern's own persona screen was gone, with no snapshot anywhere. Now the
+   outside text is kept as a new choice in the item that holds the text (or the
+   first item), not picked, so the prompt is what the user just did here and the
+   other text is one tap away. [되돌리기] and [가져오기] pass outside: 'discard',
+   because resolving the edit is what they are. */
+function keepOutsideText(ctx, avatarId, persona) {
+    const text = ctx.powerUserSettings?.persona_descriptions?.[avatarId]?.description;
+    if (typeof text !== 'string' || !text.trim()) return null;
+    const sections = Array.isArray(persona.sections) ? persona.sections : [];
+    if (!sections.length) return null;
+    const live = section => (persona.variants?.[section.id] ?? [])
+        .find(variant => variant?.id === persona.activePicks?.[section.id]);
+    const filled = sections.filter(section => (live(section)?.text ?? '').trim());
+    const section = filled.length === 1 ? filled[0] : sections[0];
+    if (!Array.isArray(persona.variants[section.id])) persona.variants[section.id] = [];
+    const now = Date.now();
+    const label = STRINGS.common.outsideKeptLabel(now);
+    persona.variants[section.id].push({ id: makeId(ctx.uuidv4), label, text, updatedAt: now });
+    addLog(persona, 'diverge-kept', `${section.name ?? ''} / ${label}`, now);
+    return { section: section.name ?? '', label };
+}
+
+export function saveAndCompose(expectedAvatar, { write = true, outside = 'keep' } = {}) {
     const ctx = provider();
     if (!ctx) return null;
     const s = getState();
@@ -255,6 +282,8 @@ export function saveAndCompose(expectedAvatar, { write = true } = {}) {
         refreshWith(ctx);
         return kept;
     }
+    const keptOutside = outside === 'keep' && hasDiverged(ctx, s.avatar, s.persona)
+        ? keepOutsideText(ctx, s.avatar, s.persona) : null;
     const result = writeDescription(ctx, s.avatar, s.persona, active.avatar);
     if (result.missing.length) {
         // A section that vanished from the prompt must leave a trace.
@@ -263,7 +292,7 @@ export function saveAndCompose(expectedAvatar, { write = true } = {}) {
         ctx.saveSettingsDebounced();
     }
     refreshWith(ctx);
-    return result;
+    return keptOutside ? { ...result, keptOutside } : result;
 }
 
 // Manager picker support: create our entry for ANY persona SillyTavern knows,
@@ -294,7 +323,7 @@ export function adoptFor(avatarId) {
 // never which persona this call writes. The singular prompt field is written only
 // when the target happens to be the live active persona, which writeDescription
 // already decides from its fourth argument.
-export function saveAndComposeFor(avatarId, { write = true } = {}) {
+export function saveAndComposeFor(avatarId, { write = true, outside = 'keep' } = {}) {
     const ctx = provider();
     if (!ctx) return null;
     const root = getRoot();
@@ -311,13 +340,15 @@ export function saveAndComposeFor(avatarId, { write = true } = {}) {
         refreshWith(ctx);
         return kept;
     }
+    const keptOutside = outside === 'keep' && hasDiverged(ctx, avatarId, persona)
+        ? keepOutsideText(ctx, avatarId, persona) : null;
     const result = writeDescription(ctx, avatarId, persona, active.avatar);
     if (result.missing.length) {
         addLog(persona, 'compose-missing', result.missing.join(', '), Date.now());
         ctx.saveSettingsDebounced();
     }
     refreshWith(ctx);
-    return result;
+    return keptOutside ? { ...result, keptOutside } : result;
 }
 
 export async function refreshAssets() {

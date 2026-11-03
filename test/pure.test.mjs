@@ -214,6 +214,9 @@ test('versions: summary, applicability, applied state, duplicate', () => {
     version.picks = { ...p.activePicks, ghost: 'x' };
     assert.equal(versionApplicable(p, 'v'), true, 'a pick for a deleted section is skipped');
     p.activeVersionId = 'v';
+    assert.equal(versionAlreadyApplied(p, 'v'), true, 'a pick for a deleted section does not make it modified');
+    assert.equal(describeSelection(p), 'V', 'nor does it show (수정 있음)');
+    version.picks = { ...p.activePicks, [sid]: 'elsewhere' };
     assert.equal(versionAlreadyApplied(p, 'v'), false);
     version.picks = { ...p.activePicks };
     assert.equal(versionAlreadyApplied(p, 'v'), true);

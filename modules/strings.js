@@ -110,7 +110,13 @@ export const STRINGS = deepFreeze({
         versionNotApplicable: '해당 버전은 현재 페르소나에 적용 불가',
         // After 관리 시작 split the description by its titles.
         adoptSplit: n => `기존 설명문을 항목 ${n}개로 나눠 가져오기 완료`,
-        confirmVersionOverOutsideEdit: '버전 변경 (외부 수정분 소실)',
+        // An outside edit kept as a choice before a write replaced it.
+        outsideKept: section => `SillyTavern에서 고친 설명문을 '${section}' 항목의 선택지로 보관`,
+        outsideKeptLabel: stamp => {
+            const d = new Date(Number(stamp) || 0);
+            const two = n => String(n).padStart(2, '0');
+            return `외부 수정 ${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
+        },
         newVersionName: '새 버전 이름',
         // A pick left naming a choice that was deleted. Never snapped to the first
         // option: that would draw a combination the prompt does not contain.
@@ -295,6 +301,7 @@ export const STRINGS = deepFreeze({
             'compose-missing': '빈 항목',
             'diverge-revert': '외부 수정 되돌리기',
             'diverge-absorb': '외부 수정 가져오기',
+            'diverge-kept': '외부 수정 보관',
             'tag-add': '태그 추가',
             'tag-remove': '태그 삭제',
             'heading-format': '제목 형식 변경',
@@ -343,7 +350,7 @@ export const STRINGS = deepFreeze({
         stateUnread: '상태 미확인',
         ambiguous: '이름이 같은 페르소나가 여럿이라 활성 대상 판별 불가. 편집 잠금',
         personaGone: 'SillyTavern에 존재하지 않는 페르소나. 위에서 다른 페르소나 고르기',
-        divergedBanner: '외부에서 설명문 직접 수정. 관리자 내용과 불일치. 빠른 전환 패널에서 되돌리기나 가져오기 가능',
+        divergedBanner: '외부에서 설명문 직접 수정. 관리자 내용과 불일치. 여기서 저장하면 바깥 내용은 선택지로 보관',
         missingBanner: (n, names) => `프롬프트에서 빠지는 빈 항목 ${n}개: ${names}`,
         noContext: 'SillyTavern 연결 실패',
 
@@ -505,11 +512,11 @@ export const STRINGS = deepFreeze({
            '적용' would be read against the chat, and the chat is somebody else's.
            It also borrows the wording localNameBase already prints two rows up. */
         localNameAppliedHint: '언어 행의 체크 표시는 SillyTavern 이름',
-        localNameCurrent: '현재 채팅 언어',
+        localNameCurrent: '지금 대화 언어',
         // A silent no-op is the failure mode this feature can have: the chat is
         // too short, or this build hands us no chat at all, and nothing happens
         // with nothing said. The row says what it sees instead.
-        localNameNoChat: '판별 불가 (최근 대화 40자 미만)',
+        localNameNoChat: '판별 불가 (대화와 캐릭터 정보에 글자가 부족)',
         localNameBase: name => `SillyTavern 이름 ${name}`,
         // 적용 is what carries the name into the chat. Storing an alternate changes
         // nothing by itself, and a screen that looked like it had done something
@@ -534,7 +541,7 @@ export const STRINGS = deepFreeze({
         autoNameRow: '자동 적용',
         autoNameTurnOn: '켜기',
         autoNameTurnOff: '끄기',
-        autoNameHint: '채팅 언어를 보고 그 언어의 이름으로 자동 변경. 등록된 이름이 있는 언어에만 작동',
+        autoNameHint: '대화 언어를 보고 그 언어의 이름으로 자동 변경. 내 메시지, 캐릭터 답장, 첫 메시지, 캐릭터 이름과 설명을 함께 보고 판단. 등록된 이름이 있는 언어에만 작동',
         localNameNone: '해당 언어에 등록된 이름 없음',
         localNameTaken: '같은 이름의 페르소나가 이미 있음. 이름 판별 불가로 변경 취소',
         localNameApplied: name => `${name}${euRo(name)} 이름 변경 완료`,
@@ -553,7 +560,7 @@ export const STRINGS = deepFreeze({
         // both of them present). A build without one names which one, because that
         // is the fact the next round would need.
         changeImageNoControl: id => `SillyTavern 업로드 칸 없음: ${id}`,
-        changeImageDone: '이미지 교체 완료. SillyTavern 화면 일부는 새로고침 후 반영',
+        changeImageDone: '이미지 교체 완료',
         // The server answers the upload directly, so a failure carries its status
         // rather than a guess about what the picture looks like now.
         changeImageFailed: detail => `이미지 교체 실패: ${detail}`,
@@ -617,13 +624,17 @@ export const STRINGS = deepFreeze({
            and the dashed square is the part every list and chat icon shows. */
         versionImageFramed: label => `${label} · 위치 조절`,
         versionImageFrame: '위치·크기 조절',
-        framingHint: '끌어서 위치 · 두 손가락이나 막대로 확대 → [저장]',
+        framingHint: '끌어서 위치 · 두 손가락, 휠, 막대로 확대',
         framingGuide: '점선 안: 목록과 채팅 아이콘에 보이는 범위',
         framingZoom: '확대 배율',
         framingReset: '처음 위치',
         framingLoadFailed: '이미지 불러오기 실패',
         framingSavedLater: '위치·크기 저장 완료. 해당 버전 적용 시 반영',
         framingDecodeFailed: label => `이미지 크기 확인 실패로 교체 취소: ${label}`,
+        framingUploadHead: '새 이미지 위치·크기',
+        framingApply: '이 위치로 적용',
+        framingWhole: '자르지 않고 그대로',
+        framingUploading: '올리는 중',
         // Replacing the picture overwrites SillyTavern's avatar file, so the one
         // that was there is copied into the asset folder first. Said out loud
         // because it happens once and silently changes what the folder holds.
@@ -728,7 +739,6 @@ export const STRINGS = deepFreeze({
         assetVersionNote: '버전마다 쓸 에셋은 버전 탭에서 고르기. 아무것도 고르지 않으면 전체 사용',
         assetSelectionAll: '에셋: 전체',
         assetSelectionSome: n => `에셋: ${n}개 선택`,
-        assetOpenTabFirst: '에셋 탭에서 목록 먼저 열기',
         assetListLoading: '에셋 목록 준비 중',
         assetNoneForPersona: '해당 페르소나에 등록된 에셋 없음',
         sendBoxMissing: '입력창 찾기 실패',
@@ -800,7 +810,7 @@ export const STRINGS = deepFreeze({
         splitOnAdopt: '가져올 때 항목별 분류',
         splitOnAdoptHint: '관리 시작 시 설명문의 제목 줄(## 외모, 외모:, [외모] 등)을 항목 이름과 맞춰 각 항목에 배치. 이름이 없는 제목은 새 항목. 끄면 설명문 전체를 첫 항목에 보관',
         autoLocalName: '언어별 이름 자동 적용',
-        autoLocalNameHint: '채팅에 쓰인 언어를 보고 그 언어의 이름으로 페르소나 이름 자동 변경. 등록된 이름이 없거나 같은 이름의 페르소나가 있으면 그대로 유지',
+        autoLocalNameHint: '대화 언어(내 메시지 > 캐릭터 답장 > 첫 메시지·캐릭터 이름과 설명 순으로 비중)를 보고 그 언어의 이름으로 페르소나 이름 자동 변경. 등록된 이름이 없거나 같은 이름의 페르소나가 있으면 그대로 유지',
         injectAssetMacros: '에셋 매크로 주입',
         injectAssetMacrosHint: '끄면 {{persona_assets}}와 {{persona_asset_prompt}} 모두 빈 문자열',
         assetTemplate: '에셋 지시문 템플릿',
@@ -815,7 +825,7 @@ export const STRINGS = deepFreeze({
         rosterTileColumnsHint: '타일 보기에서 한 줄에 놓는 개수. 자동은 화면 폭 기준',
         tileColumnsAuto: '자동',
         rosterTileRows: '타일 행 수',
-        rosterTileRowsHint: '한 화면에 놓는 줄 수. 열 수 곱하기 행 수가 한 페이지 개수. 0이면 페르소나 목록 개수 설정 적용 (0~20)',
+        rosterTileRowsHint: '한 화면에 놓는 줄 수. 열 수 곱하기 행 수가 한 페이지 개수. 열 수가 자동이거나 행 수가 0이면 페르소나 목록 개수 설정 적용 (0~20)',
         rosterTileShape: '타일 모양',
         rosterTileShapeHint: '타일 보기에서 아바타를 자르는 모양',
         tileShapeNames: {
@@ -930,7 +940,8 @@ export const STRINGS = deepFreeze({
         noRoot: '설정 불러오기 실패',
         noActivePersona: '활성 페르소나가 없어 대상 폴더 확정 불가',
         regexScriptName: (folderKey) => `페르소나 관리자 이미지 (${folderKey}, 표시 전용)`,
-        regexExported: key => `${key} 폴더 기준으로 생성. 다른 페르소나에는 부적합`,
+        regexExported: (key, n) => `${key} 폴더의 그림 ${n}개로 정규식 생성. 다른 페르소나에는 부적합`,
+        regexNoFiles: key => `${key} 폴더에 그림이 없어 내보낼 정규식 없음`,
         settingsExported: '설정 내려받기 완료',
         importReadOnly: '읽기 전용이라 가져오기 불가',
         importNotApplied: '읽기 전용이라 가져오기 취소',

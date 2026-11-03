@@ -31,16 +31,16 @@ import { addLog, snapshot, enforceGlobalBudget, restore, diffWords, expireOldHis
 import { toggleMember, modifiedAt } from './roster.js';
 import { itemsWithText, planResplit, applyResplit } from './classify.js';
 import {
-    validCrop, clampView, cropFromView, viewFromCrop, previewBox, MAX_ZOOM as MAX_FRAMING_ZOOM,
+    validCrop, clampView, cropFromView, viewFromCrop, previewBox, cropPixels, MAX_ZOOM as MAX_FRAMING_ZOOM,
 } from './framing.js';
 import {
     isTextEntry, pickApplicable, versionApplicable, versionAlreadyApplied, quoteArg, waitFor, nameCollides,
-    CREATE_WAIT_TURNS,
+    CREATE_WAIT_TURNS, conversationLanguage,
 } from './quickbar-pure.js';
 import {
     closePanel, openPanel, isPanelOpen, notify, askConfirm, askChoice, askText,
     thumbnailUrl, markedText, pagerRow, applyShapeClass,
-    applyPersonaName, bumpThumbnails, runBoundImageWrite,
+    applyPersonaName, personaImageChanged, runBoundImageWrite,
     scheduleAutoName, cancelAutoName, releaseToasts,
 } from './quickbar.js';
 // DOM helpers shared with the quick panel and the settings drawer.
@@ -49,10 +49,10 @@ import {
     checkMark, emptyBlock, bannerOf as sharedBanner, groupOf as sharedGroup, afterGesture,
 } from './dom.js';
 // Matching, language detection and paging.
-import { rankOf, textContains, detectLanguage, chatLanguage, pageOf } from './search-pure.js';
+import { rankOf, textContains, detectLanguage, pageOf } from './search-pure.js';
 import {
     resolveFolderKey, claimFolderKey, listAssets, uploadAsset, deleteAsset, withoutBackups,
-    uploadPersonaAvatar, feedPersonaImage, restoreAvatarBackup,
+    uploadPersonaAvatar, feedPersonaImage, restoreAvatarBackup, findAsset, imageSize,
 } from './assets.js';
 import {
     canDeleteSection, removeSection, moveSection, reorderSection, deleteVariant,
@@ -64,7 +64,7 @@ import {
     addTag, removeTag, missingDefaultSections, fillDefaultSections,
     planFullTextSave, readSelectOptions, parseDepth, copyPersonaOnto,
     setLocalName, localName, countSize,
-    boundAsset, bindAsset, versionImageState, versionsBindingAsset, pictureSettled,
+    boundAsset, bindAsset, versionImageState, versionsBindingAsset, pictureSettled, pickInEveryVersion,
     renameVersionIn, duplicateVersionIn, overwriteVersionPicks, dropVersionFrom, moveVersion,
 } from './manager-pure.js';
 // Every sentence the user reads on this screen comes from there,
@@ -459,7 +459,7 @@ function closeManager(reopenPanel = true) {
     closeAsked = false;
     lastScreen = null;
     scrollByScreen.clear();
-    framing = null;
+    dropFraming();
     gestureHeld = false;
     drawWaitingOnGesture = false;
     drawDeferred = false;
@@ -593,6 +593,7 @@ function commit(kind, detail, expectedAvatar, { write } = {}) {
         // writeDescription already saved, so this line needs a save of its own.
         freshContext()?.saveSettingsDebounced?.();
     }
+    if (result.keptOutside) notify('warning', STRINGS.common.outsideKept(result.keptOutside.section));
     // No PERSONA_UPDATED for a kept description, so the icon and an open quick
     // panel hear about a renamed or deleted version from here.
     if (result.kept) document.dispatchEvent(new CustomEvent('pm:changed'));
@@ -627,6 +628,7 @@ async function addSection() {
     persona.sections.push({ id: sectionId, name: name.trim() });
     persona.variants[sectionId] = [{ id: variantId, label: STRINGS.manager.defaultChoiceLabel, text: '', updatedAt: Date.now() }];
     persona.activePicks[sectionId] = variantId;
+    pickInEveryVersion(persona, sectionId, variantId);
     commit('section-add', name.trim(), startAvatar);
 }
 
@@ -840,15 +842,14 @@ async function applyVersion(versionId) {
         notify('error', STRINGS.common.versionNotApplicable);
         return;
     }
-    // Switching version on top of an outside edit throws that edit
-    // away, so ask once more instead of doing it quietly. Divergence is asked of
-    // the persona being written to, not of whoever happens to be active.
+    // An outside edit is kept as a choice by the write itself (state.js
+    // keepOutsideText). Divergence is still asked of the persona being written
+    // to, so a repeat tap over an outside edit is not skipped as already applied.
     const ctx = freshContext();
     const diverged = ctx ? hasDiverged(ctx, s.avatar, s.persona) : false;
     // Same rule as the quick panel: a repeat tap on the applied version writes
     // nothing and queues no second picture upload.
     if (!diverged && versionAlreadyApplied(s.persona, versionId) && pictureSettled(s.persona, versionId)) return;
-    if (diverged && !(await askConfirm(STRINGS.common.confirmVersionOverOutsideEdit))) return;
     const after = guardTarget(startAvatar);
     if (!after) return;
     // Asked again of the persona being written to. Matching avatars is necessary
@@ -1137,7 +1138,11 @@ async function dropAsset(label) {
 // persona, since that is the only case our change touched it.
 async function refreshAssetViews(avatar) {
     await loadAssets(avatar);
-    if (getState()?.avatar === avatar) await refreshAssets();
+    if (getState()?.avatar !== avatar) return;
+    await refreshAssets();
+    // Pictures already drawn in the chat point at the file as it was. index.js
+    // re-points the ones whose file was just replaced.
+    document.dispatchEvent(new CustomEvent('pm:assets-changed'));
 }
 
 function toggleVersionAsset(versionId, filename) {
@@ -2912,6 +2917,8 @@ function personaBox(ctx, s, writable, reason) {
     imageRow.append(actionButton(STRINGS.manager.imageRestore, () => restoreTargetImage(), writable && !!kept,
         '', kept ? reason : STRINGS.manager.imageNoBackup));
     box.append(imageRow, input);
+    // A picture picked with [교체] is framed here before it is written.
+    if (framing?.mode === 'upload' && framing.avatar === s.avatar) box.append(framingEditor(writable, reason));
 
     box.append(actionsRow([
         actionButton(STRINGS.manager.createPersona, () => createTargetPersona(), writable, '', reason),
@@ -2975,7 +2982,7 @@ function localNamesBox(ctx, s, writable, reason) {
         const name = String(stored[lang] ?? '').trim();
         return !!name && name === appliedName;
     };
-    const current = chatLanguage(freshContext()?.chat);
+    const current = conversationLanguage(freshContext());
     for (const lang of NAME_LANGUAGES) {
         // A tight row: the value truncates rather than growing the row, and the
         // two buttons beside it move as one.
@@ -3073,7 +3080,7 @@ async function restoreTargetImage() {
     const ctx = freshContext();
     if (!root || !ctx) { notify('error', STRINGS.manager.noContext); return; }
     const result = await restoreAvatarBackup({ ctx, root, avatarId: startAvatar, label });
-    bumpThumbnails(startAvatar);
+    if (result.ok) personaImageChanged(startAvatar);
     scheduleDraw();
     if (!result.ok) {
         if (result.error === 'missing') { notify('error', STRINGS.manager.imageAssetMissing(result.detail)); return; }
@@ -3091,52 +3098,73 @@ async function restoreTargetImage() {
     notify('info', STRINGS.manager.imageRestored);
 }
 
+/* [교체]. The picked file opens in the framing editor first, so the new picture
+   can be moved and scaled into the avatar's 2:3 frame before anything is
+   written. It used to go up whole with no way to frame it at all: the framing
+   tools existed only for pictures bound to a version, so a picture replaced
+   here had none. A file the browser cannot measure (an unusual format) skips
+   the editor and goes up whole, after the same question as before. */
 async function changeTargetImage(file) {
     const s = guardTarget();
     if (!s) return;
     if (s.readOnly || s.ambiguous) { notify('error', writeReason(s)); return; }
     const startAvatar = targetAvatar;
-    const ctx = freshContext();
-    if (!ctx) { notify('error', STRINGS.manager.noContext); return; }
-    const personas = ctx.powerUserSettings?.personas ?? {};
-    const label = personas[startAvatar] ?? startAvatar;
-    if (!(await askConfirm(STRINGS.manager.confirmChangeImage(label)))) return;
+    const size = await imageSize(file);
     if (!guardTarget(startAvatar)) return;
-    const result = await uploadPersonaAvatar(freshContext(), startAvatar, file);
-    /* The token is a cache buster, not a claim, so it is bumped whatever
-       happened: the address holds a different picture on success, and on failure
-       the redraw is what stops the screen from showing a stale one and inviting
-       the retry that used to make this popup repeat. */
-    bumpThumbnails(startAvatar);
+    if (!size) {
+        const personas = freshContext()?.powerUserSettings?.personas ?? {};
+        if (!(await askConfirm(STRINGS.manager.confirmChangeImage(personas[startAvatar] ?? startAvatar)))) return;
+        if (!guardTarget(startAvatar)) return;
+        await uploadTargetImage(startAvatar, file, null);
+        return;
+    }
+    dropFraming();
+    framing = {
+        mode: 'upload',
+        avatar: startAvatar,
+        file,
+        path: URL.createObjectURL(file),
+        nw: size.width,
+        nh: size.height,
+        view: viewFromCrop(size.width, size.height, null),
+    };
+    personaOpen = true;
     scheduleDraw();
+    revealFraming();
+}
+
+// The write behind [교체], with or without a crop. crop is pixels, as the
+// endpoint takes it, or null for the picture whole.
+async function uploadTargetImage(startAvatar, file, crop) {
+    const result = await uploadPersonaAvatar(freshContext(), startAvatar, file, crop);
     if (result.ok) {
         /* avatarWritten is a cache of "which asset label is on the avatar file
            right now", and applyBoundImage skips its whole write when the label it
            was asked for matches. The user has just put a different picture there
            by hand, so that cache is wrong, and leaving it meant the version whose
-           picture was replaced could never put its own back: every later apply
-           answered {skipped:'same'} and nothing happened at all. Cleared here for
-           the same reason [원본 되돌리기] clears it. */
+           picture was replaced could never put its own back. Cleared here for the
+           same reason [원본 되돌리기] clears it. */
         const live = getPersona(getRoot(), startAvatar);
         if (live && live.avatarWritten !== null) {
             live.avatarWritten = null;
             freshContext()?.saveSettingsDebounced?.();
         }
-        notify('info', STRINGS.manager.changeImageDone);
-        return;
+        personaImageChanged(startAvatar);
+        notify('success', STRINGS.manager.changeImageDone);
+        return true;
     }
-    /* A build without that endpoint falls back to the path this used to take:
-       SillyTavern's own file input, which finishes inside SillyTavern's crop
-       dialog. Nothing is measured afterwards, because there is nothing of ours
-       left to measure - the user is answering a dialog. Saying so is the honest
-       report; the old code guessed here and guessed wrong. */
+    scheduleDraw();
+    /* A build without that endpoint falls back to SillyTavern's own file input,
+       which finishes inside SillyTavern's crop dialog. Nothing is measured
+       afterwards, because the user is answering a dialog. */
     if (result.status === 404) {
         const missing = feedPersonaImage(document, startAvatar, file);
-        if (missing) { notify('error', STRINGS.manager.changeImageNoControl(missing)); return; }
+        if (missing) { notify('error', STRINGS.manager.changeImageNoControl(missing)); return false; }
         notify('info', STRINGS.manager.changeImageHandedOver);
-        return;
+        return false;
     }
     notify('error', STRINGS.manager.changeImageFailed(result.detail ?? result.reason));
+    return false;
 }
 
 /* ── 버전별 페르소나 이미지 (user request) ───────────────────────────────────
@@ -3183,11 +3211,15 @@ async function pickBoundAsset(versionId) {
     const s = guardTarget();
     if (!s) return;
     const startAvatar = targetAvatar;
-    if (assetState.avatar !== targetAvatar || assetState.error) { notify('warning', STRINGS.manager.assetOpenTabFirst); return; }
-    // Asked before the emptiness below, because a list that has not arrived is
-    // empty for a reason that has nothing to do with the persona, and telling
-    // the user there are no assets sends them looking for files that are there.
-    if (!listingReady(targetAvatar)) { notify('info', STRINGS.manager.assetListLoading); return; }
+    // The listing is fetched here when this screen does not hold it yet. Sending
+    // the user to the asset tab first, which is what this used to do, was a
+    // detour for a request this button can make itself.
+    if (!listingReady(startAvatar)) {
+        if (!(assetState.avatar === startAvatar && assetState.loading)) await loadAssets(startAvatar);
+        else { notify('info', STRINGS.manager.assetListLoading); return; }
+        if (targetAvatar !== startAvatar) return;
+    }
+    if (assetState.error) { notify('warning', STRINGS.manager.imageListingFailed(assetState.error)); return; }
     const labels = assetLabels();
     if (!labels.length) { notify('info', STRINGS.manager.assetNoneForPersona); return; }
     const choice = await askChoice(STRINGS.manager.versionImagePick, labels);
@@ -3226,14 +3258,14 @@ function versionImageBlock(version, writable, reason) {
         : STRINGS.manager.versionImageUnknown(view.label);
     box.append(el('div', 'pm-manager-picklabel', STRINGS.manager.versionImageHead));
     box.append(el('div', 'pm-manager-value', head));
-    const editing = framing && framing.avatar === targetAvatar && framing.versionId === version.id
-        && framing.label === view.label;
+    const editing = framing?.mode === 'version' && framing.avatar === targetAvatar
+        && framing.versionId === version.id && framing.label === boundAsset(version);
     if (view.state === 'ok' && editing) {
         box.append(framingEditor(writable, reason));
         return box;
     }
     if (view.state === 'ok') {
-        const path = assetState.list.find(asset => asset?.label === view.label)?.path;
+        const path = findAsset(assetState.list, view.label)?.path;
         if (path) {
             const img = el('img', 'pm-manager-targetimg');
             // The sprite path serves the file at full size. This is a preview the
@@ -3248,32 +3280,60 @@ function versionImageBlock(version, writable, reason) {
             box.append(img);
         }
     }
+    // Why the picture's own buttons are dead, said for the state it is in: no
+    // picture bound, a bound file that is gone, or a listing still on its way.
+    const deadReason = view.state === 'ok' ? reason
+        : view.state === 'none' ? STRINGS.manager.versionImageNoBinding
+            : view.state === 'missing' ? STRINGS.manager.versionImageMissing(view.label)
+                : STRINGS.manager.assetListLoading;
     box.append(actionsRow([
         actionButton(STRINGS.manager.versionImagePickButton, () => pickBoundAsset(version.id), writable, '', reason),
         actionButton(STRINGS.manager.versionImageNow, () => runBoundImage(targetAvatar, version.id, true),
-            writable && view.state === 'ok', '', view.state === 'ok' ? reason : STRINGS.manager.versionImageNoBinding),
+            writable && view.state === 'ok', '', deadReason),
         actionButton(STRINGS.manager.versionImageClear, () => clearBoundAsset(version.id),
             writable && view.state !== 'none', '', reason),
         actionButton(STRINGS.manager.versionImageFrame, () => openFraming(version.id),
-            writable && view.state === 'ok', '', view.state === 'ok' ? reason : STRINGS.manager.versionImageNoBinding),
+            writable && view.state === 'ok', '', deadReason),
     ]));
     return box;
 }
 
 /* ── 위치·크기 조절 (user request) ───────────────────────────────────────────
-   The editor for one version's framing. The frame is the avatar's 2:3 shape at a
-   fixed width, the picture moves under it, and the dashed square is what a list
-   or chat icon shows. Dragging and pinching write only the picture's style, one
-   frame at a time; nothing is drawn again and nothing is saved until [저장].
+   One editor, two uses. mode 'version' frames a version's bound asset and
+   stores the crop on the version. mode 'upload' frames a file just picked with
+   [교체] and writes it to the avatar with that crop. The frame is the avatar's
+   2:3 shape at a fixed width, the picture moves under it, and the dashed
+   square is what a list or chat icon shows. Dragging and pinching write only
+   the picture's style, one frame at a time; nothing is drawn again and nothing
+   is saved until the save button.
 
-   Module state, so a redraw (a save landing from elsewhere) rebuilds the editor
-   where the user left it. Plain values only: the picture's size, the path it was
-   measured from, the view. */
+   Module state, so a redraw rebuilds the editor where the user left it. Plain
+   values only, plus the picked File in upload mode (its object URL is revoked
+   by dropFraming on every way out). */
 const FRAME_WIDTH = 240;
 let framing = null;
+// Set while an upload from the editor is on the wire, so a second tap on the
+// same button does not send the picture twice.
+let framingBusy = false;
+
+function dropFraming() {
+    if (framing?.mode === 'upload' && framing.path) {
+        try { URL.revokeObjectURL(framing.path); } catch { /* already gone */ }
+    }
+    framing = null;
+}
+
+// The editor opens where the tap was not: [교체] sits in a fold near the top and
+// a version's row can be far down the list. Brought into view once it exists.
+function revealFraming() {
+    if (typeof requestAnimationFrame !== 'function') return;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+        document.querySelector(`#${PANEL_ID} .pm-framing`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }));
+}
 
 function closeFraming() {
-    framing = null;
+    dropFraming();
     gestureHeld = false;
     scheduleDraw();
 }
@@ -3283,18 +3343,21 @@ function openFraming(versionId) {
     if (!s) return;
     const version = (s.persona?.versions ?? []).find(entry => entry?.id === versionId);
     const label = boundAsset(version);
-    const path = assetState.list.find(asset => asset?.label === label)?.path;
+    const path = findAsset(assetState.list, label)?.path;
     if (!version || !label || !path) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
     const avatar = targetAvatar;
-    // The picture's own size, which the crop is a fraction of. The preview above
-    // has usually decoded it already, so this is a cache hit.
+    // The picture's own size, which the crop is a fraction of. The path carries
+    // the listing's freshness token (assets.js), so a file replaced under the
+    // same name is measured as it is now, not as the browser last decoded it.
     const probe = new Image();
     probe.onload = () => {
         if (targetAvatar !== avatar || !probe.naturalWidth) return;
         const nw = probe.naturalWidth;
         const nh = probe.naturalHeight;
-        framing = { avatar, versionId, label, path, nw, nh, view: viewFromCrop(nw, nh, version.avatarCrop) };
+        dropFraming();
+        framing = { mode: 'version', avatar, versionId, label, path, nw, nh, view: viewFromCrop(nw, nh, version.avatarCrop) };
         scheduleDraw();
+        revealFraming();
     };
     probe.onerror = () => notify('error', STRINGS.manager.framingLoadFailed);
     probe.src = path;
@@ -3303,6 +3366,7 @@ function openFraming(versionId) {
 function framingEditor(writable, reason) {
     const state = framing;
     const box = el('div', 'pm-framing');
+    if (state.mode === 'upload') box.append(el('div', 'pm-manager-picklabel', STRINGS.manager.framingUploadHead));
     const frame = el('div', 'pm-framing-frame');
     frame.style.width = `${FRAME_WIDTH}px`;
     const img = el('img', 'pm-framing-img');
@@ -3340,9 +3404,10 @@ function framingEditor(writable, reason) {
 
     zoom.addEventListener('input', () => setView({ ...state.view, zoom: Number(zoom.value) }));
 
-    /* One finger drags, two pinch. Positions are tracked per pointer, and every
-       move is turned into a change of the view in the picture's own fractions, so
-       the result does not depend on how large the frame happens to be drawn. */
+    /* One finger drags, two pinch, a wheel or trackpad zooms. Positions are
+       tracked per pointer, and every move is turned into a change of the view in
+       the picture's own fractions, so the result does not depend on how large
+       the frame happens to be drawn. */
     const pointers = new Map();
     const spread = () => {
         const [a, b] = [...pointers.values()];
@@ -3392,6 +3457,12 @@ function framingEditor(writable, reason) {
         frame.addEventListener('pointercancel', lift);
         // A frame taken out of the document loses its capture and hears no up.
         frame.addEventListener('lostpointercapture', lift);
+        // Desktop: the wheel zooms, ten percent a notch, instead of scrolling the
+        // screen out from under the picture.
+        frame.addEventListener('wheel', e => {
+            e.preventDefault();
+            setView({ ...state.view, zoom: state.view.zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1) });
+        }, { passive: false });
     } else {
         zoom.disabled = true;
     }
@@ -3399,11 +3470,21 @@ function framingEditor(writable, reason) {
     box.append(frame, zoom);
     box.append(el('div', 'pm-manager-hint', STRINGS.manager.framingHint));
     box.append(el('div', 'pm-manager-hint', STRINGS.manager.framingGuide));
-    box.append(actionsRow([
-        actionButton(STRINGS.common.save, () => saveFraming(), writable, '', reason),
-        actionButton(STRINGS.manager.framingReset, () => setView({ zoom: 1, cx: 0.5, cy: 0.5 }), writable, '', reason),
-        actionButton(STRINGS.common.cancel, () => closeFraming(), true),
-    ]));
+    const reset = actionButton(STRINGS.manager.framingReset, () => setView({ zoom: 1, cx: 0.5, cy: 0.5 }), writable, '', reason);
+    const cancel = actionButton(STRINGS.common.cancel, () => closeFraming(), true);
+    if (state.mode === 'upload') {
+        const busyReason = framingBusy ? STRINGS.manager.framingUploading : reason;
+        box.append(actionsRow([
+            actionButton(STRINGS.manager.framingApply, () => saveUploadFraming(true), writable && !framingBusy, '', busyReason),
+            actionButton(STRINGS.manager.framingWhole, () => saveUploadFraming(false), writable && !framingBusy, '', busyReason),
+            reset, cancel,
+        ]));
+    } else {
+        box.append(actionsRow([
+            actionButton(STRINGS.common.save, () => saveFraming(), writable, '', reason),
+            reset, cancel,
+        ]));
+    }
     return box;
 }
 
@@ -3412,17 +3493,37 @@ function framingEditor(writable, reason) {
    another version's framing waits for that version to be applied. */
 function saveFraming() {
     const state = framing;
-    if (!state) return;
+    if (state?.mode !== 'version') return;
     const s = guardTarget(state.avatar);
     if (!s) return;
     const version = (s.persona?.versions ?? []).find(entry => entry?.id === state.versionId);
     if (!version || boundAsset(version) !== state.label) { notify('error', STRINGS.manager.versionGone); closeFraming(); return; }
     version.avatarCrop = cropFromView(state.nw, state.nh, state.view);
     version.updatedAt = Date.now();
-    framing = null;
+    dropFraming();
     if (!commit('image-crop', version.name ?? '', state.avatar)) return;
     if (s.persona.activeVersionId === version.id) void runBoundImage(state.avatar, version.id, false);
     else notify('info', STRINGS.manager.framingSavedLater);
+}
+
+// [이 위치로 적용] and [자르지 않고 그대로]: the picked file goes up, cut to the
+// frame or whole. The editor stays open until the server has answered, so a
+// failure leaves the user where they can try again.
+async function saveUploadFraming(cropped) {
+    const state = framing;
+    if (state?.mode !== 'upload' || framingBusy) return;
+    if (!guardTarget(state.avatar)) return;
+    const crop = cropped ? cropPixels(cropFromView(state.nw, state.nh, state.view), state.nw, state.nh) : null;
+    framingBusy = true;
+    scheduleDraw();
+    let ok = false;
+    try {
+        ok = await uploadTargetImage(state.avatar, state.file, crop);
+    } finally {
+        framingBusy = false;
+    }
+    if (ok && framing === state) closeFraming();
+    else scheduleDraw();
 }
 
 /* ── 새 페르소나로 복제 (user request) ───────────────────────────────────────
@@ -3455,7 +3556,7 @@ function landOnPersona(avatar) {
     placementOpen = false;
     namesOpen = false;
     personaOpen = false;
-    framing = null;
+    dropFraming();
     resetRevise();
     resetFullText();
     resetListUi();
@@ -4230,8 +4331,7 @@ function fillVersionList(container, s, writable, reason) {
        binding actually exists to describe, so a persona with none pays nothing.
        loadAssets sets assetState.avatar synchronously before its await, so this
        cannot fan out into one request per frame. */
-    if (assetState.avatar !== targetAvatar && !assetState.loading
-        && (persona.versions ?? []).some(version => boundAsset(version))) {
+    if (assetState.avatar !== targetAvatar && !assetState.loading && (persona.versions ?? []).length) {
         void loadAssets(targetAvatar);
     }
     for (const version of paged.slice) container.append(versionRow(persona, version, writable, reason));
@@ -4612,13 +4712,15 @@ function versionAssetBlock(version, writable) {
     const all = !Array.isArray(version.assetSelection);
     box.append(el('div', 'pm-manager-picklabel',
         all ? STRINGS.manager.assetSelectionAll : STRINGS.manager.assetSelectionSome(version.assetSelection.length)));
-    if (assetState.avatar !== targetAvatar || assetState.error) {
-        box.append(noteOf(STRINGS.manager.assetOpenTabFirst));
+    // The version tab fetches the listing itself (versionsTab), so the only
+    // states left to explain are a failed listing and one still on its way.
+    if (assetState.avatar === targetAvatar && assetState.error) {
+        box.append(noteOf(STRINGS.manager.imageListingFailed(assetState.error)));
         return box;
     }
     // Same reason as versionImageBlock above: the list being empty because the
     // request has not come back is not the list being empty.
-    if (assetState.loading) {
+    if (assetState.avatar !== targetAvatar || assetState.loading) {
         box.append(noteOf(STRINGS.manager.assetLoading));
         return box;
     }

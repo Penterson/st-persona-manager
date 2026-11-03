@@ -14,11 +14,11 @@ import { MODULE_NAME, makeId, pruneEmpty, HEADING_FORMATS, TILE_SHAPES } from '.
 import { getRoot, getState, readUsageBytes, refresh } from './state.js';
 import { freshContext, getPrecisePath, avatarBlockReport } from './ctx.js';
 import { addLog, expireOldHistory, enforceGlobalBudget } from './history.js';
-import { resolveFolderKey, buildImgHtml } from './assets.js';
+import { resolveFolderKey, buildImgHtml, withoutBackups } from './assets.js';
 import { notify, askConfirm, scheduleAutoName, cancelAutoName } from './quickbar.js';
 import { el, track, runCleanups, blockDrawerClose, isComposingKey } from './dom.js';
 import { invalidateManagerCaches } from './manager.js';
-import { clampSetting, SETTING_RANGES, serializeRoot, parseImportedRoot } from './manager-pure.js';
+import { clampSetting, SETTING_RANGES, TILE_COLUMN_CHOICES, serializeRoot, parseImportedRoot } from './manager-pure.js';
 // Every sentence the user reads in this drawer comes from there.
 import { STRINGS } from './strings.js';
 
@@ -211,7 +211,7 @@ function numberField(key, labelText, hint) {
 function tileColumnsField() {
     const select = el('select', 'pm-settings-select');
     select.dataset.pmKey = 'rosterTileColumns';
-    for (const value of [0, 2, 3, 4, 5, 6]) {
+    for (const value of TILE_COLUMN_CHOICES) {
         const option = el('option', null, value === 0 ? STRINGS.settings.tileColumnsAuto : String(value));
         option.value = String(value);
         select.append(option);
@@ -377,8 +377,9 @@ async function doClearHistory() {
     const now = Date.now();
     let cleared = 0;
     for (const persona of Object.values(after.personas ?? {})) {
+        if (!persona || typeof persona !== 'object') continue;
         let had = 0;
-        for (const list of Object.values(persona.history ?? {})) had += (list ?? []).length;
+        for (const list of Object.values(persona.history ?? {})) had += Array.isArray(list) ? list.length : 0;
         if (!had) continue;
         persona.history = {};
         cleared += had;
@@ -468,49 +469,60 @@ function stamp() {
     return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
 }
 
-// The optional regex export. What it can be is limited, and the
-// limit is the point: our renderer resolves a bare {{pimg::파일명}} against
-// whichever persona is active when the message is drawn, and a static regex has no
-// way to ask that question. character-assets solves it with a {{charkey}} macro
-// whose behaviour this extension refuses to depend on. So the exported script is
-// pinned to ONE folder, the active persona's at the moment of the export, and the
-// screen says so rather than shipping a file that quietly shows the wrong pictures.
-function regexScript(folderKey, style) {
-    return {
-        // SillyTavern's own regex script shape. These field names are not measured
-        // on this build, which is why the hint calls the file a starting point.
-        id: makeId(freshContext()?.uuidv4),
-        scriptName: STRINGS.settings.regexScriptName(folderKey),
-        findRegex: '/\\{\\{pimg::(.*?)\\}\\}/g',
-        // The same HTML our renderer builds, with the path spelled out instead of
-        // looked up. buildImgHtml escapes the attribute values, and $1 is the
-        // filename the pattern captured.
-        replaceString: buildImgHtml(`/characters/${folderKey}/$1`, style),
-        trimStrings: [],
-        placement: [1, 2],
-        disabled: false,
-        // Display only, exactly like our renderer: the stored message keeps the tag
-        // the way it was written, so the next turn the model sees its own text.
-        markdownOnly: true,
-        promptOnly: false,
-        runOnEdit: true,
-        substituteRegex: 0,
-        minDepth: null,
-        maxDepth: null,
-    };
+// The optional regex export. Our renderer resolves {{pimg::이름}} against
+// whichever persona is active when a message is drawn, and a static regex cannot
+// ask that, so the export is pinned to ONE folder: the active persona's at the
+// moment of the export. The screen says so.
+//
+// One script per file, because a regex cannot look up a file's extension: the
+// tags this extension writes carry the folder and no extension
+// ({{pimg::folder/name}}, manager-pure.js insertTagText), and the model is told
+// to write the bare name. A single script that spliced the captured name into a
+// path produced /characters/<folder>/<name> with no extension, which is a 404,
+// and missed the folder-qualified form entirely. SillyTavern's regex import takes
+// an array (extensions/regex/index.js onRegexImportFileChange).
+const escapeRegex = text => String(text).replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+
+export function regexScripts(folderKey, files, style, makeIdFn) {
+    return files.map(({ label, path }) => {
+        const bare = String(path).split('?')[0];
+        const ext = /\.[a-z0-9]+$/i.exec(bare)?.[0] ?? '';
+        return {
+            // SillyTavern's own regex script shape.
+            id: makeId(makeIdFn),
+            scriptName: STRINGS.settings.regexScriptName(`${folderKey}/${label}`),
+            findRegex: `/\\{\\{pimg::(?:${escapeRegex(folderKey)}\\/)?${escapeRegex(label)}(?:${escapeRegex(ext)})?\\}\\}/gi`,
+            // The same HTML our renderer builds. buildImgHtml escapes the value.
+            replaceString: buildImgHtml(bare, style),
+            trimStrings: [],
+            placement: [1, 2],
+            disabled: false,
+            // Display only, exactly like our renderer: the stored message keeps the
+            // tag, so the next turn the model sees its own text.
+            markdownOnly: true,
+            promptOnly: false,
+            runOnEdit: true,
+            substituteRegex: 0,
+            minDepth: null,
+            maxDepth: null,
+        };
+    });
 }
 
 function doExportRegex() {
     const root = getRoot();
     if (!root) { notify('error', STRINGS.settings.noRoot); return; }
-    const avatar = getState()?.avatar ?? null;
+    const s = getState();
+    const avatar = s?.avatar ?? null;
     if (!avatar) { notify('error', STRINGS.settings.noActivePersona); return; }
     // resolveFolderKey only reads, so asking here cannot create an entry for a
     // persona the user never adopted.
     const key = resolveFolderKey(root, avatar);
-    const script = regexScript(key, root.settings?.assetStyle ?? 'plain');
-    if (!downloadJson(`persona-manager-regex-${key}.json`, JSON.stringify(script, null, 2))) return;
-    notify('info', STRINGS.settings.regexExported(key));
+    const files = withoutBackups([...(s.assetPaths ?? new Map())].map(([label, path]) => ({ label, path })));
+    if (!files.length) { notify('warning', STRINGS.settings.regexNoFiles(key)); return; }
+    const scripts = regexScripts(key, files, root.settings?.assetStyle ?? 'plain', freshContext()?.uuidv4);
+    if (!downloadJson(`persona-manager-regex-${key}.json`, JSON.stringify(scripts, null, 2))) return;
+    notify('info', STRINGS.settings.regexExported(key, scripts.length));
 }
 
 function doExportSettings() {

@@ -145,7 +145,7 @@ export function enforceGlobalBudget(root, settings, now = Date.now()) {
         const list = item.persona.history[item.variantId];
         if (!list || !list.length) continue;
         const [gone] = list.splice(0, 1);
-        total -= encoder.encode(gone.text ?? '').length + 24;
+        total -= encoder.encode(String(gone?.text ?? '')).length + 24;
         evicted++;
         lost.set(item.persona, (lost.get(item.persona) ?? 0) + 1);
         if (!list.length) delete item.persona.history[item.variantId];

@@ -8,7 +8,15 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from 'playwright';
+// Playwright is the one development dependency. A missing install is said in
+// one line instead of a module-resolution stack trace.
+let chromium;
+try {
+    ({ chromium } = await import('playwright'));
+} catch {
+    console.error('smoke: playwright is not installed. Run `npm install` (or `npm i -D playwright && npx playwright install chromium`) first.');
+    process.exit(1);
+}
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const EXT = path.resolve(here, '..', '..');
@@ -87,8 +95,8 @@ async function tour(width, label, light) {
     expect(`${label} icon mounted`, await page.evaluate(() => !!document.getElementById('pm-quickbar')));
     expect(`${label} chat tag rendered`, await page.evaluate(() => !!document.querySelector('#chat img.pm-asset')));
     const macros = await page.evaluate(() => ({ list: window.__macros.persona_assets?.(), prompt: window.__macros.persona_asset_prompt?.() }));
-    expect(`${label} asset macro hides backups`, macros.list === 'walk, 포즈 1.5', macros.list);
-    expect(`${label} prompt macro expands`, macros.prompt?.includes('walk, 포즈 1.5'));
+    expect(`${label} asset macro hides backups`, macros.list === 'Walk, 포즈 1.5', macros.list);
+    expect(`${label} prompt macro expands`, macros.prompt?.includes('Walk, 포즈 1.5'));
     await shot('00-boot');
 
     /* Quick panel */
@@ -155,6 +163,33 @@ async function tour(width, label, light) {
         await page.waitForTimeout(80);
     }
     await shot('07-folds');
+
+    /* Image replacement: the picked file is framed first, then written with the
+       crop, and every picture of the persona follows at once. */
+    const iconBefore = await page.evaluate(() => document.querySelector('#pm-quickbar .pm-quickbar-img')?.getAttribute('src'));
+    await page.evaluate(async () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 300; canvas.height = 200;
+        canvas.getContext('2d').fillRect(0, 0, 300, 200);
+        const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+        const input = document.querySelector('.pm-manager-file');
+        const transfer = new DataTransfer();
+        transfer.items.add(new File([blob], 'new.png', { type: 'image/png' }));
+        input.files = transfer.files;
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await page.waitForTimeout(900);
+    expect(`${label} picked image opens the framing editor`, await page.locator('.pm-framing .pm-framing-frame').count() === 1);
+    await shot('07b-framing-upload');
+    await page.locator('.pm-framing .pm-manager-btn', { hasText: '이 위치로 적용' }).click();
+    await page.waitForTimeout(400);
+    const uploads = await page.evaluate(() => window.__fetches.filter(u => u.startsWith('/api/avatars/upload')));
+    expect(`${label} framed upload sends a crop`, uploads.some(u => u.includes('crop=')), uploads);
+    expect(`${label} editor closes after the upload`, await page.locator('.pm-framing').count() === 0);
+    const iconAfter = await page.evaluate(() => document.querySelector('#pm-quickbar .pm-quickbar-img')?.getAttribute('src'));
+    expect(`${label} send-bar icon shows the new picture at once`, iconAfter && iconAfter !== iconBefore && iconAfter.includes('pmv='), [iconBefore, iconAfter]);
+    const hostThumb = await page.evaluate(() => document.getElementById('host-alice-thumb')?.getAttribute('src'));
+    expect(`${label} SillyTavern's own persona image follows`, hostThumb?.includes('pmv='), hostThumb);
     await page.locator('.pm-manager-btn', { hasText: '전문' }).first().click();
     await page.waitForTimeout(150);
     await shot('08-fulltext');
@@ -256,6 +291,32 @@ async function tour(width, label, light) {
         c.extensionSettings['persona-manager'].schemaVersion = 2;
         await c.eventSource.emit(c.event_types.PERSONA_CHANGED);
     });
+
+    /* Greeting swipe after a rename: the baked {{user}} follows, the cat keeps
+       her name because the card wrote it literally. */
+    const greeting = await page.evaluate(async () => {
+        const c = window.SillyTavern.getContext();
+        const saved = c.chat.splice(0, c.chat.length, {
+            name: 'Char', is_user: false, mes: 'Hello Alice!', swipe_id: 0,
+            swipes: ['Hello Alice!', 'Alice, welcome back. Alice the cat says hi.'], swipe_info: [{}, {}],
+        });
+        c.powerUserSettings.personas['1700000000000-alice.png'] = 'Alicia';
+        window.__setName1('Alicia');
+        await c.eventSource.emit(c.event_types.PERSONA_RENAMED, { avatarId: '1700000000000-alice.png' });
+        const first = window.SillyTavern.getContext().chat[0];
+        first.swipe_id = 1;
+        first.mes = first.swipes[1];
+        await c.eventSource.emit(c.event_types.MESSAGE_SWIPED, 0);
+        const result = { mes: first.mes, swipes: [...first.swipes] };
+        c.chat.splice(0, c.chat.length, ...saved);
+        c.powerUserSettings.personas['1700000000000-alice.png'] = 'Alice';
+        window.__setName1('Alice');
+        await c.eventSource.emit(c.event_types.PERSONA_RENAMED, { avatarId: '1700000000000-alice.png' });
+        return result;
+    });
+    expect(`${label} swiped greeting shows the current {{user}}`, greeting.mes === 'Alicia, welcome back. Alice the cat says hi.', greeting);
+    expect(`${label} every greeting swipe follows the rename`, greeting.swipes[0] === 'Hello Alicia!', greeting);
+    await page.waitForTimeout(200);
 
     /* Settings drawer and teardown */
     await page.locator('#persona-manager_settings .pm-settings-header').click();

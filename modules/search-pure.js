@@ -333,6 +333,120 @@ export function chatLanguage(chat, minChars = CHAT_LANGUAGE_MIN_CHARS) {
     return detectLanguage(joined);
 }
 
+/* ── Context-aware language (user request 2026-11-03) ─────────────────────────
+   chatLanguage above judged the conversation by its newest text alone and
+   needed 40 characters of it. In a chat that has only just opened, the one
+   message there is the greeting, so the greeting decided on its own - or, when
+   it was short, nothing did. A Korean card whose greeting opens with an English
+   line renamed the persona to its English name; an English card played in
+   Korean kept the English name until the conversation had piled up enough
+   Korean to outvote the greeting.
+
+   Now every piece of context votes, each with a weight that says how much it
+   speaks for the language the conversation will be held in:
+
+     the user's own messages        5   what the user writes is the answer
+     the character's replies        3   the model follows the conversation
+     the greeting (first message)   1.5 written by the card's author
+     the character card             1.5 description, personality, scenario
+     the character's name           1   a name in hangul or kana is a hint
+     the persona's own description  0.5 what the user wrote about themselves
+
+   Each vote is scaled by how much text stood behind it (a two-letter reply is
+   barely a vote; see FULL_AT), and the language with the most weight wins when
+   it has at least MIN_EVIDENCE behind it. Macros, markup and links are removed
+   first, so {{user}} or an <img> tag cannot tip a Korean text towards English. */
+export const LANGUAGE_WEIGHTS = Object.freeze({
+    user: 5,
+    reply: 3,
+    greeting: 1.5,
+    card: 1.5,
+    name: 1,
+    persona: 0.5,
+});
+
+// Letters at which a source counts in full. Names are short by nature.
+const FULL_AT = Object.freeze({ user: 30, reply: 40, greeting: 60, card: 80, name: 2, persona: 60 });
+const MIN_EVIDENCE = 1;
+
+export function stripMarkup(text) {
+    return String(text ?? '')
+        .replace(/\{\{[^{}]*\}\}/g, ' ')
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/https?:\/\/\S+/g, ' ')
+        .replace(/```[\s\S]*?```/g, ' ');
+}
+
+/* How much text stood behind a vote, in Latin-letter equivalents. A hangul
+   syllable, a kana or a kanji carries about what three Latin letters do, so a
+   one-line Korean reply counts as much as a one-line English one. */
+const CJK_LETTER_WEIGHT = 3;
+
+function letterCount(text) {
+    let n = 0;
+    for (let i = 0; i < text.length; i++) {
+        const c = text.charCodeAt(i);
+        if ((c >= 0xAC00 && c <= 0xD7A3) || (c >= 0x3130 && c <= 0x318F) || (c >= 0x3040 && c <= 0x30FF)
+            || (c >= 0x4E00 && c <= 0x9FFF)) n += CJK_LETTER_WEIGHT;
+        else if ((c >= 0x41 && c <= 0x5A) || (c >= 0x61 && c <= 0x7A)) n++;
+    }
+    return n;
+}
+
+/* Splits a chat into the three conversational sources. The greeting is the
+   character message at the very start, before the user has said anything;
+   system messages are SillyTavern's own and never count. Newest first, bounded
+   the same way chatLanguage is, so an old stretch in another language stops
+   counting within a few turns of a switch. */
+export function chatSources(chat) {
+    const out = { user: [], reply: [], greeting: '' };
+    if (!Array.isArray(chat)) return out;
+    const firstUser = chat.findIndex(m => m && !m.is_system && m.is_user);
+    let used = 0;
+    let total = 0;
+    for (let i = chat.length - 1; i >= 0; i--) {
+        const message = chat[i];
+        if (!message || message.is_system) continue;
+        const text = typeof message.mes === 'string' ? message.mes.trim() : '';
+        if (!text) continue;
+        const beforeUser = firstUser === -1 || i < firstUser;
+        if (!message.is_user && beforeUser) {
+            // Every character message before the user's first one is greeting
+            // material (a group chat can open with several).
+            out.greeting = out.greeting ? `${text} ${out.greeting}` : text;
+            continue;
+        }
+        if (used >= CHAT_LANGUAGE_SCAN_MESSAGES || total >= CHAT_LANGUAGE_SCAN_CHARS) continue;
+        (message.is_user ? out.user : out.reply).push(text);
+        used++;
+        total += text.length;
+    }
+    return out;
+}
+
+/* The decision. sources is { user, reply, greeting, card, name, persona }, each
+   a string or an array of strings; anything missing simply does not vote.
+   Answers { lang, scores } with lang null when the evidence is too thin. */
+export function contextLanguage(sources = {}) {
+    const scores = {};
+    for (const [key, weight] of Object.entries(LANGUAGE_WEIGHTS)) {
+        const raw = sources[key];
+        const text = stripMarkup(Array.isArray(raw) ? raw.join(' ') : raw);
+        if (!text.trim()) continue;
+        const letters = letterCount(text);
+        if (!letters) continue;
+        const lang = detectLanguage(text);
+        if (!lang) continue;
+        const confidence = Math.min(1, letters / FULL_AT[key]);
+        scores[lang] = (scores[lang] ?? 0) + weight * confidence;
+    }
+    let best = null;
+    for (const [lang, score] of Object.entries(scores)) {
+        if (!best || score > scores[best]) best = lang;
+    }
+    return { lang: best && scores[best] >= MIN_EVIDENCE ? best : null, scores };
+}
+
 // Both caches key on the description bodies themselves: textCache keeps the source
 // string, its normalised form and a position array with one entry per character,
 // and langCache keeps up to 500 whole bodies. Neither entry cap can trip before the

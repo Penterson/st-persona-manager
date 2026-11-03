@@ -4,7 +4,7 @@ import { initPrecise, refresh, refreshAssets, getState, resetState } from './mod
 import { freshContext } from './modules/ctx.js';
 import {
     resolveFolderKey, renderInElement, registerAssetMacros, unregisterAssetMacros,
-    listAssets, assetLookup, lookupLabel, resetAssetProbes,
+    listAssets, assetLookup, lookupLabel, resetAssetProbes, assetNameFromPath,
 } from './modules/assets.js';
 // cancelAutoName is not imported here: unmountQuickbar already calls it, and an
 // import nothing calls reads like a teardown step somebody forgot to wire.
@@ -14,6 +14,7 @@ import { STRINGS } from './modules/strings.js';
 import { mountManager, unmountManager } from './modules/manager.js';
 import { mountSettings, unmountSettings } from './modules/settings-ui.js';
 import { installGestureTracking, resetGestureTracking } from './modules/dom.js';
+import { syncGreetingInContext } from './modules/greeting.js';
 
 const listeners = [];
 let chatObserver = null;
@@ -159,6 +160,64 @@ function startChatObserver() {
     chatObserver.observe(chat, { childList: true, subtree: true, characterData: true });
 }
 
+/* A picture replaced under the same name in the asset tab. The tags in the chat
+   became <img> elements long ago, so a new listing alone changes nothing on
+   screen: each one that shows a file of the active persona's folder is pointed
+   at that file's new address. The size remembered for the old file is dropped
+   with it, because the new picture need not have the same shape. */
+function repointChatAssets() {
+    const s = getState();
+    if (!s?.assetPaths?.size) return;
+    for (const img of document.querySelectorAll('#chat img.pm-asset')) {
+        const src = img.getAttribute('src') ?? '';
+        const fresh = lookupLabel(s.assetPaths, assetNameFromPath(src));
+        if (!fresh || fresh === src) continue;
+        if (fresh.split('?')[0] !== src.split('?')[0]) continue;
+        img.removeAttribute('width');
+        img.removeAttribute('height');
+        img.setAttribute('src', fresh);
+    }
+}
+
+/* {{user}} in an unanswered greeting follows the persona that is playing
+   (greeting.js says why it goes stale). seenUserNames is every name1 this
+   session has seen, which is what a baked greeting can hold. */
+const seenUserNames = new Set();
+let greetingTimer = 0;
+
+function noteUserName() {
+    const name = freshContext()?.name1;
+    if (typeof name === 'string' && name.trim()) seenUserNames.add(name.trim());
+}
+
+function greetingNames(ctx) {
+    const s = getState();
+    const own = new Set(seenUserNames);
+    for (const name of Object.values(s?.persona?.names ?? {})) if (typeof name === 'string') own.add(name);
+    const mapped = ctx?.powerUserSettings?.personas?.[s?.avatar];
+    if (typeof mapped === 'string') own.add(mapped);
+    const broad = new Set(own);
+    for (const name of Object.values(ctx?.powerUserSettings?.personas ?? {})) if (typeof name === 'string') broad.add(name);
+    for (const persona of Object.values(s?.root?.personas ?? {})) {
+        for (const name of Object.values(persona?.names ?? {})) if (typeof name === 'string') broad.add(name);
+    }
+    return { narrow: [...own], broad: [...broad] };
+}
+
+function syncGreeting() {
+    const ctx = freshContext();
+    if (!ctx) return;
+    syncGreetingInContext(ctx, greetingNames(ctx));
+    noteUserName();
+}
+
+// After SillyTavern has finished its own reaction to a persona event (a switch
+// re-sends an untouched greeting on some builds), so this acts on the result.
+function scheduleGreetingSync() {
+    if (greetingTimer) clearTimeout(greetingTimer);
+    greetingTimer = setTimeout(() => { greetingTimer = 0; syncGreeting(); }, 120);
+}
+
 function stopChatObserver() {
     chatObserver?.disconnect();
     chatObserver = null;
@@ -168,6 +227,7 @@ async function init() {
     if (!freshContext()) { console.warn(`[${MODULE_NAME}] getContext unavailable, extension disabled`); return; }
 
     refresh();
+    noteUserName();
     // Before any screen is mounted, so the first tap on a screen is already
     // being watched (see afterGesture in dom.js).
     installGestureTracking();
@@ -251,6 +311,7 @@ async function init() {
     };
     const onPersona = async origin => {
         refresh();
+        if (origin !== 'settings') scheduleGreetingSync();
         const avatar = getState()?.avatar ?? null;
         if (avatar !== lastAvatar) {
             lastAvatar = avatar;
@@ -315,6 +376,16 @@ async function init() {
     on('USER_MESSAGE_RENDERED', i => renderOne(i));
     on('CHARACTER_MESSAGE_RENDERED', i => { renderOne(i); onChatText(); });
     on('MESSAGE_UPDATED', i => renderOne(i));
+    // A swipe on the greeting shows a stored alternate, which may still carry
+    // the name the user had when it was last drawn. Fixed before it is read.
+    // Only message 0: a swipe on a reply starts a generation and is not ours.
+    on('MESSAGE_SWIPED', i => {
+        if (Number(i) !== 0) return;
+        syncGreeting();
+        renderOne(0);
+        onChatText();
+    });
+    document.addEventListener('pm:assets-changed', repointChatAssets);
 
     renderAll();
     startChatObserver();
@@ -335,6 +406,7 @@ async function init() {
 
 function destroy() {
     stopChatObserver();
+    document.removeEventListener('pm:assets-changed', repointChatAssets);
     unmountQuickbar();
     // Takes the document listeners back off and closes the dialog if it is open.
     unmountManager();
@@ -348,6 +420,9 @@ function destroy() {
     }
     listeners.length = 0;
     folders.clear();
+    if (greetingTimer) clearTimeout(greetingTimer);
+    greetingTimer = 0;
+    seenUserNames.clear();
     // What the upload learned about this server is state like any other, and
     // teardown leaves none behind.
     resetAssetProbes();

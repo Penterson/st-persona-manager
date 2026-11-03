@@ -82,6 +82,46 @@ export function labelOf(filename) {
     return String(filename ?? '').replace(/\.[^.]*$/, '');
 }
 
+/* The asset's real name: its file name without the extension, read from the
+   path the server handed back.
+
+   The server's own `label` is not a name. Current SillyTavern lowercases the
+   file name and cuts it at the first dash or dot, so the expressions extension
+   can group joy-1.png and joy-2.png as one emotion (src/endpoints/sprites.js,
+   read 2026-11-03). For this extension that grouping is destructive:
+   pm-backup-1730000000000.png listed as "pm", so the backup filter never
+   recognised it, [원본 되돌리기] could not find it, and deleting "포즈-1" sent
+   spriteName "포즈", which matches no file. The file name is exact on every
+   build, so it is the identity every screen and every request uses. */
+export function assetNameFromPath(path) {
+    const raw = String(path ?? '').split('?')[0].split('#')[0];
+    const file = raw.slice(raw.lastIndexOf('/') + 1);
+    if (!file) return null;
+    let decoded = file;
+    // SillyTavern does not encode the path, but a build or proxy that does
+    // would leave %XX in the name. Decoded only when that is what it is.
+    if (/%[0-9a-f]{2}/i.test(file)) {
+        try { decoded = decodeURIComponent(file); } catch { decoded = file; }
+    }
+    return labelOf(decoded) || null;
+}
+
+/* Finds an entry in a listing by name. Exact first; then without case, because
+   bindings saved under 0.2.0 and earlier hold the server's lowercased label;
+   then by that server label, when exactly one file carries it, for the same
+   reason. A label that could mean two files means neither. */
+export function findAsset(list, label) {
+    if (!Array.isArray(list) || !label) return null;
+    const wanted = String(label);
+    const exact = list.find(asset => asset?.label === wanted);
+    if (exact) return exact;
+    const lower = wanted.toLowerCase();
+    const folded = list.filter(asset => String(asset?.label ?? '').toLowerCase() === lower);
+    if (folded.length === 1) return folded[0];
+    const grouped = list.filter(asset => asset?.serverLabel === lower);
+    return grouped.length === 1 ? grouped[0] : null;
+}
+
 /* What a {{pimg::}} tag names, looked up in a listing keyed by the server's own
    labels.
 
@@ -95,7 +135,18 @@ export function labelOf(filename) {
 export function lookupLabel(map, filename) {
     if (!map || typeof map.get !== 'function') return null;
     const raw = String(filename ?? '');
-    return map.get(raw) ?? map.get(labelOf(raw)) ?? null;
+    const direct = map.get(raw) ?? map.get(labelOf(raw));
+    if (direct) return direct;
+    // A tag written as {{pimg::smile}} for Smile.png, or copied from a listing
+    // that showed SillyTavern's lowercased label. One match or nothing.
+    const wanted = [raw.toLowerCase(), labelOf(raw).toLowerCase()];
+    let found = null;
+    for (const [label, path] of map) {
+        if (!wanted.includes(String(label).toLowerCase())) continue;
+        if (found) return null;
+        found = path;
+    }
+    return found;
 }
 
 /* The avatar backups this extension writes live in the same sprite folder as
@@ -154,6 +205,39 @@ function formHeaders(ctx) {
 // browser kept the socket open. Ten seconds is past any listing that answers.
 const LISTING_TIMEOUT_MS = 10000;
 
+/* Per folder, the moment this session last wrote into it. A picture replaced
+   under the same name keeps the same address on builds whose listing carries
+   no ?t= stamp, and on every build when two writes land inside one second (the
+   stamp has one-second precision). The browser then keeps drawing the decoded
+   picture it already holds: the framing editor measured the OLD picture and cut
+   the new one with the old one's proportions, and the chat drew the new file at
+   the old file's size. A timestamp, not a counter, so a token can never repeat
+   an address a previous session already cached. */
+const folderStamps = new Map();
+
+export function markFolderChanged(folderKey) {
+    if (folderKey) folderStamps.set(folderKey, Date.now());
+}
+
+function withFolderStamp(path, folderKey) {
+    const stamp = folderStamps.get(folderKey);
+    if (!stamp) return path;
+    return `${path}${path.includes('?') ? '&' : '?'}pmv=${stamp}`;
+}
+
+export function normalizeListing(data, folderKey) {
+    if (!Array.isArray(data)) return [];
+    const out = [];
+    for (const entry of data) {
+        if (!entry || typeof entry.path !== 'string' || !entry.path) continue;
+        const serverLabel = String(entry.label ?? '').toLowerCase();
+        const label = assetNameFromPath(entry.path) ?? (entry.label ? String(entry.label) : null);
+        if (!label) continue;
+        out.push({ label, serverLabel, path: withFolderStamp(entry.path, folderKey) });
+    }
+    return out;
+}
+
 export async function listAssets(ctx, folderKey) {
     const timeout = globalThis.AbortSignal?.timeout;
     const signal = typeof timeout === 'function' ? timeout.call(globalThis.AbortSignal, LISTING_TIMEOUT_MS) : undefined;
@@ -163,9 +247,9 @@ export async function listAssets(ctx, folderKey) {
     });
     if (!res.ok) throw new Error(`sprites/get ${res.status}`);
     const data = await res.json();
-    // Use the path the server hands back. Rebuilding URLs ourselves would drift from
-    // the server's own sanitisation for names with spaces or hangul.
-    return Array.isArray(data) ? data.filter(a => a && a.path) : [];
+    // The path is the server's own, so names with spaces or hangul keep the
+    // server's sanitisation. The label is rebuilt from it: see assetNameFromPath.
+    return normalizeListing(data, folderKey);
 }
 
 /* The device reported 5.png 올리기 실패: sprites/upload 500 on 0.6.1.
@@ -224,6 +308,7 @@ export async function uploadAsset(ctx, folderKey, file) {
             // the first field never pays for the rest of the list again.
             spriteFileField = field;
             spriteFieldsExhausted = false;
+            markFolderChanged(folderKey);
             return field;
         }
         lastStatus = res.status;
@@ -254,6 +339,7 @@ export function resetAssetProbes() {
     spriteFileField = null;
     spriteFieldsExhausted = false;
     shownSizes.clear();
+    folderStamps.clear();
 }
 
 export async function deleteAsset(ctx, folderKey, label) {
@@ -263,6 +349,7 @@ export async function deleteAsset(ctx, folderKey, label) {
         body: JSON.stringify({ name: folderKey, spriteName: label }),
     });
     if (!res.ok) throw new Error(`sprites/delete ${res.status}`);
+    markFolderChanged(folderKey);
 }
 
 const TAG_RE = /\{\{pimg::(.*?)\}\}/gi;
@@ -477,7 +564,7 @@ export async function restoreAvatarBackup({ ctx, root, avatarId, label }) {
             try { list = await listAssets(ctx, key); } catch (e) {
                 return { error: 'listing', detail: String(e?.message ?? e) };
             }
-            const hit = list.find(asset => asset?.label === label);
+            const hit = findAsset(list, label);
             if (!hit) return { error: 'missing', detail: label };
             const file = await fetchAssetFile(hit.path, label);
             if (!file) return { error: 'fetch', detail: label };
@@ -551,7 +638,7 @@ export async function applyBoundImage({ ctx, root, persona, avatarId, label, cro
             // listAssets hands back the server's own entries, and .label is the name
             // every other screen here shows, so a binding stored from one of those
             // screens matches on the same field it was taken from.
-            const hit = list.find(asset => asset?.label === label);
+            const hit = findAsset(list, label);
             if (!hit) return { error: 'missing', detail: label };
 
             /* The avatar file is overwritten, so the picture that is there now is
@@ -634,7 +721,10 @@ function activeAssetNames(s) {
     const selection = (s.persona?.versions ?? [])
         .find(v => v.id === s.persona?.activeVersionId)?.assetSelection;
     if (!Array.isArray(selection)) return names;
-    return names.filter(name => selection.includes(name));
+    // Without case: selections saved under 0.2.0 and earlier hold the server's
+    // lowercased label rather than the file name.
+    const chosen = new Set(selection.map(name => String(name).toLowerCase()));
+    return names.filter(name => chosen.has(String(name).toLowerCase()));
 }
 
 export function registerAssetMacros(ctx, getState) {
@@ -690,17 +780,27 @@ export function unregisterAssetMacros(ctx) {
    are compared, so the answer is what the server now serves rather than what we
    hoped the upload did. */
 /* Drops the browser's copy of a persona picture, the way SillyTavern does after
-   its own upload. This is for SillyTavern's screens, not ours: every picture
-   this extension draws goes through thumbnailUrl, which appends its own pmv
-   token, so our images are already refreshed by that bump and never read the
-   bare address reloaded here. Fired without being awaited for the same reason -
-   nothing downstream depends on it. */
-function bustPersonaImage(ctx, avatarId) {
-    if (typeof ctx?.getThumbnailUrl !== 'function') return;
-    let url;
-    try { url = ctx.getThumbnailUrl('persona', avatarId); } catch { return; }
-    if (!url) return;
-    try { void fetch(url, { cache: 'reload' }).catch(() => undefined); } catch { /* the token still covers us */ }
+   its own upload (personas.js changeUserAvatar): the thumbnail and the full-size
+   file are fetched once with cache: 'reload', so the next time SillyTavern draws
+   them under their plain address the HTTP cache already holds the new bytes.
+   Awaited, but bounded: the caller repaints right after, and a server that is
+   slow to answer must not hold the new picture off the screen. Our own images
+   need none of this, because they carry a fresh token (quickbar.js). */
+const BUST_TIMEOUT_MS = 3000;
+
+async function bustPersonaImage(ctx, avatarId) {
+    const urls = [`User Avatars/${encodeURIComponent(avatarId)}`];
+    try {
+        const thumb = ctx?.getThumbnailUrl?.('persona', avatarId);
+        if (thumb) urls.unshift(thumb);
+    } catch { /* the full-size address is still worth reloading */ }
+    const reloads = urls.map(url => {
+        try { return fetch(url, { cache: 'reload' }).catch(() => undefined); } catch { return Promise.resolve(); }
+    });
+    await Promise.race([
+        Promise.all(reloads),
+        new Promise(resolve => setTimeout(resolve, BUST_TIMEOUT_MS)),
+    ]);
 }
 
 /* Replaces a persona's picture through the endpoint SillyTavern's own persona
@@ -746,7 +846,7 @@ export async function uploadPersonaAvatar(ctx, avatarId, file, crop) {
         return { ok: false, reason: 'network', detail: String(e?.message ?? e) };
     }
     if (!res.ok) return { ok: false, reason: 'http', status: res.status, detail: `HTTP ${res.status}` };
-    bustPersonaImage(ctx, avatarId);
+    await bustPersonaImage(ctx, avatarId);
     return { ok: true };
 }
 

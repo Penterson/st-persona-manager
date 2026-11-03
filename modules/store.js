@@ -113,35 +113,58 @@ export function emptyRoot() {
     };
 }
 
-export function migrate(root) {
-    if (!root || typeof root !== 'object') root = {};
-    if (typeof root.schemaVersion !== 'number') root.schemaVersion = SCHEMA_VERSION;
-    // Containers must exist either way so callers never dereference undefined.
-    // This has to run before the future-schema early return below: otherwise a
-    // read-only root from a newer build would leave labels and lastUsed missing
-    // and the screen would break trying to read them.
-    if (!root.settings || typeof root.settings !== 'object') root.settings = {};
-    if (!root.personas || typeof root.personas !== 'object') root.personas = {};
+const isPlainObject = value => !!value && typeof value === 'object' && !Array.isArray(value);
+
+// Containers every reader iterates. Arrays are refused where an object is
+// expected: a personas key holding [] accepted named keys in memory and then
+// lost them all on save, because JSON.stringify drops an array's named keys.
+function backfillContainers(root) {
+    if (!isPlainObject(root.settings)) root.settings = {};
+    if (!isPlainObject(root.personas)) root.personas = {};
     if (!Array.isArray(root.labels)) root.labels = [];
-    if (!root.lastUsed || typeof root.lastUsed !== 'object') root.lastUsed = {};
-    // Tags live on personas and versions. Backfilled before the
-    // future-schema return below for the same reason as the containers above:
-    // the read-only screens still iterate them, and no reader may meet
-    // undefined.
+    if (!isPlainObject(root.lastUsed)) root.lastUsed = {};
+    // Tags live on personas and versions. Array.isArray and not `?? []`: a
+    // versions key holding an object or a number is not iterable, for..of throws,
+    // and migrate is called from getRoot - so one malformed record took down
+    // every screen at once.
     for (const persona of Object.values(root.personas)) {
         if (!persona || typeof persona !== 'object') continue;
         if (!Array.isArray(persona.tags)) persona.tags = [];
-        // Array.isArray and not `?? []`: a versions key holding an object or a
-        // number is not iterable, for..of throws, and migrate is called from
-        // getRoot - so one malformed record took down every screen at once, and
-        // 설정 가져오기 on a truncated file ended with nothing on screen at all.
         if (!Array.isArray(persona.versions)) persona.versions = [];
         for (const version of persona.versions) {
             if (version && typeof version === 'object' && !Array.isArray(version.tags)) version.tags = [];
         }
     }
-    // A newer build wrote this. Do not rewrite what we cannot understand.
-    if (root.schemaVersion > SCHEMA_VERSION) { root.readOnly = true; return root; }
+}
+
+/* A root written by a NEWER build is shown, never rewritten.
+
+   The containers used to be backfilled on the stored object itself, before the
+   read-only return, and a readOnly flag written onto it: a newer build's
+   versions held as an object came back as [], and SillyTavern saved that with
+   its next save, so going back to the newer build found the data gone. The
+   screens now read a normalised COPY, cached per stored object so a getRoot per
+   draw does not clone the whole tree each time; the stored object is left
+   exactly as the newer build wrote it. Every write path refuses on readOnly,
+   so nothing is ever written into the copy and lost. */
+const futureViews = new WeakMap();
+
+function futureView(stored) {
+    const cached = futureViews.get(stored);
+    if (cached) return cached;
+    let view;
+    try { view = structuredClone(stored); } catch { view = JSON.parse(JSON.stringify(stored)); }
+    backfillContainers(view);
+    view.readOnly = true;
+    futureViews.set(stored, view);
+    return view;
+}
+
+export function migrate(root) {
+    if (!root || typeof root !== 'object' || Array.isArray(root)) root = {};
+    if (typeof root.schemaVersion !== 'number') root.schemaVersion = SCHEMA_VERSION;
+    if (root.schemaVersion > SCHEMA_VERSION) return futureView(root);
+    backfillContainers(root);
     /* Past the read-only return, because this DROPS values rather than filling
        them in: a shape we do not recognise under a key we own is worth clearing,
        but only on a root this build is allowed to write. Readers still go through
@@ -277,10 +300,12 @@ export function isEmptyPersona(p) {
     // Count actual history entries, not variant keys: a key holding an empty
     // array must not count as history content.
     for (const list of Object.values(p.history ?? {})) {
-        if ((list ?? []).length) return false;
+        if (Array.isArray(list) && list.length) return false;
     }
     for (const list of Object.values(p.variants ?? {})) {
-        for (const v of list) if (v.text && v.text.trim()) return false;
+        // A shape this function cannot read is not proof of emptiness: kept.
+        if (!Array.isArray(list)) return false;
+        for (const v of list) if (typeof v?.text === 'string' && v.text.trim()) return false;
     }
     /* Structure is content even while every body is still blank. Renaming an
        item, adding one, or adding a second choice is work that lives nowhere but
