@@ -144,19 +144,23 @@ export function refresh() {
     return ctx ? refreshWith(ctx) : null;
 }
 
-/* 가져오기 자동 분류 (user request). The existing description goes into the items
-   its titles name (classify.js), or whole into the first item when it has no
-   titles to go by or the user turned the split off. Answers how many items a
-   split filled, 0 when the text went in whole.
+/* 가져오기 자동 분류 (user request). Off by default: the existing description goes
+   whole into the first item, unchanged. With the switch on, it goes into the
+   items its titles name (classify.js). Answers how many items a split filled,
+   0 when the text went in whole.
 
    The baseline is the ORIGINAL text in both cases, so adopting never shows the
    외부 수정 banner. After a split the composed text is laid out the way compose
    writes titles, and SillyTavern receives that layout with the next write. */
 function seedDescription(persona, description, makeIdFn, settings) {
-    const split = settings?.splitOnAdopt === false ? null
-        : splitDescription(description, persona.sections.map(section => section.name));
+    const split = settings?.autoSplitOnAdopt === true
+        ? splitDescription(description, persona.sections.map(section => section.name))
+        : null;
     if (split) return seedFromSplit(persona, split, makeIdFn, settings?.defaultHeadingFormat);
     persona.variants[persona.sections[0].id][0].text = description;
+    // Whole means exactly. With a heading format the first write would put
+    // "## 기본 정보" in front of a description nobody asked to change.
+    if (String(description ?? '').trim()) persona.headingFormat = 'none';
     return 0;
 }
 

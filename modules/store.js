@@ -50,9 +50,10 @@ export const DEFAULT_SETTINGS = Object.freeze({
     // names, so the switch does nothing for them whichever way it is set.
     autoLocalName: true,
     defaultHeadingFormat: 'none',
-    // 가져오기 자동 분류 (user request, 2026-10-24). On: it only acts when the
-    // description has titles naming items, and otherwise adopting is unchanged.
-    splitOnAdopt: true,
+    // 가져오기 자동 분류. Off by default (user request, 2026-11-03): bringing a
+    // description in keeps it exactly as written, in the first item. Turned on,
+    // it splits at titles naming items; 제목별 분류 does the same on request.
+    autoSplitOnAdopt: false,
     assetStyle: 'plain',
     // The words live in strings.js, this names which ones.
     assetPromptTemplate: STRINGS.settings.assetPromptDefault,
@@ -213,6 +214,11 @@ export function migrate(root) {
     if (STRINGS.settings.legacyAssetPrompts.includes(root.settings.assetPromptTemplate)) {
         root.settings.assetPromptTemplate = DEFAULT_SETTINGS.assetPromptTemplate;
     }
+    /* The old switch, splitOnAdopt, shipped ON, so every install carries true
+       whether or not anybody chose it. Retired rather than reused: its stored
+       value says nothing about what the user wants, and the replacement starts
+       from the new default, off. */
+    delete root.settings.splitOnAdopt;
     for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) {
         if (!Object.hasOwn(root.settings, k)) root.settings[k] = v;
     }
