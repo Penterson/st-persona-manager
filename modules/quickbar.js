@@ -6,7 +6,7 @@ import {
     getState, saveAndCompose, adopt, getPreciseApi, getRoot, adoptFor, refresh, KEEP_DESCRIPTION_KINDS,
 } from './state.js';
 import { freshContext } from './ctx.js';
-import { compose, headingLine } from './compose.js';
+import { compose, headingLine, closingLine } from './compose.js';
 import { addLog, snapshot, enforceGlobalBudget, expireOldHistory } from './history.js';
 import { toggleMember, SORT_KEYS, livingLabels } from './roster.js';
 import {
@@ -1115,6 +1115,17 @@ function revertOutsideEdit() {
     commit('diverge-revert', '', { outside: 'discard' });
 }
 
+// The own format's closing line (</외모>) at the very end, removed the same way.
+function stripTrailingLine(text, closing) {
+    const source = String(text ?? '');
+    if (!closing) return source;
+    const trimmed = source.replace(/\s+$/, '');
+    if (!trimmed.endsWith(closing)) return source;
+    const rest = trimmed.slice(0, -closing.length);
+    if (rest && !/\n[ \t]*$/.test(rest)) return source;
+    return rest.replace(/\s+$/, '');
+}
+
 function stripLeadingHeading(text, heading) {
     const source = String(text ?? '');
     if (!heading) return source;
@@ -1168,7 +1179,11 @@ function absorbOutsideEdit() {
     // The outside text is the COMPOSED text, so it opens with this item's own
     // heading when the persona writes headings. Stored as is, compose added the
     // heading again and every absorb stacked one more.
-    variant.text = stripLeadingHeading(text, headingLine(s.persona.headingFormat, target.name ?? ''));
+    const format = s.persona.headingFormat;
+    const name = target.name ?? '';
+    variant.text = target.untitled ? text : stripTrailingLine(
+        stripLeadingHeading(text, headingLine(format, name, s.persona.headingTemplate)),
+        closingLine(format, name, s.persona.headingTemplate));
     variant.updatedAt = now;
     commit('diverge-absorb', target.name ?? '', { outside: 'discard' });
 }

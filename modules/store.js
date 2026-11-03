@@ -50,10 +50,10 @@ export const DEFAULT_SETTINGS = Object.freeze({
     // names, so the switch does nothing for them whichever way it is set.
     autoLocalName: true,
     defaultHeadingFormat: 'none',
-    // 가져오기 자동 분류. Off by default (user request, 2026-11-03): bringing a
-    // description in keeps it exactly as written, in the first item. Turned on,
-    // it splits at titles naming items; 제목별 분류 does the same on request.
-    autoSplitOnAdopt: false,
+    // How a description comes in at 관리 시작 (state.js seedDescription). 'own'
+    // keeps a description's own division and names (user request, 2026-11-03),
+    // 'whole' puts it in one item, 'defaults' matches it onto the shipped names.
+    adoptSplitMode: 'own',
     assetStyle: 'plain',
     // The words live in strings.js, this names which ones.
     assetPromptTemplate: STRINGS.settings.assetPromptDefault,
@@ -219,6 +219,16 @@ export function migrate(root) {
        value says nothing about what the user wants, and the replacement starts
        from the new default, off. */
     delete root.settings.splitOnAdopt;
+    // 0.3.1's on/off switch, folded into the mode: on meant the shipped names.
+    if (Object.hasOwn(root.settings, 'autoSplitOnAdopt')) {
+        if (root.settings.autoSplitOnAdopt === true && !Object.hasOwn(root.settings, 'adoptSplitMode')) {
+            root.settings.adoptSplitMode = 'defaults';
+        }
+        delete root.settings.autoSplitOnAdopt;
+    }
+    if (Object.hasOwn(root.settings, 'adoptSplitMode') && !ADOPT_MODES.includes(root.settings.adoptSplitMode)) {
+        delete root.settings.adoptSplitMode;
+    }
     for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) {
         if (!Object.hasOwn(root.settings, k)) root.settings[k] = v;
     }
@@ -229,6 +239,7 @@ export function migrate(root) {
 // offer them and the migration that validates a stored value all read one list
 // rather than three copies of the same three strings.
 export const HEADING_FORMATS = Object.freeze(['none', 'plain', 'markdown']);
+export const ADOPT_MODES = Object.freeze(['own', 'whole', 'defaults']);
 
 // Tile shapes for the roster's tile views. The user asked for the choice rather
 // than a house shape: a circle crops a rectangular avatar hardest, and somebody

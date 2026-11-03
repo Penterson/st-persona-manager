@@ -310,6 +310,7 @@ export const STRINGS = deepFreeze({
             'asset-select': '버전 에셋 선택',
             'image-crop': '이미지 위치 조절',
             'split-headings': '제목별 분류',
+            'split-own': '원래 항목대로 구성',
             placement: '프롬프트 배치 변경',
             lorebook: '월드인포 연결',
             'name-local': '언어별 이름 변경',
@@ -374,7 +375,9 @@ export const STRINGS = deepFreeze({
             plain: '이름:',
             markdown: '## 이름',
         },
-        headingFormatHint: '각 항목 본문 앞에 항목 이름을 넣는 형식. 없음이면 본문만 연결',
+        // The description's own title style, shown as the pattern it prints.
+        headingFormatOwn: open => `원래 형식 (${String(open ?? '').split('{name}').join('이름')})`,
+        headingFormatHint: '각 항목 본문 앞에 항목 이름을 넣는 형식. 없음이면 본문만 연결. 원래 형식은 가져온 설명문의 제목 모양 그대로',
         // 기본 항목 채우기.
         fillDefaults: '기본 항목 채우기',
         confirmFillDefaults: n => `기본 항목 ${n}개 추가`,
@@ -388,6 +391,15 @@ export const STRINGS = deepFreeze({
             ? `제목 기준 분류: 항목 ${targets}개, 새 항목 ${created}개 (기존 본문 뒤에 추가)`
             : `제목 기준 분류: 항목 ${targets}개 (기존 본문 뒤에 추가)`),
         resplitNothing: '나눌 제목 줄 없음',
+        /* 원래 항목대로 (user request): rebuild the items from the description's
+           own sections, keeping their names and title style. */
+        ownSplit: '원래 항목대로',
+        ownSplitTitle: '본문이 이미 제목으로 나뉘어 있으면 그 제목 이름 그대로 항목을 다시 구성',
+        confirmOwnSplit: (n, names) => `항목 ${n}개로 다시 구성: ${names}`.slice(0, 60),
+        ownSplitNothing: '같은 모양의 제목 줄이 두 개 이상 없어 나눌 수 없음',
+        ownSplitNotOnly: '본문이 한 항목에만 있을 때 사용 가능. 지금은 여러 항목에 본문 있음',
+        ownSplitNotExact: '그대로 재현되지 않는 형식이라 나누지 않음 (제목 모양이 섞여 있음)',
+        ownSplitDone: n => `항목 ${n}개로 다시 구성 완료. 이전 본문은 이력 탭에서 복구 가능`,
         resplitDraft: '저장하지 않은 본문 편집이 있어 분류 불가',
         resplitDone: n => `본문 ${n}개 정리 완료. 이전 내용은 이력 탭에서 복구 가능`,
         newItemName: '새 항목 이름',
@@ -807,8 +819,13 @@ export const STRINGS = deepFreeze({
         historyCoalesceMinutesHint: '설정 시간 안의 연속 편집은 이력 한 건으로 병합 (1~30)',
         defaultHeadingFormat: '새 페르소나의 항목 제목',
         defaultHeadingFormatHint: '관리를 새로 시작하는 페르소나가 쓸 형식. 이미 만든 페르소나는 편집 탭에서 각각 변경',
-        splitOnAdopt: '가져올 때 자동으로 항목별 분류',
-        splitOnAdoptHint: '기본은 꺼짐: 관리 시작 시 설명문을 그대로 첫 항목에 보관. 켜면 제목 줄(## 외모, 외모:, [외모] 등)을 항목 이름과 맞춰 나눔. 꺼져 있어도 편집 탭의 [제목별 분류]로 원할 때 직접 분류 가능',
+        splitOnAdopt: '관리 시작 시 설명문 가져오기',
+        splitOnAdoptHint: '원래 항목 그대로: 설명문이 이미 제목으로 나뉘어 있으면 그 제목 이름과 모양 그대로 항목을 만듦. 설명문 글자는 바뀌지 않음. 나뉘어 있지 않거나 그대로 재현되지 않으면 한 항목에 통째로. 기본 항목에 맞춰 분류: 외모·성격 같은 기본 이름으로 옮김',
+        adoptModeNames: Object.freeze({
+            own: '원래 항목 그대로',
+            whole: '한 항목에 통째로',
+            defaults: '기본 항목에 맞춰 분류',
+        }),
         autoLocalName: '언어별 이름 자동 적용',
         autoLocalNameHint: '대화 언어(내 메시지 > 캐릭터 답장 > 첫 메시지·캐릭터 이름과 설명 순으로 비중)를 보고 그 언어의 이름으로 페르소나 이름 자동 변경. 등록된 이름이 없거나 같은 이름의 페르소나가 있으면 그대로 유지',
         injectAssetMacros: '에셋 매크로 주입',
@@ -964,6 +981,9 @@ export const STRINGS = deepFreeze({
        item name exactly as store.js spells it. Spaces, case and & / · are ignored
        when matching, so each word is written once. */
     classify: {
+        // The text before the first title, kept as an item of its own when a
+        // description is taken in with its own sections. Printed without a title.
+        preambleName: '머리말',
         titleAliases: {
             '기본 정보': ['기본정보', '프로필', '개요', 'profile', 'basic info', 'basic information', 'basics', 'overview', 'info'],
             '외모': ['외형', '외관', '생김새', 'appearance', 'looks', 'physical appearance', 'physical'],

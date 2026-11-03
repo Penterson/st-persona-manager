@@ -1,12 +1,12 @@
 // Single place that knows "which persona are we on and what is its data".
 // Everything the UI needs goes through here.
-import { MODULE_NAME, migrate, getPersona, ensurePersona, usageBytes, textSignature, makeId } from './store.js';
+import { MODULE_NAME, migrate, getPersona, ensurePersona, usageBytes, textSignature, makeId, ADOPT_MODES } from './store.js';
 import {
     resolveAvatar, findDuplicateNames, loadPreciseApi, freshContext, selectedAvatarFromDom,
 } from './ctx.js';
 import { writeDescription, hasDiverged, compose, markComposed, baselineSignature } from './compose.js';
 import { addLog } from './history.js';
-import { splitDescription, seedFromSplit } from './classify.js';
+import { splitDescription, seedFromSplit, splitOwnSections, seedOwnSections, sameText } from './classify.js';
 import { STRINGS } from './strings.js';
 import { clearSearchCaches } from './search-pure.js';
 import { resolveFolderKey, listAssets } from './assets.js';
@@ -144,16 +144,37 @@ export function refresh() {
     return ctx ? refreshWith(ctx) : null;
 }
 
-/* 가져오기 자동 분류 (user request). Off by default: the existing description goes
-   whole into the first item, unchanged. With the switch on, it goes into the
-   items its titles name (classify.js). Answers how many items a split filled,
-   0 when the text went in whole.
+/* How a description comes in (settings.adoptSplitMode):
+
+     'own'       (default) a description already divided keeps its division:
+                 its own sections become the items, named as its titles are
+                 written, titles printed in its own style. Used only when
+                 composing the result gives the same text back; otherwise, and
+                 for a description with no division, it goes in whole.
+     'whole'     always whole, into the first item.
+     'defaults'  matched onto the shipped item names (외모, 성격 ...).
+
+   Answers how many items received text, 0 when the text went in whole.
 
    The baseline is the ORIGINAL text in both cases, so adopting never shows the
    외부 수정 banner. After a split the composed text is laid out the way compose
    writes titles, and SillyTavern receives that layout with the next write. */
 function seedDescription(persona, description, makeIdFn, settings) {
-    const split = settings?.autoSplitOnAdopt === true
+    const mode = ADOPT_MODES.includes(settings?.adoptSplitMode) ? settings.adoptSplitMode : 'own';
+    if (mode === 'own') {
+        const own = splitOwnSections(description);
+        if (own) {
+            // Tried on a copy first: the persona keeps its blank items unless the
+            // own division reproduces the description.
+            const trial = structuredClone(persona);
+            seedOwnSections(trial, own, makeIdFn);
+            if (sameText(compose(trial).text, description)) {
+                Object.assign(persona, trial);
+                return persona.sections.length;
+            }
+        }
+    }
+    const split = mode === 'defaults'
         ? splitDescription(description, persona.sections.map(section => section.name))
         : null;
     if (split) return seedFromSplit(persona, split, makeIdFn, settings?.defaultHeadingFormat);

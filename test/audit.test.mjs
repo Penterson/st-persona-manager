@@ -92,11 +92,68 @@ test('an unreadable choice list is not taken for an empty persona', () => {
     assert.equal(isEmptyPersona({ variants: { s: {} } }), false);
 });
 
-test('automatic title split is off by default, and the old always-on switch is retired', () => {
-    assert.equal(DEFAULT_SETTINGS.autoSplitOnAdopt, false);
-    const root = migrate({ schemaVersion: 2, settings: { splitOnAdopt: true }, personas: {} });
-    assert.equal('splitOnAdopt' in root.settings, false);
-    assert.equal(root.settings.autoSplitOnAdopt, false);
-    const chosen = migrate({ schemaVersion: 2, settings: { autoSplitOnAdopt: true }, personas: {} });
-    assert.equal(chosen.settings.autoSplitOnAdopt, true, 'a choice made on the new switch is kept');
+test('adopt keeps the description own items by default; old switches fold into the mode', () => {
+    assert.equal(DEFAULT_SETTINGS.adoptSplitMode, 'own');
+    const legacy = migrate({ schemaVersion: 2, settings: { splitOnAdopt: true }, personas: {} });
+    assert.equal('splitOnAdopt' in legacy.settings, false);
+    assert.equal(legacy.settings.adoptSplitMode, 'own', 'the old always-on value says nothing');
+    const chose = migrate({ schemaVersion: 2, settings: { autoSplitOnAdopt: true }, personas: {} });
+    assert.equal(chose.settings.adoptSplitMode, 'defaults', '0.3.1 on meant the shipped names');
+    assert.equal('autoSplitOnAdopt' in chose.settings, false);
+    const off = migrate({ schemaVersion: 2, settings: { autoSplitOnAdopt: false }, personas: {} });
+    assert.equal(off.settings.adoptSplitMode, 'own');
+    const bad = migrate({ schemaVersion: 2, settings: { adoptSplitMode: 'x' }, personas: {} });
+    assert.equal(bad.settings.adoptSplitMode, 'own');
+});
+
+/* 원래 항목 그대로 */
+import { splitOwnSections, seedOwnSections, sameText } from '../modules/classify.js';
+import { compose } from '../modules/compose.js';
+
+function ownRoundTrip(text) {
+    const split = splitOwnSections(text);
+    if (!split) return null;
+    const p = makeDefaultPersona(ids);
+    seedOwnSections(p, split, ids, 1);
+    return { p, composed: compose(p).text };
+}
+
+test('a description already divided keeps its own item names, order and title style', () => {
+    const cases = [
+        '소개 한 줄\n\n### Look\n키가 크다\n\n### Mind\n차분하다',
+        '[Profile]\n27세\n[Habits]\n손톱을 깨문다',
+        '<appearance>\n검은 머리\n</appearance>\n<speech>\n존댓말\n</speech>',
+        '**특징:**\n조용함\n\n**취미:**\n독서',
+        '나이:\n27\n직업:\n사서',
+    ];
+    for (const text of cases) {
+        const r = ownRoundTrip(text);
+        assert.ok(r, `split ${JSON.stringify(text)}`);
+        assert.equal(r.p.headingFormat, 'own');
+        assert.ok(sameText(r.composed, text), `round trip ${JSON.stringify(r.composed)}`);
+    }
+    const r = ownRoundTrip('소개 한 줄\n\n### Look\n키가 크다\n\n### Mind\n차분하다');
+    assert.deepEqual(r.p.sections.map(s => s.name), ['머리말', 'Look', 'Mind']);
+    assert.equal(r.p.sections[0].untitled, true);
+    assert.equal(r.p.headingTemplate.open, '### {name}');
+});
+
+test('own split: renaming an item renames its printed title, and new items follow the style', () => {
+    const r = ownRoundTrip('<appearance>\n검은 머리\n</appearance>\n<speech>\n존댓말\n</speech>');
+    r.p.sections[0].name = 'looks';
+    assert.match(compose(r.p).text, /^<looks>\n검은 머리\n<\/looks>/);
+});
+
+test('own split refuses one title, mixed styles and markdown that only nests one heading', () => {
+    assert.equal(splitOwnSections('## 외모\n키 큼'), null);
+    assert.equal(splitOwnSections('그냥 문장입니다.\n두 번째 문장.'), null);
+    // One level-1 heading over two level-2 ones splits at level 2, keeping the
+    // level-1 line as text before the first item.
+    const nested = splitOwnSections('# 아영\n## 외모\n키 큼\n## 성격\n착함');
+    assert.deepEqual(nested.parts.map(p => p.name), ['외모', '성격']);
+    assert.equal(nested.preamble, '# 아영');
+    // A title with nothing under it cannot be reproduced (empty items print
+    // nothing), so the round trip check fails and the caller keeps it whole.
+    const r = ownRoundTrip('## 외모\n키 큼\n## 메모\n## 성격\n착함');
+    assert.equal(sameText(r.composed, '## 외모\n키 큼\n## 메모\n## 성격\n착함'), false);
 });

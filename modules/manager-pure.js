@@ -994,6 +994,9 @@ export function duplicatePersona(source, makeIdFn) {
         activeVersionId: null,
         activePicks: {},
         headingFormat: source.headingFormat ?? 'none',
+        // The own format's title pattern goes with it, or the copy would print
+        // every title as markdown.
+        ...(source.headingTemplate ? { headingTemplate: { ...source.headingTemplate } } : {}),
         history: {},
         log: [],
         assets: {},

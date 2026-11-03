@@ -106,9 +106,11 @@ async function tour(width, label, light) {
     await adopt(page);
     const root = await page.evaluate(() => window.SillyTavern.getContext().extensionSettings['persona-manager']);
     const alice = root?.personas?.[ALICE];
-    const firstBody = alice?.variants?.[alice?.sections?.[0]?.id]?.[0]?.text;
-    expect(`${label} adopt keeps the description whole, no automatic split`,
-        alice?.headingFormat === 'none' && firstBody === '## 외모\n검은 머리, 큰 키\n\n## 성격\n조용하고 침착함', [alice?.headingFormat, firstBody]);
+    const itemNames = (alice?.sections ?? []).map(section => section.name);
+    expect(`${label} adopt keeps the description's own items and names`,
+        alice?.headingFormat === 'own' && JSON.stringify(itemNames) === '["외모","성격"]', [alice?.headingFormat, itemNames]);
+    const described = (await ctxEval(page)).powerUserSettings.persona_descriptions[ALICE].description;
+    expect(`${label} adopt leaves the description untouched`, described === '## 외모\n검은 머리, 큰 키\n\n## 성격\n조용하고 침착함', described);
     await page.evaluate(() => window.__popupAnswers.push('v1'));
     await page.locator('.pm-quickbar-row', { hasText: '현재 구성을 버전으로 저장' }).first().click();
     await page.waitForTimeout(200);
@@ -155,7 +157,7 @@ async function tour(width, label, light) {
     await page.waitForTimeout(50);
     await slowClick(page, page.locator('.pm-manager-editorfoot .pm-manager-btn', { hasText: '저장' }));
     const after = await ctxEval(page);
-    expect(`${label} slow click on [저장] writes the body`, after.powerUserSettings.persona_description === '새 본문입니다.', after.powerUserSettings.persona_description);
+    expect(`${label} slow click on [저장] writes the body`, after.powerUserSettings.persona_description === '## 외모\n새 본문입니다.\n\n## 성격\n조용하고 침착함', after.powerUserSettings.persona_description);
     expect(`${label} singular and map agree`, after.powerUserSettings.persona_description === after.powerUserSettings.persona_descriptions[ALICE].description);
     await shot('06-editor-saved');
     await page.locator('.pm-manager-editorfoot .pm-manager-btn', { hasText: '목록으로' }).click();
