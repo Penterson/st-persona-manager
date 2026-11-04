@@ -1,9 +1,9 @@
 // Persona image assets on top of SillyTavern's sprites API.
+import { findVersion } from './store.js';
 import { validCrop, cropPixels, writtenKey, cropFromView, viewFromCrop } from './framing.js';
 
 const PREFIX = 'persona_';
-// sanitize-filename truncates to 255 bytes, and the string we hand the server is
-// the whole folder key, prefix included.
+// sanitize-filename truncates to 255 bytes, counted over the whole key, prefix included.
 const MAX_KEY_BYTES = 255;
 
 function truncateBytes(text, maxBytes) {
@@ -18,16 +18,12 @@ function truncateBytes(text, maxBytes) {
 
 export function sanitizeKey(avatarId) {
     const base = String(avatarId ?? '').replace(/\.[^.]*$/, '');
-    // Mirror the server's sanitize-filename. Being stricter than the server only
-    // invents a collision that will not happen, which costs one hash suffix. Being
-    // looser is unsafe: two distinct avatars then fold into a single folder on disk,
-    // our collision guard never fires, and deleting one persona's assets destroys
-    // the other's. So every rule the server applies has to appear here too.
+    // Mirrors the server's sanitize-filename, never looser (stricter only costs a hash
+    // suffix): otherwise two avatars share a folder and deleting one's assets wipes both.
     const cleaned = base
         .replace(/[/\\?%*:|"<>]/g, '')
         .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
-        // Windows drops trailing dots and spaces, and so does the server. Leading
-        // whitespace is kept by the server, so we keep it as well.
+        // Trailing dots and spaces go, as on the server; leading whitespace stays, as there.
         .replace(/[. ]+$/, '');
     return truncateBytes(PREFIX + (cleaned || 'unnamed'), MAX_KEY_BYTES);
 }
@@ -47,16 +43,13 @@ export function resolveFolderKey(root, avatarId) {
     for (const [id, p] of Object.entries(root?.personas ?? {})) {
         if (id !== avatarId && p?.assetFolderKey) taken.add(p.assetFolderKey);
     }
-    // Two different avatars can sanitize to the same string. Sharing a folder would
-    // mix their assets and make deleting one wipe the other.
+    // Two different avatars can sanitize to the same string.
     return taken.has(base) ? `${base}-${shortHash(avatarId)}` : base;
 }
 
 export function claimFolderKey(root, avatarId, saveFn) {
-    // Writing the key down is what makes the guard work for everybody else:
-    // resolveFolderKey can only avoid a folder it can see is taken. The key is
-    // stored once and never recomputed, so this is the only place that assigns
-    // it, and it always persists what it assigned.
+    // The only place a key is assigned; persisted at once and never recomputed, because
+    // resolveFolderKey can only avoid keys it sees stored.
     const persona = root?.personas?.[avatarId];
     if (!persona) throw new Error(`claimFolderKey needs an existing persona entry for ${avatarId}`);
     if (persona.assetFolderKey) return persona.assetFolderKey;
@@ -82,45 +75,31 @@ export function labelOf(filename) {
     return String(filename ?? '').replace(/\.[^.]*$/, '');
 }
 
-/* The asset's real name: its file name without the extension, read from the
-   path the server handed back.
-
-   The server's own `label` is not a name. Current SillyTavern lowercases the
-   file name and cuts it at the first dash or dot, so the expressions extension
-   can group joy-1.png and joy-2.png as one emotion (src/endpoints/sprites.js,
-   read 2026-11-03). For this extension that grouping is destructive:
-   pm-backup-1730000000000.png listed as "pm", so the backup filter never
-   recognised it, [원본 되돌리기] could not find it, and deleting 포즈-1 sent
-   spriteName 포즈, which matches no file. The file name is exact on every
-   build, so it is the identity every screen and every request uses. */
+/* The asset's real name: the file name without extension, from the server's path.
+   The server's own label is lowercased and cut at the first dash or dot (grouping for
+   the expressions extension), so it cannot serve as an identity. */
 export function assetNameFromPath(path) {
     const raw = String(path ?? '').split('?')[0].split('#')[0];
     const file = raw.slice(raw.lastIndexOf('/') + 1);
     if (!file) return null;
     let decoded = file;
-    // SillyTavern does not encode the path, but a build or proxy that does
-    // would leave %XX in the name. Decoded only when that is what it is.
+    // SillyTavern does not encode the path, but a build or proxy that does leaves %XX.
     if (/%[0-9a-f]{2}/i.test(file)) {
         try { decoded = decodeURIComponent(file); } catch { decoded = file; }
     }
     return labelOf(decoded) || null;
 }
 
-/* SillyTavern's own grouping of a file name (sprites.js): lowercased and cut at
-   the first dash or dot. Only used to recognise names saved under it by 0.2.0
-   and earlier. */
+/* SillyTavern's grouping of a file name: lowercased, cut at the first dash or dot.
+   Only for recognising names that 0.2.0 and earlier saved under it. */
 export function groupLabelOf(name) {
     const lower = String(name ?? '').toLowerCase();
     return lower.match(/^(.+?)(?:[-.].*?)?$/)?.[1] ?? lower;
 }
 
-/* The files a stored asset selection covers, out of allNames. Compared without
-   case, because selections saved under 0.2.0 and earlier hold the server's
-   lowercased label. Such a label can also be SillyTavern's group of several
-   files (pose for pose-1.png and pose-2.png), and then it covers the whole group:
-   matched one to one, it matched nothing, and both pictures silently left the
-   prompt. Only when no file carries that name itself, so a selection of
-   pose.png never reaches pose-1.png. */
+/* The files of allNames a stored selection covers. Case-insensitive, because 0.2.0
+   and earlier stored the server's lowercased label, which can name a group (pose for
+   pose-1.png and pose-2.png); a group match applies only when no file has that name. */
 export function selectedNames(selection, allNames) {
     const names = (Array.isArray(allNames) ? allNames : []).filter(name => typeof name === 'string');
     const exact = new Set(names.map(name => name.toLowerCase()));
@@ -135,11 +114,9 @@ export function selectedNames(selection, allNames) {
     return out;
 }
 
-/* Finds an entry in a listing by name. Exact first; then without case, because
-   bindings saved under 0.2.0 and earlier hold the server's lowercased label;
-   then by that server label, when exactly one file carries it, for the same
-   reason. A label that could mean two files means neither. exact (a binding
-   made from 0.3.3 on, manager-pure.js bindingIsExact) skips both fallbacks. */
+/* Exact name first; then, for bindings from 0.2.0 and earlier (the server's lowercased
+   label), case-insensitive, then by server label. An ambiguous match means none.
+   exactOnly (bindings from 0.3.3 on, see bindingIsExact) skips both fallbacks. */
 export function findAsset(list, label, exactOnly = false) {
     if (!Array.isArray(list) || !label) return null;
     const wanted = String(label);
@@ -152,16 +129,8 @@ export function findAsset(list, label, exactOnly = false) {
     return grouped.length === 1 ? grouped[0] : null;
 }
 
-/* What a {{pimg::}} tag names, looked up in a listing keyed by the server's own
-   labels.
-
-   The tag was resolved through labelOf alone, which strips everything after the
-   last dot, and a sprite label is free to contain one: an asset the server calls
-   포즈 1.5 was looked up as 포즈 1, found nothing, and the tag stayed as raw
-   text forever with no way for the user to work out why. The name as written is
-   what the user typed and what the picker showed them, so it is tried first;
-   stripping is the fallback that lets somebody write the file name with its
-   extension and still be understood. */
+/* Resolves a {{pimg::}} name in a label-keyed listing. The name as written comes first,
+   since labels may contain dots (pose 1.5); the extension-stripped form is the fallback. */
 export function lookupLabel(map, filename) {
     if (!map || typeof map.get !== 'function') return null;
     const raw = String(filename ?? '');
@@ -179,25 +148,11 @@ export function lookupLabel(map, filename) {
     return found;
 }
 
-/* The avatar backups this extension writes live in the same sprite folder as
-   the user's own pictures, because that is the only folder we own. They are
-   bookkeeping, not content, so everything that shows or SENDS the folder has to
-   be able to tell them apart: unfiltered, a backup reached the prompt through
-   {{persona_assets}} and the model could draw the user's old avatar into the
-   chat with {{pimg::}}. One prefix, one predicate, checked everywhere the list
-   is read for the user or for the model. */
-/* ASCII, deliberately.
-
-   The sprites server runs every label through its own sanitize-filename, which
-   is why sanitizeKey exists a few lines up. A Hangul prefix would mean the
-   label we read back might not start with the prefix we test for, and a backup
-   the filter stops recognising goes straight back into the prompt and the
-   picker. The user never types this name, so there is nothing to gain by
-   making it Korean and a leak to lose. */
-export const BACKUP_PREFIX = 'pm-backup-';
-// What 0.1.12 through 0.1.14 wrote. Still recognised, so a folder made by those
-// builds keeps its backup hidden and restorable instead of surfacing as an
-// ordinary picture.
+/* Avatar backups share the sprite folder with the user's pictures (the only folder we
+   own), so everything that shows the folder or sends it to the model filters this
+   prefix. ASCII, so the server's sanitize-filename cannot alter it in labels read back. */
+const BACKUP_PREFIX = 'pm-backup-';
+// Written by 0.1.12 to 0.1.14; still recognised so those backups stay hidden and restorable.
 const LEGACY_BACKUP_PREFIX = 'pm-원본-';
 
 function isBackupLabel(label) {
@@ -211,13 +166,11 @@ export function withoutBackups(list) {
 }
 
 export function assetLookup(folders, folderKey, filename) {
-    // Decides what a folder qualified tag can do right now, given what we have
-    // listed so far. Kept pure so the rendering path stays testable.
+    // What a folder-qualified tag can do now, given the listings so far. Pure, for tests.
     const listing = folders?.get(folderKey);
     if (listing instanceof Map) return { path: lookupLabel(listing, filename), fetch: false };
-    // A key we have never seen is worth exactly one listing request. A key that is
-    // present without a listing is either in flight or already known to have failed,
-    // and refetching it on every render sweep would hammer the server.
+    // An unseen key is worth one listing request; a key present without a listing is in
+    // flight or failed, and refetching it per render sweep would hammer the server.
     return { path: null, fetch: !(folders?.has(folderKey) ?? false) };
 }
 
@@ -229,30 +182,27 @@ function formHeaders(ctx) {
     return headers;
 }
 
-// A bound, not a measurement. fetch has no timeout of its own, and CHAT_CHANGED
-// awaits this listing before it renders the chat's image tags: a stalled server
-// (a Termux process restarting) held those tags as raw text for as long as the
-// browser kept the socket open. Ten seconds is past any listing that answers.
+// fetch has no timeout, and CHAT_CHANGED awaits this listing before rendering image
+// tags. A bound, not a measurement: ten seconds is past any listing that answers.
 const LISTING_TIMEOUT_MS = 10000;
 
-/* Per folder, the moment this session last wrote into it. A picture replaced
-   under the same name keeps the same address on builds whose listing carries
-   no ?t= stamp, and on every build when two writes land inside one second (the
-   stamp has one-second precision). The browser then keeps drawing the decoded
-   picture it already holds: the framing editor measured the OLD picture and cut
-   the new one with the old one's proportions, and the chat drew the new file at
-   the old file's size. A timestamp, not a counter, so a token can never repeat
-   an address a previous session already cached. */
+/* Per folder, when this session last wrote into it: a cache-busting token for pictures
+   replaced under the same name (the server's ?t= stamp is missing on some builds and
+   second-precise). A timestamp, not a counter, so no earlier session's address repeats. */
 const folderStamps = new Map();
 
 export function markFolderChanged(folderKey) {
     if (folderKey) folderStamps.set(folderKey, Date.now());
 }
 
+// Our cache-busting query parameter, appended to an address.
+export function withToken(url, token) {
+    return `${url}${url.includes('?') ? '&' : '?'}pmv=${token}`;
+}
+
 function withFolderStamp(path, folderKey) {
     const stamp = folderStamps.get(folderKey);
-    if (!stamp) return path;
-    return `${path}${path.includes('?') ? '&' : '?'}pmv=${stamp}`;
+    return stamp ? withToken(path, stamp) : path;
 }
 
 export function normalizeListing(data, folderKey) {
@@ -277,25 +227,12 @@ export async function listAssets(ctx, folderKey) {
     });
     if (!res.ok) throw new Error(`sprites/get ${res.status}`);
     const data = await res.json();
-    // The path is the server's own, so names with spaces or hangul keep the
-    // server's sanitisation. The label is rebuilt from it: see assetNameFromPath.
     return normalizeListing(data, folderKey);
 }
 
-/* The device reported 5.png 올리기 실패: sprites/upload 500 on 0.6.1.
-
-   A 500 is the server reaching the handler and throwing inside it, so the
-   endpoint and the folder are not the question; the shape of what it was handed
-   is. The one part of that shape nobody has measured is the FIELD NAME the file
-   arrives under: sprites/get was measured answering 200 in 진단 1회차, but no
-   upload has ever been watched.
-
-   So the field name is not guessed at, it is tried. Each attempt is judged by
-   the status the server answers with, a rejected attempt writes nothing, and the
-   name that works is remembered for the rest of the session, so the cost is one
-   round of probing rather than one per file. When none of them work the LAST
-   status is what the user is told, because that is the fact the next diagnostic
-   needs. The first entry is what this extension has always sent. */
+/* The upload's file field name is unverified, so each is tried in turn (a rejected
+   attempt writes nothing) and the one that works is kept for the session. The first
+   entry is what this extension has always sent. */
 const SPRITE_FILE_FIELDS = Object.freeze(['file', 'avatar', 'spriteFile', 'image']);
 let spriteFileField = null;
 
@@ -307,21 +244,11 @@ function spriteBody(field, folderKey, file) {
     return body;
 }
 
-/* `batch` is one object shared by the files of one selection. When a full round
-   of the list fails for one file, the batch is marked and the next file of the
-   same selection asks once instead of four times: five photos chosen at once
-   used to put twenty uploads of the same bytes onto the wire from a phone to a
-   Termux server. The mark lives only as long as the selection. It used to be
-   module state, so one bad round (a full disk, a proxy 502, a file the server
-   refuses) left every later upload of the session trying only the first field
-   name, which this device rejects, until a reload. Deliberately not set when the
-   loop broke early: a 401, or a server that is not there, says nothing about
-   field names. */
+/* batch is shared by the files of one selection: after one file exhausts every field
+   name, the rest try once. Per selection, so one bad round cannot cap the session; not
+   set when the loop broke early, since a 401 or a dead server says nothing about fields. */
 export async function uploadAsset(ctx, folderKey, file, batch = {}) {
     const fields = spriteFileField ? [spriteFileField]
-        // One field, not four, once the list has been through and failed for
-        // this selection. The first entry is what this extension has always
-        // sent, so the message is still about the request the user would expect.
         : batch.exhausted ? [SPRITE_FILE_FIELDS[0]]
             : SPRITE_FILE_FIELDS;
     let lastStatus = 0;
@@ -333,37 +260,26 @@ export async function uploadAsset(ctx, folderKey, file, batch = {}) {
             body: spriteBody(field, folderKey, file),
         });
         if (res.ok) {
-            // Remembered only on a real success, so a build that answers 200 to
-            // the first field never pays for the rest of the list again.
             spriteFileField = field;
             batch.exhausted = false;
             markFolderChanged(folderKey);
             return field;
         }
         lastStatus = res.status;
-        // A 400 or a 422 says the request was wrong, and a 500 is what the device
-        // actually saw; both are worth another field name. Anything else (a 401,
-        // a server that is not there) is not about the field, so the loop stops
-        // rather than throwing three more uploads at it.
+        // 400, 422 and 5xx may be about the field name; anything else (a 401, say) is not,
+        // so stop rather than send more uploads.
         if (res.status !== 400 && res.status !== 422 && res.status < 500) { ranOut = false; break; }
     }
-    // If a remembered field stopped working, forget it, so the next call starts
-    // the list again instead of repeating one that has begun to fail.
+    // A remembered field that stopped working is forgotten, so the next call probes again.
     spriteFileField = null;
-    // Every name tried, every one rejected over the name itself. Recorded so the
-    // next file in the same selection asks once instead of four times.
     if (ranOut && fields.length > 1) batch.exhausted = true;
-    // The folder goes in the message. Every field name failing means the problem
-    // is not the field, and the next thing anybody would ask is what folder the
-    // server was asked to write into. A failure the user can screenshot is worth
-    // more than one that only says a number.
+    // The folder is in the message: when every field fails, it is the next thing to check.
     throw new Error(`sprites/upload ${lastStatus} [fields=${fields.length}, folder=${folderKey}]`);
 }
 
 // Teardown leaves nothing behind, including what was learned about the server.
 export function resetAssetProbes() {
-    // Same reason as the probes below: a mark left behind would tell the next
-    // load that a picture was kept when nothing was written down.
+    // A stale mark would tell the next load a backup exists when none was recorded.
     backedUpThisSession.clear();
     spriteFileField = null;
     shownSizes.clear();
@@ -393,27 +309,20 @@ export function findTags(text) {
     return hits;
 }
 
-// One place decides the class, because two callers now build the same picture:
-// the settings drawer, which needs an HTML STRING because SillyTavern's regex
-// replacement takes one, and the chat renderer, which needs an element.
+// Shared by buildImgHtml (a string, for the settings drawer) and the chat renderer.
 export function assetClass(style) {
     return `pm-asset pm-asset-${String(style || 'plain').replace(/[^a-z]/gi, '')}`;
 }
 
-/* Still here, and still escaping, for the settings drawer's replaceString. That
-   one really does hand a string to somebody else's regex machinery. The chat
-   renderer used to come through here too and no longer does: see renderInElement.
-*/
+/* For the settings drawer's replaceString, which hands this string to SillyTavern's
+   regex replacement; hence the escaping. */
 export function buildImgHtml(path, style) {
     const safe = String(path).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     return `<img class="${assetClass(style)}" src="${safe}" loading="lazy" alt="" />`;
 }
 
-// What one text node should become, decided without touching the DOM so a node test
-// can check it. parts alternate literal text and resolved image paths in source
-// order, and resolved counts the tags that actually produced a path. A caller that
-// gets resolved 0 must leave the node alone: rewriting it would be a mutation that
-// changes nothing, which the #chat observer cannot tell apart from a real edit.
+// What one text node should become, DOM-free for node tests. resolved 0 means the
+// caller must leave the node alone (see renderInElement).
 export function planRender(text, resolvePath) {
     const source = String(text ?? '');
     const parts = [];
@@ -421,8 +330,7 @@ export function planRender(text, resolvePath) {
     let resolved = 0;
     for (const hit of findTags(source)) {
         const path = typeof resolvePath === 'function' ? resolvePath(hit.parsed) : null;
-        // An unresolved tag stays inside the literal text, because cursor does not
-        // move past it. The user then sees the tag they wrote and can fix the name.
+        // An unresolved tag stays in the literal text (cursor does not move past it).
         if (!path) continue;
         parts.push({ type: 'text', text: source.slice(cursor, hit.start) });
         parts.push({ type: 'image', path });
@@ -433,13 +341,8 @@ export function planRender(text, resolvePath) {
     return { parts, resolved };
 }
 
-/* The size each chat picture turned out to be, by path. The sprite listing carries
-   no dimensions, so a picture's first appearance cannot reserve its height and the
-   text under it moves down when it loads. But SillyTavern empties and refills
-   messages as the chat scrolls, and every refill used to rebuild the picture at
-   zero height and shift the text again, under the thumb. Once a path has loaded
-   once, its width and height go on the element, and the browser keeps the space
-   from the first frame. One entry per picture the chat has shown. */
+/* Loaded size per path. The listing has no dimensions, and SillyTavern refills messages
+   on scroll, so a known size is set on rebuilt <img>s to keep the text from jumping. */
 const shownSizes = new Map();
 
 function rememberSize(img, path) {
@@ -452,29 +355,22 @@ function rememberSize(img, path) {
 
 export function renderInElement(el, resolvePath, style) {
     if (!el) return 0;
-    /* The sanitiser check that used to stand here went with the string it was
-       guarding. Nothing on this path builds markup any more, so refusing to
-       render when SillyTavern happens not to expose DOMPurify would be refusing
-       over a library this function no longer calls. buildImgHtml still escapes,
-       for the settings drawer, which still needs a string. */
 
-    // No "already processed" flag. SillyTavern replaces .mes_text innerHTML when a
-    // message is edited, which brings the raw tags back on the same element, so a
-    // sticky flag would permanently skip it. Idempotence comes from the work itself:
-    // once a tag becomes an <img>, findTags has nothing left to match.
+    // No "already processed" flag: SillyTavern replaces .mes_text innerHTML on edit,
+    // bringing raw tags back on the same element. A rendered tag no longer matches.
     let replaced = 0;
     const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
     const targets = [];
-    while (walker.nextNode()) if (findTags(walker.currentNode.nodeValue).length) targets.push(walker.currentNode);
+    while (walker.nextNode()) {
+        const text = walker.currentNode.nodeValue;
+        // The includes() check skips the regex for the many text nodes with no tag at all.
+        if (text.includes('{{') && findTags(text).length) targets.push(walker.currentNode);
+    }
 
     for (const node of targets) {
         const plan = planRender(node.nodeValue, resolvePath);
-        // Nothing resolved, so the fragment would be a byte identical copy of this
-        // node. Replacing it anyway is still a childList mutation, the #chat observer
-        // in index.js maps that mutation back to this .mes_text and renders again,
-        // and the next pass resolves nothing again. Measured in Chromium: one tag
-        // naming an asset that does not exist kept that cycle running at frame rate
-        // for as long as it was watched. Skipping the write is what ends it.
+        // Nothing resolved: a rewrite would still be a childList mutation, and the #chat
+        // observer in index.js would render again at frame rate, forever.
         if (!plan.resolved) continue;
         const frag = document.createDocumentFragment();
         for (const part of plan.parts) {
@@ -482,17 +378,9 @@ export function renderInElement(el, resolvePath, style) {
                 if (part.text) frag.append(part.text);
                 continue;
             }
-            /* Built as an element, not parsed out of a string. This runs again
-               for every message SillyTavern empties and refills as the chat is
-               scrolled, so on a long flick it is the one piece of our code on the
-               path repeatedly - and it was serialising a path into HTML, handing
-               that to DOMPurify, and having the parser build the node back.
-
-               Nothing is lost by dropping the sanitiser: the path comes from the
-               server's own listing and it is ASSIGNED to a property here rather
-               than spliced into markup, so there is no string for anything to
-               escape out of. That is the same reason the manager's own asset row
-               builds its thumbnail this way. */
+            /* Built as an element on this hot path (every scroll refill). No sanitiser
+               needed: the server-listed path is assigned to a property, never spliced
+               into markup. */
             const img = document.createElement('img');
             img.className = assetClass(style);
             const known = shownSizes.get(part.path);
@@ -509,16 +397,12 @@ export function renderInElement(el, resolvePath, style) {
     return replaced;
 }
 
-/* ── 버전별 페르소나 이미지 (user request) ───────────────────────────────────
+/* ── Per-version persona images ─────────────────────────────────────────────
+   Moves bytes between the sprite folder this extension owns and the avatar file
+   SillyTavern owns. Nothing here talks to the user; callers decide what to say. */
 
-   Everything below moves bytes between two places that already exist: the
-   sprite folder this extension owns, and the avatar file SillyTavern owns.
-   Nothing here talks to the user; the callers decide what to say, because the
-   quick panel and the manager say it differently. */
-
-// A sprite the server is already serving, turned back into a File so it can be
-// posted as an avatar. The path is the server's own, used verbatim.
-export async function fetchAssetFile(path, label) {
+// A served sprite turned back into a File, so it can be posted as an avatar.
+async function fetchAssetFile(path, label) {
     if (!path) return null;
     try {
         const res = await fetch(path, { cache: 'no-store' });
@@ -529,24 +413,10 @@ export async function fetchAssetFile(path, label) {
     } catch { return null; }
 }
 
-/* The persona's CURRENT picture, for the one backup taken before the first
-   overwrite. The full size original is served from a path this project has
-   never measured, so the thumbnail is what gets kept and the caller says so:
-   a backup quietly smaller than the thing it replaces would be worse than
-   none, because nobody would know to look.
-
-   The name carries a stamp because uploadAsset derives the sprite label from
-   it. A fixed name meant every backup landed on the same label, so a second
-   backup would replace the first - and the first is the only one holding the
-   picture that existed before this extension touched it. */
-/* The picture on the avatar now, for the backup. The file itself first, from
-   where SillyTavern's own persona list draws it (personas.js getUserAvatar:
-   'User Avatars/' + file, read in the 1.19.0 source). The thumbnail is
-   SillyTavern's resized and cropped copy (src/endpoints/thumbnails.js), so a
-   backup taken from it came back from [원본 되돌리기] as a small picture, not
-   the original. It stays as the fallback for a build that serves the file
-   somewhere else. source says which one was kept. */
-export async function captureAvatarFile(ctx, avatarId, stamp) {
+/* The avatar's current picture, for the backup: the original file first, SillyTavern's
+   resized thumbnail as fallback (source says which). Stamped, as uploadAsset derives the
+   label from the name and a second backup must not replace the first. */
+async function captureAvatarFile(ctx, avatarId, stamp) {
     const urls = [{ url: `User Avatars/${encodeURIComponent(avatarId)}`, source: 'original' }];
     try {
         const thumb = typeof ctx?.getThumbnailUrl === 'function' ? ctx.getThumbnailUrl('persona', avatarId) : null;
@@ -566,22 +436,13 @@ export async function captureAvatarFile(ctx, avatarId, stamp) {
     return null;
 }
 
-/* One picture write at a time.
-
-   SillyTavern has exactly one avatar upload form in the document and the
-   endpoint writes one file per request. Two applies racing each other would
-   interleave, and the second answer would describe the first one's upload. The
-   chain also means a burst of version taps ends with the last one winning,
-   which is what the taps meant. */
-/* Avatars whose backup has already been taken in this session.
-
-   persona.avatarBackup is the durable record, but the caller can only write it
-   AFTER its await resolves, and the queue starts the next job one microtask
-   before that. Two quick version taps therefore both saw an empty record and
-   both took a backup, the second one holding the first one's replacement. This
-   set closes that window; the stored record still governs across reloads. */
+/* Avatars backed up this session. The caller records persona.avatarBackup only after
+   its await, and the queue starts the next job a microtask earlier, so two quick taps
+   would both back up; the stored record still governs across reloads. */
 const backedUpThisSession = new Set();
 
+// One picture write at a time, so two applies cannot interleave their uploads and
+// a burst of version taps ends with the last one winning.
 let imageChain = Promise.resolve();
 function queueImageWrite(job) {
     const run = imageChain.then(job, job);
@@ -590,11 +451,8 @@ function queueImageWrite(job) {
     return run;
 }
 
-/* [교체]: the picked picture onto the avatar, with or without a crop. It writes
-   the same file a version's picture and a restore write, so it takes its turn in
-   the same queue: two POSTs to one file racing left avatarWritten naming a
-   picture the file no longer held. onWritten runs inside the turn, after a
-   successful write, so the next job in the queue sees what it changed. */
+/* The picked picture onto the avatar, crop optional. Queued like every avatar write;
+   onWritten runs inside the turn, so the next queued job sees what it changed. */
 export function replacePersonaAvatar(ctx, avatarId, file, crop, onWritten) {
     return queueImageWrite(async () => {
         const result = await uploadPersonaAvatar(ctx, avatarId, file, crop);
@@ -603,12 +461,7 @@ export function replacePersonaAvatar(ctx, avatarId, file, crop, onWritten) {
     });
 }
 
-/* Puts a kept picture back onto the avatar.
-
-   The other half of taking a backup. Without it the extension copies a picture
-   out of the way, says so, and offers no way to ever get it back, which is a
-   promise it does not keep. Shares the write queue with applyBoundImage so a
-   restore cannot interleave with a version apply. */
+// Puts a backed-up picture back onto the avatar, through the shared write queue.
 export async function restoreAvatarBackup({ ctx, root, avatarId, label }) {
     if (!label) return { error: 'missing', detail: '' };
     return queueImageWrite(async () => {
@@ -631,9 +484,8 @@ export async function restoreAvatarBackup({ ctx, root, avatarId, label }) {
     });
 }
 
-// A picture's pixel size, read from the file itself. The crop is stored as
-// fractions so it survives the file under its name being replaced, and the
-// endpoint wants pixels. null when the browser cannot decode it.
+// Pixel size read from the file, or null if undecodable. Crops are stored as fractions
+// (to survive a replaced file) but the endpoint wants pixels.
 export async function imageSize(file) {
     try {
         if (typeof globalThis.createImageBitmap === 'function') {
@@ -655,63 +507,37 @@ export async function imageSize(file) {
     } finally { URL.revokeObjectURL(url); }
 }
 
-/* Puts a version's bound asset onto the persona's avatar file.
-
-   Answers with a code rather than a sentence, and never throws: the callers are
-   a version tap in two different screens, and a version apply must not be
-   undone by a picture that failed to move. Codes:
-     { skipped: 'none' }      the version binds nothing
-     { skipped: 'same' }      we already wrote this label and framing already
-     { error: 'listing' }     the asset folder could not be read
-     { error: 'missing' }     the bound label is not in the folder
-     { error: 'backup' }      the first overwrite was refused: nothing was saved
-     { error: 'fetch' }       the asset itself could not be downloaded
-     { error: 'decode' }      a framed picture could not be measured, so no crop
-     { error: 'upload' }      the avatar endpoint refused
-     { ok: true, backup }     written; backup is the record of a backup made now
-   Every answer past the backup step also carries `backup`, because by then the
-   copy is on the server whatever happened next. */
+/* Puts a version's bound asset onto the avatar file. Never throws: a picture that fails
+   to move must not undo a version apply. Answers a skipped/error code or ok, and every
+   answer past the backup step carries backup. */
 export async function applyBoundImage({ ctx, root, persona, avatarId, label, exact = false, crop, force, known, now }) {
     if (!label) return { skipped: 'none' };
-    // The label alone said nothing about framing: the same picture framed anew
-    // has to be written again.
+    // Keyed on label and crop: the same picture framed anew is written again.
     if (!force && persona?.avatarWritten === writtenKey(label, crop)) return { skipped: 'same' };
     return queueImageWrite(async () => {
         try {
             const key = resolveFolderKey(root, avatarId);
-            /* The manager already holds a listing for the persona it is showing,
-               and re-fetching it per version tap was one of three round trips on
-               a phone. Passed in when it is known to be current; fetched when it
-               is not, which is every call from the quick panel. */
+            /* known is the manager's listing when current, saving a round trip per tap;
+               the quick panel passes none, so it is fetched. */
             let list = Array.isArray(known) ? known : null;
             if (!list) {
                 try { list = await listAssets(ctx, key); } catch (e) {
                     return { error: 'listing', detail: String(e?.message ?? e) };
                 }
             }
-            // listAssets hands back the server's own entries, and .label is the name
-            // every other screen here shows, so a binding stored from one of those
-            // screens matches on the same field it was taken from.
             const hit = findAsset(list, label, exact);
             if (!hit) return { error: 'missing', detail: label };
 
-            /* The avatar file is overwritten, so the picture that is there now is
-               about to stop existing. Kept once, before the FIRST write, and the
-               write is refused outright when keeping it fails.
-
-               The record of that backup is returned rather than written here: the
-               caller owns the root, and it is the caller that re-reads the persona
-               after this await. Without the record the guard below never closes,
-               every apply would take another backup, and the second one would hold
-               the first one's replacement instead of the original. */
+            /* Back up the current picture once, before the first overwrite, refusing the
+               write if that fails. The record is returned, not written: the caller owns the
+               root, and must store it or every apply would back up again. */
             let backup = null;
             if (!persona?.avatarBackup && !backedUpThisSession.has(avatarId)) {
                 backedUpThisSession.add(avatarId);
                 const captured = await captureAvatarFile(ctx, avatarId, now);
                 if (!captured) { backedUpThisSession.delete(avatarId); return { error: 'backup', detail: 'capture' }; }
                 try {
-                    // saveSettingsDebounced is handed over so a key claimed here
-                    // survives a later failure on this same path.
+                    // Saved at once, so the claimed key survives a later failure on this path.
                     const folder = claimFolderKey(root, avatarId, ctx?.saveSettingsDebounced);
                     await uploadAsset(ctx, folder ?? key, captured.file);
                 } catch (e) {
@@ -722,27 +548,17 @@ export async function applyBoundImage({ ctx, root, persona, avatarId, label, exa
                 backup = { label: captured.label, at: now, source: captured.source };
             }
 
-            /* Every exit from here on carries the backup, because by here the file
-               is ON THE SERVER whatever happens next. The two failures below used
-               to return without it, the caller only records what it is handed, and
-               the record is what makes the guard above skip the next backup: so a
-               fetch or an upload that failed left a file in the folder that nothing
-               could name, and the next attempt made another one. They are hidden
-               from every screen by the backup prefix, so they were unreachable as
-               well as invisible. */
+            // From here every exit carries backup: the copy is on the server, and unrecorded it
+            // would be orphaned (hidden by its prefix) and the next attempt would make another.
             const file = await fetchAssetFile(hit.path, label);
             if (!file) return { error: 'fetch', detail: label, backup };
-            // A framed picture is cut by the server, from the pixels of THIS file.
-            // One that cannot be measured is not written whole instead: that is the
-            // picture the user framed away from.
+            // The server cuts a framed picture from this file's pixels; one that cannot be
+            // measured is not written whole instead, since the user framed away from that.
             let cropPx = null;
             if (validCrop(crop)) {
                 const size = await imageSize(file);
-                // Fitted to THIS file first. The crop is stored as fractions of the
-                // picture it was made on; a file replaced under the same name with
-                // another shape turned those fractions into a sliver that the
-                // server's 2:3 cover then zoomed into. viewFromCrop keeps its centre
-                // and zoom, cropFromView gives the 2:3 frame on this picture.
+                // Refit to this file: a same-name replacement of another shape would turn the
+                // stored fractions into a sliver. Keeps centre and zoom, re-derives the 2:3 frame.
                 const fitted = size ? cropFromView(size.width, size.height, viewFromCrop(size.width, size.height, crop)) : null;
                 cropPx = fitted ? cropPixels(fitted, size.width, size.height) : null;
                 if (!cropPx) return { error: 'decode', detail: label, backup };
@@ -751,9 +567,7 @@ export async function applyBoundImage({ ctx, root, persona, avatarId, label, exa
             if (!wrote.ok) return { error: 'upload', detail: wrote.detail ?? wrote.reason, backup };
             return { ok: true, backup };
         } catch (e) {
-            // The contract above says this never throws, and the callers run it
-            // with void: a rejection here would surface as an unhandled one with
-            // nothing on screen, which is the failure mode this project forbids.
+            // Never throws: callers run this with void, so a rejection would go unseen.
             return { error: 'upload', detail: String(e?.message ?? e) };
         }
     });
@@ -761,21 +575,13 @@ export async function applyBoundImage({ ctx, root, persona, avatarId, label, exa
 
 const MACROS = ['persona_assets', 'persona_asset_prompt'];
 
-// A version may carry an assetSelection naming the files it uses,
-// with null meaning all of them. Both macros have to go through this, or the whole
-// producing half (the checkbox per file, the 에셋: N개 선택 row, the asset-select log
-// kind) writes a setting the prompt never honours: the user unticks files, the row
-// agrees, and every file in the folder still reaches the model. Kept here rather
-// than imported from manager-pure so the macro path does not depend on the UI layer.
+// The active version's assetSelection (null = all files). Both macros must go through
+// this; kept here, not in manager-pure, so the macro path does not depend on the UI layer.
 function activeAssetNames(s) {
-    // Backups never reach the model. They are this extension's own copies of a
-    // picture the user replaced, and naming one in the prompt invites the model
-    // to draw it back into the chat.
     const names = withoutBackups(s.assetNames);
     // v?.id: a hand-edited null version entry survives migrate, and a throw here
     // happens inside SillyTavern's prompt building.
-    const selection = (s.persona?.versions ?? [])
-        .find(v => v?.id === s.persona?.activeVersionId)?.assetSelection;
+    const selection = findVersion(s.persona, s.persona?.activeVersionId)?.assetSelection;
     if (!Array.isArray(selection)) return names;
     const chosen = selectedNames(selection, s.assetNames);
     return names.filter(name => chosen.has(name));
@@ -783,8 +589,7 @@ function activeAssetNames(s) {
 
 export function registerAssetMacros(ctx, getState) {
     if (typeof ctx.registerMacro !== 'function') return;
-    // Always register, even when injection is off, so the raw macro text never
-    // leaks into a prompt.
+    // Registered even when injection is off, so raw macro text never reaches a prompt.
     ctx.registerMacro('persona_assets', () => {
         const s = getState();
         if (!s || !s.settings.injectAssetMacros) return '';
@@ -794,20 +599,14 @@ export function registerAssetMacros(ctx, getState) {
         const s = getState();
         if (!s || !s.settings.injectAssetMacros || !s.assetNames.length) return '';
         const active = activeAssetNames(s);
-        // A version that excludes every file wants no asset block at all, not the
-        // template with an empty list where the filenames should be.
+        // A version excluding every file gets no block, not a template with an empty list.
         if (!active.length) return '';
         const names = active.join(', ');
-        /* A macro runs while SillyTavern is building a prompt, and a throw there
-           takes the whole generation with it. On a root written by a NEWER build
-           migrate returns before it backfills defaults, so this setting is
-           undefined and calling replace on it threw - the one state where nothing
-           on screen would explain why sending a message stopped working. */
+        /* A throw inside a macro takes the whole generation down, and on a root from a
+           newer build migrate skips backfilling, so the template can be undefined. */
         const template = s.settings.assetPromptTemplate;
         if (typeof template !== 'string') return '';
-        // A string pattern replaces the first occurrence only, and a filename holding
-        // $& or a dollar sequence would be read as a replacement directive. A function
-        // replacement is taken literally.
+        // Global regex for every occurrence; a function replacement keeps $ sequences literal.
         return template.replace(/\{\{persona_assets\}\}/g, () => names);
     });
 }
@@ -817,29 +616,12 @@ export function unregisterAssetMacros(ctx) {
     for (const name of MACROS) ctx.unregisterMacro(name);
 }
 
-/* ── Persona avatars (user request: 페르소나 이미지 교체) ────────────────────
-   SillyTavern's own persona picture, which is a different namespace from the
-   sprites above: sprites are this extension's per-persona image library, the
-   avatar is the file SillyTavern draws for the persona everywhere.
-
-   The first version of this posted to /api/avatars/get and /api/avatars/upload.
-   Those were GUESSES. 접점 진단 5 came back and neither appears anywhere in it;
-   what it DID measure is SillyTavern's own pair of controls, #avatar_upload_file
-   (input, type=file, accept=image/\*) and #avatar_upload_overwrite (input,
-   type=hidden), sitting next to each other. So the file goes through SillyTavern's
-   own uploader rather than through an endpoint nobody has ever seen answer.
-
-   Verification is a measured URL: /thumbnail?type=persona&file=<avatar>, which
-   the diagnostic read off the persona list's own img. The bytes before and after
-   are compared, so the answer is what the server now serves rather than what we
-   hoped the upload did. */
-/* Drops the browser's copy of a persona picture, the way SillyTavern does after
-   its own upload (personas.js changeUserAvatar): the thumbnail and the full-size
-   file are fetched once with cache: 'reload', so the next time SillyTavern draws
-   them under their plain address the HTTP cache already holds the new bytes.
-   Awaited, but bounded: the caller repaints right after, and a server that is
-   slow to answer must not hold the new picture off the screen. Our own images
-   need none of this, because they carry a fresh token (quickbar.js). */
+/* ── Persona avatars ─────────────────────────────────────────────────────────
+   SillyTavern's own persona picture, the file it draws for the persona everywhere;
+   a separate namespace from this extension's sprites above. */
+/* Drops the browser's cached copy, as SillyTavern does after its own upload: thumbnail
+   and file are refetched with cache: 'reload' so their plain addresses serve the new
+   bytes. Bounded, so a slow server cannot hold up the repaint that follows. */
 const BUST_TIMEOUT_MS = 3000;
 
 async function bustPersonaImage(ctx, avatarId) {
@@ -857,32 +639,13 @@ async function bustPersonaImage(ctx, avatarId) {
     ]);
 }
 
-/* Replaces a persona's picture through the endpoint SillyTavern's own persona
-   screen posts to.
-
-   This used to be done by putting the file into SillyTavern's hidden file input
-   and firing a change event, then watching the thumbnail's byte length to find
-   out whether anything happened. Both halves were wrong. The change handler
-   (changeUserAvatar in personas.js) opens a CROP dialog unless the user has
-   turned resizing off, so the upload does not even begin until the user answers
-   it - long after any watch window closes. And the watch could not tell "no
-   measurement" from "no change": on a retry the byte length it compared against
-   was already the new picture's, so uploading the same file twice reported
-   failure every time. That is the popup that would not stop.
-
-   The endpoint answers the question directly instead. A 200 means the file is
-   written; anything else carries a status worth putting on screen. */
-/* crop is SillyTavern's own query, the one its crop dialog sends
-   (personas.js changeUserAvatar, src/endpoints/characters.js
-   applyAvatarCropResize, read 2026-10-24): whole pixels x, y, width, height, and
-   want_resize asking for the 512 x 768 cover. want_resize follows the user's own
-   never_resize_avatars, exactly as ST's dialog decides it. Without a crop the
-   server keeps the picture whole, which is what this sent before. */
-export async function uploadPersonaAvatar(ctx, avatarId, file, crop) {
+/* Posts to the endpoint SillyTavern's persona screen uses (its file input would open a
+   crop dialog first). crop is the query ST's own crop dialog sends: whole pixels, with
+   want_resize (the 512x768 cover) following never_resize_avatars. Without it, kept whole. */
+async function uploadPersonaAvatar(ctx, avatarId, file, crop) {
     const body = new FormData();
-    // The field names are SillyTavern's own form: avatar for the file, and
-    // overwrite_name for the avatar being replaced. An empty overwrite_name
-    // would CREATE a persona rather than replace one, so it is never omitted.
+    // SillyTavern's own field names. An empty overwrite_name would create a persona
+    // instead of replacing one.
     body.append('avatar', file);
     body.append('overwrite_name', avatarId);
     let res;
@@ -904,10 +667,8 @@ export async function uploadPersonaAvatar(ctx, avatarId, file, crop) {
     return { ok: true };
 }
 
-// Hands the file to SillyTavern's own uploader, with the avatar to overwrite in
-// the hidden field beside it. Returns what it could not find, so the caller can
-// say which half of the pair a build is missing instead of reporting a generic
-// failure.
+// Hands the file to SillyTavern's own uploader, the avatar to overwrite in the hidden
+// field beside it. Returns the id of whatever is missing, or null.
 export function feedPersonaImage(doc, avatarId, file) {
     const overwrite = doc?.getElementById?.('avatar_upload_overwrite');
     const input = doc?.getElementById?.('avatar_upload_file');

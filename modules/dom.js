@@ -1,11 +1,5 @@
-// Shared DOM helpers for the three screens (quick panel, manager, settings).
-//
-// Each of these used to be copied into two or three files. One copy means the
-// mobile rules they encode (tap targets, hangul composition, drawer-close
-// blocking, gesture-safe redraws) are decided once and cannot drift.
-//
-// Nothing here holds a context, a state snapshot or a node past the call that
-// made it, which is the rule every screen states at its top.
+// Shared DOM helpers for the three screens (quick panel, manager, settings). Nothing
+// here holds a context, a state snapshot or a node past the call that made it.
 import { MODULE_NAME } from './store.js';
 
 /* Element construction */
@@ -15,6 +9,21 @@ export function el(tag, className, text) {
     if (className) node.className = className;
     if (text !== undefined) node.textContent = text;
     return node;
+}
+
+// A type=button button that runs onClick, or is drawn disabled (pm-disabled) when not
+// enabled.
+export function button(className, label, onClick, enabled = true) {
+    const btn = el('button', className, label);
+    btn.type = 'button';
+    if (enabled) btn.addEventListener('click', onClick);
+    else disable(btn);
+    return btn;
+}
+
+export function disable(node) {
+    node.disabled = true;
+    node.classList.add('pm-disabled');
 }
 
 /* Listener bookkeeping */
@@ -31,11 +40,59 @@ export function runCleanups(list) {
     }
 }
 
+/* Images carried across a redraw */
+
+// Thumbnails matching selector, kept by class and address so a redraw neither decodes a
+// picture again nor shows it empty. harvest() collects a subtree's, take() reuses one or
+// makes a lazy <img>, clear() lets go of whatever no new row claimed.
+export function imagePool(selector) {
+    const pool = new Map();
+    return {
+        harvest(node) {
+            for (const img of node?.querySelectorAll?.(selector) ?? []) {
+                const key = `${img.className}|${img.getAttribute('src')}`;
+                if (!pool.has(key)) pool.set(key, img);
+            }
+        },
+        take(className, url) {
+            const key = `${className}|${url}`;
+            const kept = pool.get(key);
+            if (kept) { pool.delete(key); return kept; }
+            const img = document.createElement('img');
+            img.className = className;
+            img.loading = 'lazy';
+            img.alt = '';
+            img.src = url;
+            return img;
+        },
+        clear: () => pool.clear(),
+    };
+}
+
+/* Frame scheduling */
+
+// Runs fn once on the next animation frame however often it is scheduled (at once
+// where there is no requestAnimationFrame); pending() tells whether a run is queued.
+export function frameTask(fn) {
+    let frame = 0;
+    return {
+        schedule() {
+            if (frame) return;
+            if (typeof requestAnimationFrame !== 'function') { fn(); return; }
+            frame = requestAnimationFrame(() => { frame = 0; fn(); });
+        },
+        cancel() {
+            if (frame && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frame);
+            frame = 0;
+        },
+        pending: () => frame !== 0,
+    };
+}
+
 /* SillyTavern interaction rules */
 
-// SillyTavern closes its drawers on pointer events that land outside them, and a
-// panel attached to body counts as outside. preventDefault is never called in
-// these handlers, so the two that can be passive say so.
+// SillyTavern closes its drawers on pointer events outside them, and a panel on body
+// counts as outside. No preventDefault here, so the touch and mouse ones are passive.
 export function blockDrawerClose(node) {
     for (const type of ['touchstart', 'mousedown', 'click']) {
         node.addEventListener(type, e => e.stopPropagation(), { passive: type !== 'click' });
@@ -48,16 +105,8 @@ export function isComposingKey(e) {
     return e.isComposing || e.keyCode === 229;
 }
 
-/* Rows that answer a key as well as a tap.
-
-   The list rows are divs, because a div can hold a portrait, a name, a badge
-   and a tick without a button's own box fighting the layout. What a div never
-   gets is what a button gives away for free: a place in the tab order, a role a
-   screen reader can announce, and Enter and Space. This supplies all three.
-
-   The role is only supplied when the caller has not set one: a row in select
-   mode is a checkbox, not a button, and says so itself. Space is prevented
-   because otherwise it scrolls the panel out from under the row it just fired. */
+/* Gives a div row what a button has: tab order, a role (unless the caller set one, e.g.
+   checkbox in select mode), and Enter/Space. Space is prevented, or it scrolls the panel. */
 export function makeRowActivatable(node, onActivate) {
     if (!node || typeof onActivate !== 'function') return node;
     if (!node.hasAttribute('role')) node.setAttribute('role', 'button');
@@ -74,15 +123,12 @@ export function makeRowActivatable(node, onActivate) {
 
 /* Small shared pieces of markup */
 
-// Hover carries no meaning on a touch screen, so the mark is always drawn and
-// only its content changes.
+// Always drawn (hover means nothing on touch); only its content changes.
 export function checkMark(active) {
     return el('span', 'pm-check', active ? '✓' : '');
 }
 
-// An empty list gets a large glyph and the negation at size rather than a grey
-// line in a corner (style.css, "Empty states"). The glyph is decoration, so it
-// is not announced.
+// Large glyph plus text (style.css, Empty states); the glyph is aria-hidden decoration.
 export function emptyBlock(text) {
     const box = el('div', 'pm-empty');
     const mark = el('div', 'pm-empty-mark', '✳');
@@ -91,10 +137,8 @@ export function emptyBlock(text) {
     return box;
 }
 
-// pm-mass, because a banner IS a filled ink block. The inversion that keeps a
-// control readable on such a block is scoped to that class, and without it in
-// the markup the banner's own buttons drew ink on ink and disappeared.
-// prefix is the screen's class family ('pm-quickbar' or 'pm-manager').
+// pm-mass marks a filled ink block, which the inverted control colours are scoped to;
+// without it the banner's buttons vanish. prefix: 'pm-quickbar' or 'pm-manager'.
 export function bannerOf(prefix, className, message) {
     const box = el('div', `${prefix}-banner pm-mass ${className}`);
     box.append(el('div', `${prefix}-banner-text`, message));
@@ -107,21 +151,9 @@ export function groupOf(prefix, title) {
     return box;
 }
 
-/* Gesture-safe redraws.
-
-   Both panels defer a redraw while a text field has focus, and release it on
-   that field's blur. The blur is raised by the mousedown of the very tap the
-   user is making on [저장] or [추가], and releasing the redraw there rebuilt the
-   panel between that mousedown and its mouseup: the mouseup then landed on a
-   node that did not exist a moment ago, the browser dispatched the click to a
-   common ancestor with no handler, and the button did nothing. Measured in
-   Chromium with a 60ms press. On a desktop every press is that slow; on a phone
-   a careful one is.
-
-   So a release waits for the gesture that caused it to finish. While a pointer
-   is down the callback is queued behind its pointerup, and runs one task later,
-   which is after the click that pointerup produces has been dispatched. With no
-   pointer down (a keyboard Tab away from the field) it runs on the next task. */
+/* Gesture-safe redraws. A redraw deferred while a field has focus is released on blur,
+   which a button's own mousedown raises; rebuilding before its mouseup would send the
+   click nowhere. So a release waits until after the pointerup (and its click). */
 let pointerHeld = false;
 let trackerInstalled = false;
 const pending = [];
@@ -136,9 +168,8 @@ function onPointerUp() {
     if (batch.length) setTimeout(() => { for (const fn of batch) fn(); }, 0);
 }
 
-// Installed at boot (index.js), before any gesture can start: a tracker that
-// only appears at the first deferred release would be installed by the very
-// blur that happens inside the gesture it needs to have seen begin.
+// Installed at boot (index.js): installed lazily, it would miss the pointerdown of the
+// very gesture whose blur first needs it.
 export function installGestureTracking() {
     if (trackerInstalled || typeof document === 'undefined') return;
     trackerInstalled = true;
@@ -153,9 +184,7 @@ export function afterGesture(fn) {
     setTimeout(fn, 0);
 }
 
-// Teardown leaves nothing behind: the document listeners come off and anything
-// still queued behind a pointer that never lifted is dropped with the screens
-// that asked for it.
+// Teardown: listeners off, and callbacks queued behind a pointer that never lifted dropped.
 export function resetGestureTracking() {
     if (trackerInstalled && typeof document !== 'undefined') {
         document.removeEventListener('pointerdown', onPointerDown, true);

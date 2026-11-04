@@ -1,24 +1,15 @@
-// The manager screen: sections, variants, versions, history, assets and labels
-// for one persona: 구성, 버전, 이력, 에셋, 페르소나 선택 and 라벨. Opened from the
-// quick panel's footer, which
-// dispatches pm:open-manager on document and expects a listener to mark the event
-// handled. Everything that touches the DOM lives here; the logic worth testing is
-// in manager-pure.js, which the node tests import instead.
+// The manager screen: sections, variants, versions, history, assets and labels for one
+// persona. Opened by pm:open-manager on document; the quick panel, which sends it,
+// expects detail.handled to be set. Testable logic lives in manager-pure.js.
 //
-// No handler in this file closes over a context, a getState() snapshot or a node.
-// Handlers outlive the draw that created them, and all three of those are only
-// true for the instant they were read, so anything that needs one asks again when
-// it runs. This is the same rule quickbar.js states at its top, for the same
-// reason: it is what stopped one persona's text being written into another.
+// Handlers outlive the draw that made them, so none closes over a context, a getState()
+// snapshot or a node; each reads again when it runs, or one persona's text can land in
+// another.
 //
-// What this screen writes is pinned by targetAvatar, a plain string chosen when
-// the screen opens and changed only by the picker in its header. Writes go through
-// state.js's saveAndComposeFor(target), which decides from a live context of its
-// own whether the target is also the ACTIVE persona and therefore whether design
-// doc 4.2's singular prompt field is written. That is what lets the user edit a
-// persona they are not currently playing: a persona switch elsewhere no longer
-// invalidates the edit, because it never decided where the edit was going.
-import { MODULE_NAME, makeId, getPersona, ensurePersona, HEADING_FORMATS } from './store.js';
+// Writes go to targetAvatar via saveAndComposeFor(target), which decides from its own
+// live context whether the target is the active persona, and so whether SillyTavern's
+// prompt field is written. That lets the user edit a persona they are not playing.
+import { MODULE_NAME, makeId, appendSection, getPersona, findVersion, liveVariant, ensurePersona, HEADING_FORMATS } from './store.js';
 import {
     getState, getRoot, adoptFor, saveAndComposeFor, refreshAssets, KEEP_DESCRIPTION_KINDS,
 } from './state.js';
@@ -34,7 +25,7 @@ import {
     validCrop, clampView, cropFromView, viewFromCrop, previewBox, cropPixels, MAX_ZOOM as MAX_FRAMING_ZOOM,
 } from './framing.js';
 import {
-    isTextEntry, pickApplicable, versionApplicable, versionAlreadyApplied, quoteArg, waitFor, nameCollides,
+    isTextEntry, pickApplicable, versionApplicable, versionAlreadyApplied, quoteArg, waitFor, nameCollides, rosterWritable,
     CREATE_WAIT_TURNS, conversationLanguage,
 } from './quickbar-pure.js';
 import {
@@ -43,12 +34,10 @@ import {
     applyPersonaName, personaImageChanged, runBoundImageWrite,
     scheduleAutoName, cancelAutoName, releaseToasts,
 } from './quickbar.js';
-// DOM helpers shared with the quick panel and the settings drawer.
 import {
     el, track, runCleanups, blockDrawerClose, isComposingKey, makeRowActivatable,
-    checkMark, emptyBlock, bannerOf as sharedBanner, afterGesture,
+    checkMark, emptyBlock, bannerOf as sharedBanner, afterGesture, frameTask, button, disable, imagePool,
 } from './dom.js';
-// Matching, language detection and paging.
 import { rankOf, textContains, detectLanguage, pageOf } from './search-pure.js';
 import {
     resolveFolderKey, claimFolderKey, listAssets, uploadAsset, deleteAsset, withoutBackups,
@@ -65,19 +54,17 @@ import {
     planFullTextSave, readSelectOptions, parseDepth, copyPersonaOnto,
     setLocalName, localName, countSize,
     boundAsset, bindingIsExact, bindAsset, versionImageState, versionsBindingAsset, pictureSettled, pickInEveryVersion,
-    renameVersionIn, duplicateVersionIn, overwriteVersionPicks, dropVersionFrom, moveVersion,
+    renameVersionIn, duplicateVersionIn, overwriteVersionPicks, dropVersionFrom, moveVersion, addVersion,
+    applyVersionPicks,
 } from './manager-pure.js';
-// Every sentence the user reads on this screen comes from there,
-// including the tab names and the line under each of them. The stored log kinds,
-// the data keys and the class names in this file are deliberately unchanged.
+// Every sentence the user reads comes from STRINGS. Stored log kinds, data keys and
+// class names here are not copy and keep their spelling.
 import { STRINGS } from './strings.js';
 
 const HOST_ID = 'pm-manager-host';
 const PANEL_ID = 'pm-manager-panel';
 
-// The stored tab identity. The names the user reads are STRINGS.manager.tabs,
-// keyed by exactly these, so renaming a tab is a one line change there and
-// nothing that was saved has to move.
+// Stored tab ids; the visible names are STRINGS.manager.tabs, keyed by these.
 const TAB_KEYS = Object.freeze(['compose', 'versions', 'history', 'assets', 'labels']);
 
 const LOG_ROWS = 50;
@@ -85,58 +72,44 @@ const LOG_ROWS = 50;
 let mounted = false;
 let cleanups = [];
 let screenCleanups = [];
-// The persona this screen writes to, as a plain string. Chosen when the screen
-// opens (the active persona, which is what the quick panel's 관리 button means)
-// and afterwards only by the picker in the header. Nothing else moves it.
+// Set to the active persona on open; afterwards only the header picker moves it.
 let targetAvatar = null;
 let managerTab = 'compose';
-// Which variant body is open in the editor, as two plain strings. Nothing here
-// holds the variant object: it is looked up again at the moment of the write.
+// The variant open in the body editor, as ids; the object is looked up at write time.
 let openVariant = null;
 let editorDirty = false;
 let closeAsked = false;
-// Scroll offsets by screen (drawManager). Plain strings and numbers.
+// Scroll offset per screenKey(), restored by drawManager.
 let lastScreen = null;
 const scrollByScreen = new Map();
 
-// Which screen a draw shows, as far as the scroll offset is concerned: the
-// picker, or a tab of a persona with the body editor, 고쳐서 새 버전 or 전문
-// open over it.
+// The screen a draw shows, for scroll restore: the picker, or a persona's tab with
+// the body editor, the revise screen or the full text open over it.
 function screenKey() {
     if (pickerOpen) return 'picker';
     const over = openVariant ? ['editor', openVariant.sectionId, openVariant.variantId]
         : reviseActive ? ['revise'] : fullTexts ? ['fulltext'] : [];
     return JSON.stringify([targetAvatar, managerTab, ...over]);
 }
-let drawFrame = 0;
+const drawTask = frameTask(() => drawManager());
 let drawDeferred = false;
 let pickerOpen = false;
-// History tab selection: a variant id and an index into that variant's stored
-// snapshot list. The index is storage order, which is what restore() takes.
+// History tab selection: a variant id and an index in storage order, as restore() takes.
 let historyVariant = null;
 let historyIndex = null;
 let historyMode = 'diff';
-// Which single row has its other actions showing, as one
-// string from rowKey. Exactly one at a time, and cleared by whichever tab draws
-// next if the row it names is no longer in the data. The same shape as the quick
-// panel's expandedAvatar, for the same reason: screen local UI state, never a
-// node and never an object that could go stale.
+// The one row showing its other actions, as a rowKey string. The next tab draw
+// clears it if that row is gone.
 let expandedRow = null;
-// The asset tab's own listing, for the persona this screen points at, which is
-// not necessarily the active one. state.js keeps a listing too, but that one
-// belongs to the active persona and feeds the macros, so asking it about a
-// background persona would answer with the wrong folder.
+// The asset listing for targetAvatar. state.js keeps one only for the active persona
+// (it feeds the macros), which is the wrong folder for any other target.
 let assetState = { avatar: null, list: [], error: null, loading: false };
 // The set of empty sections the user has already been told about. See commit.
 let lastMissing = null;
-// 고쳐서 새 버전. Same rule as everything above: strings,
-// numbers and arrays of them, never a node, a context or a persona object.
-// reviseBlocks is the original text per block (from buildReplaceBlocks),
-// reviseTexts the working copies the user is editing, reviseSteps the applied
-// replacements newest last (each holding the block index and the WHOLE previous
-// string, which is what makes undo one assignment). reviseSelection is the last
-// valid drag as offsets, kept because the tap on the popup collapses the
-// selection before the click lands. reviseEditing is the open 수정 칸.
+// Revise screen: reviseBlocks are the original blocks, reviseTexts the working copies.
+// Each reviseSteps entry holds the block index and the whole previous string, so undo
+// is one assignment. reviseSelection keeps the last valid drag as offsets because
+// tapping the popup collapses the selection before the click lands.
 let reviseActive = false;
 let reviseBlocks = null;
 let reviseTexts = null;
@@ -146,41 +119,30 @@ let reviseEditing = null;
 let revisePopupHide = 0;
 let revisePopupFrame = 0;
 let reviseScrollToBox = false;
-// 설명문 전문 (user request). Same rule as the revise screen above and for the
-// same reason: plain data only. fullBlocks is buildReplaceBlocks output taken
-// when the screen opened, which is what pins each textarea to the body it was
-// drawn from; fullTexts the index aligned working copies, refreshed off the live
-// fields on every draw so a rebuild cannot roll typing back.
+// Full-text screen: fullBlocks, taken on open, pins each textarea to the body it was
+// drawn from; fullTexts are working copies re-read from the fields on every draw so a
+// rebuild cannot roll typing back.
 let fullActive = false;
 let fullBlocks = null;
 let fullTexts = null;
-// 전문 보기 방식 (user request): 'items' draws one box per item, 'raw' shows the
-// composed text exactly as SillyTavern receives it, in one block. The raw view
-// is read only; the working copies behind it are the item boxes', so switching
-// back loses nothing.
+// 'items': one box per item. 'raw': the composed text as SillyTavern receives it, read
+// only; the working copies stay the item boxes', so switching back loses nothing.
 let fullView = 'items';
-// Which of the two folded blocks at the top of the 편집 tab is open. Booleans of
-// their own rather than expandedRow keys: expandedRow is cleared by whichever
-// tab draws next, and these two belong to the tab itself rather than to a row in
-// its list.
+// Folded blocks at the top of the compose tab. Not expandedRow keys, which the next
+// tab draw clears.
 let placementOpen = false;
 let namesOpen = false;
 let personaOpen = false;
-// What tapping a row in the persona picker does: move this screen's target, or
-// copy the current persona's composition onto that row. One string, and the
-// picker closing puts it back.
+// What a picker row tap does: 'target' moves this screen's target, 'copy' copies the
+// current composition onto that row. Reset when the picker closes.
 let pickerMode = 'target';
-// SillyTavern's position and role option lists, held for the length of one draw.
-// Plain {value, label} data read off its selects, never a node, and cleared at the
-// top of every draw so a rename or a reload cannot leave a stale list on screen.
+// SillyTavern's position and role options as {value, label}, read off its selects and
+// dropped at the top of every draw so a rename or reload cannot leave a stale list.
 let enumCache = null;
-// The trailing timer behind the size lines. A token count is SillyTavern's own
-// function and its cost is not ours to predict, so it is not run per keystroke.
-// The callback holds no node: it asks the panel for the line when it fires.
+// Debounce for the size lines: SillyTavern's token count has an unpredictable cost,
+// so it does not run per keystroke.
 let sizeTimer = 0;
-// Each searchable list's search state, screen local and
-// plain data only (strings, numbers, string arrays). Keyed by the list ids the
-// containers carry in data-pm-list.
+// Search state per searchable list, keyed by the containers' data-pm-list ids.
 const emptyListUi = () => ({ open: false, query: '', page: 1, lang: null, tags: [] });
 let listUi = {
     picker: emptyListUi(),
@@ -190,42 +152,31 @@ let listUi = {
     groups: emptyListUi(),
 };
 function resetListUi() {
-    // In place, never by replacing the objects: the search and pager handlers
-    // hold these objects, and swapping them out would leave a one-frame window
-    // where a tap writes into an orphan nothing reads.
+    // In place: the search and pager handlers hold these objects, and replacing them
+    // would let a tap before the next draw write into an orphan.
     for (const ui of Object.values(listUi)) Object.assign(ui, emptyListUi());
 }
-// Whether the quick panel was on screen when this screen opened. The return trip
-// is conditional on it: the settings drawer's [관리자 열기]
-// path arrives with no panel open, and reopening one there would drop a modal
-// on top of the drawer the user is standing in. Captured before closePanel()
-// takes the panel down, cleared on every close.
+// Whether the quick panel was open when this screen opened (read before closePanel()).
+// Only then is it reopened on close; from the settings drawer it would cover the drawer.
 let fromQuickPanel = false;
 
-// One redraw per frame, and none at all while the user is typing. Same scheduler
-// as the quick panel's, and it matters more here: this screen has a textarea, and
-// a rebuild mid composition throws away the syllable being assembled.
+// Every redraw goes through here: at most one per frame. drawManager also holds it
+// while a text field in the panel has focus.
 function scheduleDraw() {
-    if (drawFrame) return;
-    if (typeof requestAnimationFrame !== 'function') { drawManager(); return; }
-    drawFrame = requestAnimationFrame(() => { drawFrame = 0; drawManager(); });
+    drawTask.schedule();
 }
 
 /* Shell */
 
-// One geometry write per frame (device jank): visualViewport fires
-// scroll continuously while the keyboard pans the page, and writing height and
-// top per event forced a layout each time. The frame reads the final position.
-let sizeFrame = 0;
+// One geometry write per frame: visualViewport fires scroll continuously while the
+// keyboard pans the page.
+const sizeTask = frameTask(() => sizeToViewport());
 function scheduleSize() {
-    if (sizeFrame) return;
-    if (typeof requestAnimationFrame !== 'function') { sizeToViewport(); return; }
-    sizeFrame = requestAnimationFrame(() => { sizeFrame = 0; sizeToViewport(); });
+    sizeTask.schedule();
 }
 
-/* The same rule the quick panel states: an unchanged value is not written again.
-   Each style write invalidates layout and this runs on every visualViewport event,
-   which on Android arrives per frame while a list is being flung. */
+// Last written geometry. An unchanged value is not rewritten: every style write
+// invalidates layout, and Android fires visualViewport events per frame during a fling.
 let sizedHeight = null;
 let sizedTop = null;
 
@@ -237,9 +188,8 @@ function forgetSizing() {
 function sizeToViewport() {
     const panel = document.getElementById(PANEL_ID);
     if (!panel) return;
-    // CSS vh does not shrink when the on screen keyboard opens, and
-    // this screen is full height with a textarea in it, so a vh sized panel puts
-    // the save button under the keyboard exactly when it is needed.
+    // visualViewport, not vh: vh ignores the on-screen keyboard and would put the save
+    // button under it.
     const vv = globalThis.visualViewport;
     const height = vv?.height ?? globalThis.innerHeight ?? 0;
     if (!height) return;
@@ -247,14 +197,12 @@ function sizeToViewport() {
     if (px !== sizedHeight) {
         sizedHeight = px;
         panel.style.height = `${px}px`;
-        // The history tab's text boxes cap themselves at 40% of the same measured
-        // height. In CSS that cap was 40vh, the one vh box left after 22.5, and vh
-        // ignores the keyboard exactly as the shell's own height did.
+        // Cap for the history tab's text boxes: 40% of the measured height, since a vh
+        // cap would ignore the keyboard too.
         panel.style.setProperty('--pm-history-cap', `${Math.round(height * 0.4)}px`);
     }
-    // Zero on Android while the keyboard is up (the visual viewport shrinks rather
-    // than moves), non zero when the page is pinch zoomed or when a focused field
-    // is panned into view. Reading it costs nothing and covers all three.
+    // Zero on Android while the keyboard is up (the visual viewport shrinks), non-zero
+    // when the page is pinch zoomed or a focused field is panned into view.
     const top = Math.max(0, Math.round(vv?.offsetTop ?? 0));
     if (top !== sizedTop) {
         sizedTop = top;
@@ -265,10 +213,8 @@ function sizeToViewport() {
 function openManager(tab) {
     const wanted = TAB_KEYS.includes(tab) ? tab : 'compose';
     if (document.getElementById(HOST_ID)) { managerTab = wanted; scheduleDraw(); return; }
-    // The quick panel is a modal dialog of its own, and two of them in the top
-    // layer would leave the user tapping through the wrong one. Whether it was
-    // up is what decides where closing this screen returns to, so it is read
-    // before the close erases the evidence.
+    // The quick panel is a modal dialog too, and two in the top layer leave the user
+    // tapping the wrong one. Whether it was up is read before closing it.
     fromQuickPanel = isPanelOpen();
     closePanel();
 
@@ -290,46 +236,33 @@ function openManager(tab) {
     namesOpen = false;
     personaOpen = false;
     resetFullText();
-    // What the quick panel's 관리 button has always meant: the
-    // screen opens on the persona the user is playing. The picker moves it after.
     targetAvatar = getState()?.avatar ?? null;
 
-    // pm-grain paints the reference's paper tooth as a fixed overlay on the
-    // panel, not on the scrolling content, so it composites once (style.css).
+    // pm-grain sits on the panel, not the scrolling content, so it composites once.
     const panel = el('div', 'pm-panel pm-manager-panel pm-grain');
     panel.id = PANEL_ID;
     panel.setAttribute('role', 'dialog');
     panel.setAttribute('aria-label', STRINGS.manager.screenAria);
 
-    // Measured on the device (아이콘 진단): one of the installed themes decorates an
-    // ancestor with a transform, which makes that ancestor the containing block for
-    // position fixed, so a viewport anchored panel lands off screen. A modal dialog
-    // renders in the top layer, which the spec pins to the viewport regardless of
-    // ancestor transforms. Every overlay this extension draws has to ride one.
+    // Every overlay rides a modal dialog: some themes put a transform on an ancestor,
+    // which breaks position: fixed, and the top layer ignores ancestor transforms.
     const host = document.createElement('dialog');
     host.id = HOST_ID;
     host.className = 'pm-manager-host';
     host.tabIndex = -1;
     blockDrawerClose(host);
     blockDrawerClose(panel);
-    // Native ESC, and the Android back gesture, fire cancel on the dialog. Routed
-    // through our own path so an unsaved edit gets its one question first.
+    // ESC and the Android back gesture fire cancel; requestClose asks about unsaved work.
     host.addEventListener('cancel', e => { e.preventDefault(); requestClose(); });
-    // Chromium lets a second back gesture through when no tap happened since the
-    // last prevented cancel (the close watcher rule), and the dialog then closes
-    // natively with our state and the host left behind: openManager found the
-    // host, redrew into a closed dialog and returned, so the manager could not be
-    // reopened until a reload. A close we did not start runs our teardown.
+    // Chromium's close watcher lets a second back gesture close the dialog natively when
+    // no tap happened since the last prevented cancel, so a close we did not start runs
+    // our teardown (a host left behind blocks reopening until reload).
     host.addEventListener('close', () => {
         if (document.getElementById(HOST_ID) !== host) return;
-        // Closed by the quick panel so a SillyTavern popup that is not a dialog can
-        // be answered (quickbar.js dropHost), which raises this host again after
-        // the answer. Tearing the screen down here lost it, and the popup's caller
-        // found a removed host.
+        // quickbar.js dropHost closes this host so a non-dialog SillyTavern popup can be
+        // answered, then raises it again; the screen must survive that.
         if (host.dataset.pmDropped === '1') return;
-        // A close nobody asked for used to throw away the 전문 and 고쳐서 새 버전
-        // working copies, and a picture waiting in the framing editor, without a
-        // word. With one of those open the screen comes back and asks first.
+        // Working copies the draft store does not keep: reopen and ask first.
         if (hasWorkingCopies()) {
             try { host.showModal(); } catch { host.setAttribute('open', ''); }
             void requestClose();
@@ -352,27 +285,16 @@ function openManager(tab) {
 
     if (globalThis.visualViewport) {
         track(screenCleanups, globalThis.visualViewport, 'resize', scheduleSize);
-        // Android fires scroll rather than resize when the visual viewport is
-        // panned, which is what happens when a focused textarea is scrolled above
-        // the keyboard. Without this the screen keeps its old offset and the field
-        // the user is typing into ends up outside the visible area.
+        // Android fires scroll, not resize, when the visual viewport pans to keep a
+        // focused field above the keyboard.
         track(screenCleanups, globalThis.visualViewport, 'scroll', scheduleSize);
     }
-    // The [수정] popup follows the live selection. Registered for
-    // the screen's whole life and a cheap no-op whenever the revise screen is not
-    // up; selection events have no per-node target to scope to.
+    // The revise screen's edit popup follows the selection. selectionchange has no
+    // per-node target, so it listens for the screen's life and no-ops elsewhere.
     track(screenCleanups, document, 'selectionchange', onReviseSelectionChange);
-    // The cancel handler above already covers ESC and the Android back gesture for
-    // a dialog opened with showModal. A document level Escape listener on top of it
-    // also fired for the ESC that dismissed a SillyTavern popup drawn over this
-    // screen, which closed the manager underneath the user. It is kept only for the
-    // fallback path, where no cancel event will ever come, and even there only
-    // while the focus is still inside our own host, so it cannot reach past a popup
-    // that has taken the focus.
-    //
-    // The composition guard still applies: a hangul composition commits with an
-    // Enter whose keyCode is 229, and the guard is on every keydown this extension
-    // listens to.
+    // Fallback for no showModal, where no cancel event comes. Only while focus is in our
+    // host, so the ESC that dismisses a SillyTavern popup over this screen does not also
+    // close it.
     if (!modal) {
         track(screenCleanups, document, 'keydown', e => {
             if (isComposingKey(e)) return;
@@ -384,24 +306,16 @@ function openManager(tab) {
     }
 }
 
-// Closing is the one path that can lose something the user typed, because the
-// editor saves on a button and not on every keystroke. The rule
-// against silent failure applies to silent loss too. The draft store means the
-// text survives the close as well, and the question says so rather than implying
-// it is about to be thrown away.
-// One question at a time, and the flag comes down even when the popup throws.
-// Left up, requestClose and both leave paths returned at their first line from
-// then on, and with cancel prevented the screen could not be closed until reload.
+// One close question at a time. The flag comes down even if the popup throws: left
+// up, every close path would return early and the screen could not be closed.
 async function askOnce(message) {
     closeAsked = true;
     try { return await askConfirm(message); } finally { closeAsked = false; }
 }
 
-// The two working copies that do not survive leaving the persona or the screen:
-// 고쳐서 새 버전's steps and the 전문 screen's bodies. requestClose, selectTarget and
-// the two leave buttons asked about them; 삽입 and the three actions that land on
-// another persona (복제, 새 페르소나, 복사) reset both without a word. One question
-// per dirty screen, each through askOnce. Answers whether to go on.
+// Asks, one question per dirty screen, before the revise steps or full-text bodies
+// are dropped; neither survives leaving the persona or the screen. Answers whether
+// to go on.
 async function confirmDropWorking() {
     if (closeAsked) return false;
     const revising = reviseDirtyCount();
@@ -418,9 +332,8 @@ function hasWorkingCopies() {
 
 async function requestClose() {
     if (closeAsked) return;
-    // A picture picked for [이미지 교체] and not yet applied. Not asked while it
-    // is on the wire: closing does not stop an upload, so there is nothing to
-    // cancel by then.
+    // A picked replacement image not yet applied. Not asked once uploading: closing
+    // does not stop an upload.
     if (framing?.mode === 'upload' && !framingBusy) {
         const ok = await askOnce(STRINGS.manager.framingConfirmLeave);
         if (!ok || !document.getElementById(HOST_ID)) return;
@@ -429,11 +342,8 @@ async function requestClose() {
     const fullDirty = fullDirtyCount();
     if (editorDirty || revising > 0 || fullDirty > 0) {
         stashDraft();
-        // The two working screens win over the editor when they apply: the
-        // editor's typing is stashed by the line above and survives the close,
-        // but their working copies are gone with the screen, so they are what the
-        // user has to be asked about. Between those two, the one on the tab the
-        // user is standing on is the one they can see, and it asks first.
+        // The editor's text is stashed above and survives; the revise and full-text copies
+        // do not, so they are what to ask about, the one on the current tab first.
         const onVersions = managerTab === 'versions';
         const first = onVersions ? revising : fullDirty;
         const second = onVersions ? fullDirty : revising;
@@ -443,13 +353,8 @@ async function requestClose() {
             : second > 0 ? askSecond(second)
                 : STRINGS.manager.confirmCloseDirty;
         const ok = await askOnce(message);
-        // Re-checked rather than assumed: the screen may have been closed while
-        // the question was on screen.
         if (!ok || !document.getElementById(HOST_ID)) return;
-        // Both screens can be dirty at once, and closeManager resets both. Asking
-        // about one of them and then discarding the other is the silent loss this
-        // whole path exists to prevent, so the second one gets its own question -
-        // the same shape selectTarget uses when it has two things to ask about.
+        // Both can be dirty and closeManager drops both, so the second gets its own question.
         if (first > 0 && second > 0) {
             const okSecond = await askOnce(askSecond(second));
             if (!okSecond || !document.getElementById(HOST_ID)) return;
@@ -458,22 +363,15 @@ async function requestClose() {
     closeManager();
 }
 
-// The user got here through the quick panel's 관리 button, so
-// closing is a step back up to that panel rather than an exit from everything.
-// The step back only exists when the panel is where they came from: fromQuickPanel
-// is false on the settings drawer's [관리자 열기] path, and a panel opened there
-// would sit modal over the drawer and disable it. Two more cases skip the reopen,
-// and both are silent about it because neither is a failure: the icon and the
-// panel are turned off in the settings, or there is no persona for a panel to be
-// about. The insert-then-close path passes false for a reason of its own (see
-// insertIntoSendBox).
+// Closing steps back to the quick panel when that is where the user came from,
+// unless the panel is turned off or there is no persona. The insert-then-close path
+// passes false (see insertIntoSendBox).
 function closeManager(reopenPanel = true) {
     const returnToPanel = reopenPanel && fromQuickPanel;
     fromQuickPanel = false;
     runCleanups(screenCleanups);
-    // Before the host goes. While this screen is up it holds SillyTavern's toast
-    // container, and removing the host with the container still inside it would
-    // take every toast in the app down with this panel.
+    // Before the host goes: it holds SillyTavern's toast container while open, and
+    // removing it with the container inside would take every toast down with it.
     releaseToasts();
     const host = document.getElementById(HOST_ID);
     if (host) {
@@ -486,8 +384,7 @@ function closeManager(reopenPanel = true) {
     closeAsked = false;
     lastScreen = null;
     scrollByScreen.clear();
-    // Detached rows and thumbnails, with the closures that built them, would
-    // otherwise stay alive until the next open's first draw.
+    // Otherwise detached rows, thumbnails and their closures live until the next open.
     rowNodes.clear();
     pickerThumbs.clear();
     dropFraming();
@@ -504,9 +401,8 @@ function closeManager(reopenPanel = true) {
     languageMemo.clear();
     clearDragState();
     assetState = { avatar: null, list: [], error: null, loading: false };
-    // Unlike drafts, applied replacements do not survive a close: requestClose
-    // asked the one question about them before this line could run. The 전문
-    // window's working copies go the same way, for the same reason.
+    // Unlike drafts, revise steps and full-text copies do not survive a close;
+    // requestClose has already asked about them.
     resetRevise();
     resetFullText();
     pickerMode = 'target';
@@ -516,23 +412,14 @@ function closeManager(reopenPanel = true) {
     placementOpen = false;
     namesOpen = false;
     personaOpen = false;
-    // Read from SillyTavern's document, so it belongs to the screen that read it.
     enumCache = null;
     resetListUi();
-    // Drafts deliberately survive a close: reopening the screen on the same
-    // variant puts the text back. unmountManager is what clears them, because
-    // that is teardown rather than a screen the user stepped out of.
-    //
-    // A frame already queued would call drawManager after the screen is gone. It
-    // finds no panel and returns, but the id must not look like a live schedule.
-    if (drawFrame && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(drawFrame);
-    drawFrame = 0;
-    if (sizeFrame && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(sizeFrame);
-    sizeFrame = 0;
+    // Drafts survive a close on purpose; unmountManager clears them.
+    // A stale frame would make the schedulers skip every later draw.
+    drawTask.cancel();
+    sizeTask.cancel();
 
-    // Last, and only after this screen is fully torn down: openPanel builds a
-    // modal dialog of its own, and two of them in the top layer would leave the
-    // user tapping through the wrong one.
+    // Last, after full teardown: openPanel opens a modal dialog of its own.
     if (!returnToPanel) return;
     const s = getState();
     if (!s || s.settings?.showQuickBar === false || !s.avatar) return;
@@ -541,8 +428,7 @@ function closeManager(reopenPanel = true) {
 
 /* Target and guards */
 
-// What this screen is editing, read fresh. Nothing here is kept: the caller uses
-// it within one synchronous stretch and asks again on the other side of an await.
+// What this screen edits, read fresh; use it within one synchronous stretch.
 function targetState() {
     const root = getRoot();
     if (!root) return null;
@@ -552,24 +438,18 @@ function targetState() {
         avatar: targetAvatar,
         persona: targetAvatar ? getPersona(root, targetAvatar) : null,
         readOnly: !!root.readOnly,
-        // Deleted in SillyTavern behind the open screen: every write would be
-        // refused at commit, after the record had already been changed.
+        // False once deleted in SillyTavern behind this screen: a write would be refused
+        // at commit, after the record had already changed.
         listed: !targetAvatar || Object.hasOwn(freshContext()?.powerUserSettings?.personas ?? {}, targetAvatar),
-        // With two personas sharing a name and no precise path,
-        // which persona is ACTIVE is unknowable, and saveAndComposeFor refuses
-        // for exactly that reason. It is not about the target, so it is read from
-        // the shared state rather than recomputed here.
+        // Two personas share a name and no precise path, so the active one is unknowable
+        // and saveAndComposeFor refuses. Shared state, not about the target.
         ambiguous: !!getState()?.ambiguous,
     };
 }
 
-// The guard every write starts and resumes with. The target is a string that only
-// the picker moves, so an await cannot change it behind our back; what an await
-// CAN do is let the user pick a different persona while a popup is open, or let
-// the entry be pruned. Both are caught by asking again rather than by trusting the
-// object read before the await. Unlike the quick panel's guard this never closes
-// the screen: a persona switch elsewhere is no longer a reason to, because it
-// cannot move where the write lands.
+// Every write starts and resumes here. Across an await the picker may move the target
+// or the entry may be pruned, so writes pass the avatar they started on and re-read
+// state. Unlike the quick panel's guard this never closes the screen.
 function guardTarget(expected) {
     if (expected !== undefined && expected !== targetAvatar) {
         notify('error', STRINGS.manager.targetMovedNotSaved);
@@ -581,9 +461,8 @@ function guardTarget(expected) {
     return s;
 }
 
-// saveAndComposeFor answers every refusal with null, and the user has to be told
-// which one it was. A refusal that says nothing is the failure mode
-// this project exists to avoid.
+// saveAndComposeFor answers every refusal with null; this tells the user which one,
+// because a silent refusal is the failure this project exists to avoid.
 function refusalMessage(avatar) {
     const root = getRoot();
     if (!root) return STRINGS.manager.refusalNoRoot;
@@ -595,9 +474,8 @@ function refusalMessage(avatar) {
     return STRINGS.common.cannotSaveNow;
 }
 
-// A persona built by store.js always has these four containers, but a record hand
-// edited in settings.json may not, and a missing one would turn a single bad
-// record into a thrown exception that takes the whole screen down.
+// store.js always builds these containers, but a hand-edited settings.json may lack
+// one, and a throw would take the whole screen down.
 function ensureShape(persona) {
     if (!Array.isArray(persona.sections)) persona.sections = [];
     if (!persona.variants || typeof persona.variants !== 'object') persona.variants = {};
@@ -608,20 +486,13 @@ function ensureShape(persona) {
 
 /* Writes */
 
-// kind is null for the writes whose log line was already written by the helper
-// that performed them (removeSection, deleteVariant and restore all log, because
-// what they did is not visible from out here). A second line for the same act
-// would make the log read as two operations.
-// write overrides what the kind says about the text. A kind names what the log
-// line reads as; whether the prompt changed is a property of the write itself.
-// Applying a version is forced: with an outside edit pending, state.js leaves
-// SillyTavern's text alone when the composition did not change, and asking for a
-// version's text is exactly the tap that must write it anyway.
+// detail is shown to the user, so it carries names, never ids. kind is null when the
+// helper already logged (removeSection, deleteVariant, restore); write overrides what
+// the kind implies. version-apply forces the write: with an outside edit pending,
+// state.js leaves SillyTavern's text alone if the composition is unchanged.
 function commit(kind, detail, expectedAvatar, { write } = {}) {
     const avatar = expectedAvatar ?? targetAvatar;
-    // Read before the save, used after it. The log line describes an accepted
-    // write, so writing it first grows persona.log by one line every time state.js
-    // refuses, and a refused write is exactly the case with nothing to record.
+    // Read before the save, logged only after it: a refused write has nothing to record.
     const persona = getPersona(getRoot(), avatar);
     const result = saveAndComposeFor(avatar, {
         write: write ?? !KEEP_DESCRIPTION_KINDS.has(kind),
@@ -634,17 +505,14 @@ function commit(kind, detail, expectedAvatar, { write } = {}) {
         freshContext()?.saveSettingsDebounced?.();
     }
     if (result.keptOutside) notify('warning', STRINGS.common.outsideKept(result.keptOutside.section));
-    // Only the stored copy could be written (state.js says why): the prompt has
-    // the old text until the persona is selected again, and the user is told so.
+    // Only the stored copy was written (see state.js); the prompt keeps the old text
+    // until the persona is selected again.
     if (result.activeUnknown && !result.kept) notify('warning', STRINGS.common.savedActiveUnknown);
-    // No PERSONA_UPDATED for a kept description, so the icon and an open quick
-    // panel hear about a renamed or deleted version from here.
+    // No PERSONA_UPDATED fires for a kept description, so the icon and an open quick
+    // panel hear about it from here.
     if (result.kept) document.dispatchEvent(new CustomEvent('pm:changed'));
-    // A section that fell out of the prompt must be said out loud.
-    // The banner at the top of the screen carries the names permanently; the toast
-    // is only for the moment the set CHANGES, because a section the user has
-    // decided to leave empty otherwise produced one toast per tap, which is how a
-    // real warning gets trained away.
+    // Empty sections: the banner names them permanently; the toast fires only when the
+    // set changes, so a section left empty on purpose does not toast on every tap.
     const signature = missingSignature(result.missing);
     if (signature !== lastMissing) {
         if (result.missing?.length) notify('warning', STRINGS.common.emptyItems(result.missing.length));
@@ -665,12 +533,7 @@ async function addSection() {
     const after = guardTarget(startAvatar);
     if (!after) return;
     const persona = ensureShape(after.persona);
-    const uuid = freshContext()?.uuidv4;
-    const sectionId = makeId(uuid);
-    const variantId = makeId(uuid);
-    persona.sections.push({ id: sectionId, name: name.trim() });
-    persona.variants[sectionId] = [{ id: variantId, label: STRINGS.manager.defaultChoiceLabel, text: '', updatedAt: Date.now() }];
-    persona.activePicks[sectionId] = variantId;
+    const { sectionId, variantId } = appendSection(persona, { name: name.trim() }, freshContext()?.uuidv4, '', Date.now());
     pickInEveryVersion(persona, sectionId, variantId);
     commit('section-add', name.trim(), startAvatar);
 }
@@ -683,8 +546,6 @@ async function renameSection(sectionId, current) {
     if (!name || !name.trim()) return;
     const after = guardTarget(startAvatar);
     if (!after) return;
-    // Found again on the persona this screen points at now, never carried across
-    // the await: the object read before it may belong to a different persona.
     const section = (after.persona.sections ?? []).find(entry => entry.id === sectionId);
     if (!section) { notify('error', STRINGS.manager.itemGone); scheduleDraw(); return; }
     section.name = name.trim();
@@ -694,9 +555,6 @@ async function renameSection(sectionId, current) {
 function shiftSection(sectionId, delta) {
     const s = guardTarget();
     if (!s) return;
-    // Read before the move, because the line is about the item and the id is only
-    // the handle on it. It used to log the id, which put a uuid in the one list on
-    // this screen a person actually reads.
     const name = (s.persona.sections ?? []).find(entry => entry.id === sectionId)?.name ?? '';
     if (!moveSection(s.persona, sectionId, delta)) return;
     commit('section-move', name, s.avatar);
@@ -706,8 +564,7 @@ async function dropSection(sectionId, name) {
     const s = guardTarget();
     if (!s) return;
     const startAvatar = targetAvatar;
-    // The last section is never deleted. Asked before the question
-    // so the user is not walked through a confirmation that ends in a refusal.
+    // Checked before the question, so a confirmation never ends in a refusal.
     if (!canDeleteSection(s.persona, sectionId)) {
         notify('error', STRINGS.manager.lastItemKept);
         return;
@@ -718,15 +575,10 @@ async function dropSection(sectionId, name) {
     const gone = removeSection(after.persona, sectionId, Date.now());
     if (!gone) { notify('error', STRINGS.manager.lastItemKept); scheduleDraw(); return; }
     if (openVariant?.sectionId === sectionId) { openVariant = null; editorDirty = false; }
-    // The history tab may be sitting on one of the bodies that went with it. Left
-    // behind, its choice select shows nothing chosen while the tab underneath
-    // reports "no history" about a variant that no longer exists.
+    // The history tab may be on one of the removed bodies.
     if (gone.variantIds.includes(historyVariant)) { historyVariant = null; historyIndex = null; }
-    // The drafts belonged to bodies that no longer exist, exactly as in dropVariant.
-    // Left behind they are unreachable text that nothing on any screen can show or
-    // clear, and they survive until teardown.
+    // Drafts of removed bodies would be unreachable text until teardown.
     for (const variantId of gone.variantIds) takeDraft(startAvatar, sectionId, variantId);
-    // removeSection wrote its own log line, so this call only has to save.
     commit(null, gone.name, startAvatar);
 }
 
@@ -735,14 +587,10 @@ async function dropSection(sectionId, name) {
 function pickVariant(sectionId, variantId) {
     const s = guardTarget();
     if (!s) return;
-    // A change event can outlive the select that produced it: the native Android
-    // picker stays open across a redraw, and the node it reports is then detached.
-    // Nothing is said about it, because it is not an act on the screen the user is
-    // looking at; the check is here so the stray key never reaches activePicks.
+    // The native Android picker stays open across a redraw, so a change event can come
+    // from a detached select; it is dropped silently.
     if (!pickApplicable(s.persona, sectionId, variantId)) return;
     s.persona.activePicks = { ...(s.persona.activePicks ?? {}), [sectionId]: variantId };
-    // The log shows its detail to the user, so it carries names, as section-move
-    // does: the section id is a uuid nobody can read.
     const section = (s.persona.sections ?? []).find(entry => entry?.id === sectionId);
     const variant = (s.persona.variants?.[sectionId] ?? []).find(entry => entry?.id === variantId);
     commit('pick', `${section?.name ?? ''}: ${variant?.label ?? ''}`, s.avatar);
@@ -783,9 +631,7 @@ function duplicateVariant(sectionId, variantId) {
     const list = s.persona.variants?.[sectionId];
     const source = (list ?? []).find(entry => entry.id === variantId);
     if (!Array.isArray(list) || !source) return;
-    // The copy carries the text and nothing else. History belongs to the variant
-    // it was taken from, and a copy that inherited it would offer to restore text
-    // this variant never had.
+    // Text only: inherited history would offer to restore text the copy never had.
     const copy = {
         id: makeId(freshContext()?.uuidv4),
         label: STRINGS.common.copySuffix(source.label ?? ''),
@@ -808,29 +654,16 @@ async function dropVariant(sectionId, variantId, label) {
     const result = deleteVariant(after.persona, sectionId, variantId, Date.now());
     if (!result) { notify('error', STRINGS.manager.choiceUndeletable); scheduleDraw(); return; }
     if (openVariant?.variantId === variantId) { openVariant = null; editorDirty = false; }
-    // The draft belonged to a body that no longer exists.
     takeDraft(startAvatar, sectionId, variantId);
     if (historyVariant === variantId) { historyVariant = null; historyIndex = null; }
-    // The move is logged by deleteVariant, and said out loud here
-    // as well, because the combination changed under the user without a tap.
+    // The pick moved without a tap, so say so (deleteVariant logs it too).
     if (result.movedTo) notify('info', STRINGS.manager.pickMovedToFirst);
-    // deleteVariant wrote its own log lines, so this call only has to save.
     commit(null, result.label, startAvatar);
 }
 
-/* A snapshot, with the history tab's selection kept honest.
-
-   historyIndex is a POSITION into one variant's stored list, and snapshot()'s own
-   per-variant cap drops from the FRONT of that list, so a save on a variant whose
-   history is already at the cap shifts every index by one and the tick the user
-   left on a snapshot silently comes to mean a different one. The bounds check
-   downstream only catches an index that fell off the END.
-
-   What is compared is the identity of the first entry: it changed exactly when
-   the front was dropped, which is exactly when the indices moved. The two expiry
-   passes are still counted separately by their callers, because those can drop
-   entries this cap did not. */
-// Answers whether a snapshot was kept: with 이력 보관 개수 at 0 nothing is.
+// snapshot(), clearing historyIndex when the per-variant cap drops from the front:
+// the index is a position, so it would silently point at a different snapshot.
+// Answers whether a snapshot was kept (none is when the history count is 0).
 function snapshotKeepingIndex(persona, variantId, previous, now, settings, options) {
     const first = persona.history?.[variantId]?.[0];
     const kept = snapshot(persona, variantId, previous, now, settings, options);
@@ -838,16 +671,12 @@ function snapshotKeepingIndex(persona, variantId, previous, now, settings, optio
     return kept;
 }
 
-// The history caps apply whenever snapshots were written. historyIndex is a
-// POSITION into a variant's list and both passes drop entries from the FRONT, so
-// a tick left on "3일 전" would silently come to mean a different snapshot; any
-// trim clears it.
+// Applies the history caps after snapshots are written; any trim clears historyIndex.
 function trimHistory(root, settings, now) {
     if (expireOldHistory(root, settings, now) + enforceGlobalBudget(root, settings, now)) historyIndex = null;
 }
 
-// The one path that writes a variant body. The text being replaced
-// goes into history first, so saving is never the operation that loses something.
+// The one path that writes a variant body; the old text goes into history first.
 function saveVariantText(sectionId, variantId, text) {
     const s = guardTarget();
     if (!s) return;
@@ -866,21 +695,17 @@ function saveVariantText(sectionId, variantId, text) {
     snapshotKeepingIndex(s.persona, variantId, previous, now, s.settings);
     variant.text = text;
     variant.updatedAt = now;
-    // The per variant cap does not bound the total, and the
-    // total is what fills settings.json. A snapshot is the only moment the total
-    // can grow, so it is the moment to enforce the cap.
+    // The per-variant cap does not bound the total in settings.json, and a snapshot is
+    // the only moment the total grows.
     trimHistory(s.root, s.settings, now);
     editorDirty = false;
-    // The text is on the variant now. A draft left behind would be restored over
-    // the saved text the next time this body is opened.
+    // A leftover draft would be restored over the saved text on next open.
     takeDraft(startAvatar, sectionId, variantId);
     commit('variant-edit', variant.label ?? '', startAvatar);
 }
 
 /* Writes: versions */
 
-// The version id is a string the row was drawn with, and the version itself is
-// looked up again on the persona this screen points at when the write happens.
 async function applyVersion(versionId) {
     const s = guardTarget();
     if (!s) return;
@@ -889,43 +714,24 @@ async function applyVersion(versionId) {
         notify('error', STRINGS.common.versionNotApplicable);
         return;
     }
-    // An outside edit is kept as a choice by the write itself (state.js
-    // keepOutsideText). Divergence is still asked of the persona being written
-    // to, so a repeat tap over an outside edit is not skipped as already applied.
+    // Checked so a repeat tap over an outside edit is not skipped as already applied
+    // (the write itself keeps the outside text as a choice).
     const ctx = freshContext();
     const diverged = ctx ? hasDiverged(ctx, s.avatar, s.persona) : false;
-    // Same rule as the quick panel: a repeat tap on the applied version writes
-    // nothing and queues no second picture upload.
+    // A repeat tap on the applied version writes nothing and queues no second upload.
     if (!diverged && versionAlreadyApplied(s.persona, versionId) && pictureSettled(s.persona, versionId)) return;
     const after = guardTarget(startAvatar);
     if (!after) return;
-    // Asked again of the persona being written to. Matching avatars is necessary
-    // and not sufficient: our own data for it can have been rewritten meanwhile.
+    // A matching avatar is not enough: the persona's data may have changed meanwhile.
     if (!versionApplicable(after.persona, versionId)) {
         notify('error', STRINGS.common.versionNotApplicable);
         return;
     }
-    const version = (after.persona.versions ?? []).find(entry => entry.id === versionId);
-    // Kept so a refused write can be undone. Left in place, the new picks stayed in
-    // the live settings, showed the version as applied while the prompt still
-    // carried the old text, and went out with the next save of anything at all.
-    const previous = { id: after.persona.activeVersionId, picks: after.persona.activePicks };
-    after.persona.activeVersionId = version.id;
-    after.persona.activePicks = { ...(version.picks ?? {}) };
-    // Only when the prompt write was accepted. commit answers false when state.js
-    // refuses - a read only root, an unknowable active persona, a persona that
-    // moved out from under the screen - and in every one of those cases the
-    // version was NOT applied. Overwriting the avatar file anyway puts the
-    // picture of a combination on a persona whose prompt does not carry it, and
-    // it consumes the one backup that is taken before the first overwrite.
-    if (!commit('version-apply', version.name ?? '', startAvatar)) {
-        after.persona.activeVersionId = previous.id;
-        after.persona.activePicks = previous.picks;
-        return;
-    }
-    // The prompt is applied and saved above; the picture follows on its own. A
-    // version that cannot move its picture is still an applied version, so this
-    // is never awaited into the tap and never undoes what commit just wrote.
+    const version = findVersion(after.persona, versionId);
+    // A refused write did not apply the version, so the picture must not follow: it would
+    // mismatch the prompt and use up the one backup taken before the first overwrite.
+    if (!applyVersionPicks(after.persona, version, () => commit('version-apply', version.name ?? '', startAvatar))) return;
+    // Not awaited: a version whose picture fails to move is still applied.
     void runBoundImage(startAvatar, versionId, false);
 }
 
@@ -937,19 +743,7 @@ async function saveAsVersion() {
     if (!name || !name.trim()) return;
     const after = guardTarget(startAvatar);
     if (!after) return;
-    const persona = ensureShape(after.persona);
-    const version = {
-        id: makeId(freshContext()?.uuidv4),
-        name: name.trim(),
-        picks: { ...(persona.activePicks ?? {}) },
-        // Null is 전체, and a version made today should keep using
-        // every file including ones uploaded tomorrow.
-        assetSelection: null,
-        avatarAsset: null,
-        updatedAt: Date.now(),
-    };
-    persona.versions.push(version);
-    persona.activeVersionId = version.id;
+    const version = addVersion(ensureShape(after.persona), name.trim(), freshContext()?.uuidv4, Date.now());
     commit('version-create', version.name, startAvatar);
 }
 
@@ -977,26 +771,23 @@ function duplicateVersion(versionId) {
     commit('version-duplicate', copy.name, s.avatar);
 }
 
-/* The quick panel's rule (TOOL_SETTLE_MS there): after 복제 or a move, the row
-   under the finger is another version's, and a quick second tap on its [적용]
-   applied that version. */
+// After a duplicate or move the row under the finger is another version's, so its
+// apply button ignores taps this long (TOOL_SETTLE_MS in quickbar.js).
 const VERSION_TOOL_SETTLE_MS = 500;
 let versionToolAt = 0;
 
-// List order only; no prompt reads it, so nothing is recomposed beyond what
-// commit always does.
+// List order only; no prompt reads it.
 function shiftVersion(versionId, delta) {
     versionToolAt = Date.now();
     const s = guardTarget();
     if (!s) return;
-    const version = (s.persona.versions ?? []).find(entry => entry?.id === versionId);
+    const version = findVersion(s.persona, versionId);
     if (!moveVersion(s.persona, versionId, delta)) return;
     commit('version-move', version?.name ?? '', s.avatar);
 }
 
-// The repair path for a version whose picks went stale, and the only way to
-// change a saved combination without deleting it. Nothing is snapshotted: history
-// covers variant text, and a version holds no text of its own.
+// Rewrites a version's picks from the live ones. Nothing is snapshotted: history
+// covers variant text, and a version holds none.
 async function overwriteVersion(versionId, name) {
     const s = guardTarget();
     if (!s) return;
@@ -1009,17 +800,13 @@ async function overwriteVersion(versionId, name) {
     commit('version-overwrite', version.name ?? '', startAvatar);
 }
 
-// A dead slot is shown as 없음 and the user is made to CHOOSE.
-// Reporting it and offering no way to fill it in place left 고르게 한다 unimplemented:
-// the only repair was to make the whole combination live and overwrite the version
-// with it, which is a different act. This writes one slot, through the same guard
-// and the same commit as everything else.
+// Fills one slot of a version in place, e.g. a dead slot shown as empty.
 function setVersionPick(versionId, sectionId, variantId) {
     const s = guardTarget();
     if (!s) return;
     // The same stray-event check pickVariant makes, for the same reason.
     if (!pickApplicable(s.persona, sectionId, variantId)) return;
-    const version = (s.persona.versions ?? []).find(entry => entry.id === versionId);
+    const version = findVersion(s.persona, versionId);
     if (!version) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
     version.picks = { ...(version.picks ?? {}), [sectionId]: variantId };
     version.updatedAt = Date.now();
@@ -1040,9 +827,7 @@ async function dropVersion(versionId, name) {
 /* Writes: history */
 
 async function restoreSnapshot(variantId, index) {
-    // The button only exists while a snapshot is selected, but the selection is
-    // module state and the handler runs later, so the index is checked rather
-    // than assumed: restore() would read list[null] and throw.
+    // The selection may have been cleared since the draw; restore() would throw on null.
     if (!Number.isInteger(index)) return;
     const s = guardTarget();
     if (!s) return;
@@ -1054,29 +839,22 @@ async function restoreSnapshot(variantId, index) {
     try {
         restore(after.persona, variantId, index, now, after.settings);
     } catch {
-        // The snapshot list can have been trimmed by an eviction while the
-        // question was on screen, and restore refuses an index it cannot reach.
+        // An eviction may have trimmed the list while the question was up.
         notify('error', STRINGS.manager.snapshotGone);
         historyIndex = null;
         scheduleDraw();
         return;
     }
-    // Restoring writes a snapshot of its own, which is the one moment the total
-    // can grow, so it is the moment to enforce the cap. The selection is cleared
-    // either way: the snapshot it pointed at has just become the live text.
+    // Restoring snapshots the current text, so the caps apply; the selection clears
+    // either way, as its snapshot is now the live text.
     expireOldHistory(after.root, after.settings, now);
     enforceGlobalBudget(after.root, after.settings, now);
     historyIndex = null;
-    // The editor may be sitting on the body that just changed underneath it.
+    // The editor may be open on the restored body.
     if (openVariant?.variantId === variantId) { openVariant = null; editorDirty = false; }
-    // And so may a draft. Restoring writes the body, exactly as saveVariantText
-    // and saveFullText do, and both of those take the draft away afterwards for
-    // the reason that applies here too: a draft left behind is restored over the
-    // text that was just written, so reopening the choice would offer the old
-    // typing back and [저장] would undo the restore.
+    // And a draft would be restored over the restored text (as in saveVariantText).
     const found = findVariant(after.persona, variantId);
     if (found) takeDraft(startAvatar, found.section.id, variantId);
-    // restore wrote its own log line, so this call only has to save.
     commit(null, '', startAvatar);
 }
 
@@ -1086,23 +864,19 @@ async function loadAssets(avatar) {
     const root = getRoot();
     if (!root || !avatar) return;
     assetState = { avatar, list: [], error: null, loading: true };
-    // resolveFolderKey never creates an entry and never stores anything, so
-    // listing works for a persona that has not been adopted. claimFolderKey, which
-    // does store, is only reached from the upload path where the entry exists.
+    // resolveFolderKey stores nothing, so listing works for a persona not yet adopted;
+    // claimFolderKey stores and is only used on upload, where the entry exists.
     const key = resolveFolderKey(root, avatar);
     try {
         const ctx = freshContext();
         if (!ctx) throw new Error(STRINGS.manager.noContext);
         const list = await listAssets(ctx, key);
-        // The user may have moved the screen to another persona while this was in
-        // flight. Publishing then would file one persona's pictures under another
-        // persona's name, which is the exact confusion the folder key prevents.
+        // The screen may have moved to another persona meanwhile; do not show these there.
         if (assetState.avatar !== avatar) return;
         assetState = { avatar, list, error: null, loading: false };
     } catch (e) {
         if (assetState.avatar !== avatar) return;
-        // A sprites listing failure disables the tab and puts the
-        // status on screen. Swallowing it leaves a tab that merely looks empty.
+        // Shown, not swallowed, or the tab would merely look empty.
         assetState = { avatar, list: [], error: String(e?.message ?? e), loading: false };
     }
     scheduleDraw();
@@ -1113,12 +887,10 @@ async function uploadAssets(files) {
     if (!s) return;
     if (s.readOnly || s.ambiguous) { notify('error', refusalMessage(targetAvatar)); return; }
     const startAvatar = targetAvatar;
-    // The key is claimed once and never recomputed, and claiming
-    // needs the entry, which guardTarget just proved exists.
+    // Claimed once for the whole batch; claiming needs the entry, which guardTarget proved.
     const key = claimFolderKey(s.root, startAvatar, () => freshContext()?.saveSettingsDebounced?.());
     let ok = 0;
-    // One per selection: once every field name has failed for one file, the
-    // rest of this selection asks once each (assets.js uploadAsset).
+    // Shared by this selection's files (see uploadAsset).
     const batch = {};
     for (const file of files) {
         try {
@@ -1127,8 +899,7 @@ async function uploadAssets(files) {
             await uploadAsset(ctx, key, file, batch);
             ok++;
         } catch (e) {
-            // The status code goes on screen with the file name.
-            // One toast per failure, because each file failed for its own reason.
+            // One toast per file: each failed for its own reason.
             notify('error', STRINGS.manager.assetUploadFailed(file?.name ?? STRINGS.manager.assetFileFallback, String(e?.message ?? e)));
         }
     }
@@ -1148,13 +919,8 @@ async function dropAsset(label) {
     if (!s) return;
     if (s.readOnly || s.ambiguous) { notify('error', refusalMessage(targetAvatar)); return; }
     const startAvatar = targetAvatar;
-    /* What the removal costs, said before it happens. A version that pointed at
-       this file keeps pointing at it, and the next time that version is opened
-       the row reads 지정된 그림 없음 - which is a sentence about a file the user
-       deleted on purpose two screens ago and has no reason to connect to this.
-       versionsBindingAsset was written for this and had never been called.
-       With the listing, so a binding saved under 0.2.0's lowercased label is
-       counted as well. */
+    // The question names the versions showing this file, since they lose their picture.
+    // The listing is passed so 0.2.0's lowercased labels count too.
     const bound = versionsBindingAsset(s.persona, label, assetLabels());
     const boundIds = new Set(bound.map(version => version.id));
     const question = bound.length
@@ -1169,14 +935,12 @@ async function dropAsset(label) {
         const ctx = freshContext();
         if (!ctx) throw new Error(STRINGS.manager.noContext);
         await deleteAsset(ctx, key, label);
-        // A record pointing at a file that is gone would keep the backup guard
-        // closed, and every later overwrite would then keep nothing.
+        // A backup record naming a deleted file keeps the backup guard closed, and every
+        // later overwrite would keep nothing.
         const persona = getPersona(root, startAvatar);
         if (persona?.avatarBackup?.label === label) persona.avatarBackup = null;
-        // The versions that showed this file keep naming it, now as an exact
-        // name: matched loosely, a binding to pose.png moved on to pose-1.png,
-        // the one file left under the same server label, and applied that
-        // picture as if nothing had been deleted.
+        // Bound versions keep naming the file, now exactly: a loose match would move on to
+        // another file under the same server label (pose.png to pose-1.png).
         for (const version of persona?.versions ?? []) {
             if (!version || !boundIds.has(version.id)) continue;
             version.avatarAsset = label;
@@ -1194,29 +958,25 @@ async function dropAsset(label) {
     await refreshAssetViews(startAvatar);
 }
 
-// Both listings, because they answer different questions: ours draws this tab,
-// and state.js's feeds the {{persona_assets}} macro for the persona actually
-// being played. The second one is only worth refetching when they are the same
-// persona, since that is the only case our change touched it.
+// Ours draws this tab; state.js's feeds {{persona_assets}} for the active persona and
+// is refetched only when that is the same persona.
 async function refreshAssetViews(avatar) {
     await loadAssets(avatar);
     if (getState()?.avatar !== avatar) return;
     await refreshAssets();
-    // loadAssets drew before state.js's listing came back, and that listing's
-    // error is what the failure banner reads too: a retry that succeeded kept
-    // showing the failure until a second tap.
+    // Again: the failure banner also reads state.js's listing, which arrived after
+    // loadAssets drew.
     scheduleDraw();
-    // Pictures already drawn in the chat point at the file as it was. index.js
-    // re-points the ones whose file was just replaced.
+    // index.js re-points chat pictures whose file was just replaced.
     document.dispatchEvent(new CustomEvent('pm:assets-changed'));
 }
 
 function toggleVersionAsset(versionId, filename) {
     const s = guardTarget();
     if (!s) return;
-    const version = (s.persona.versions ?? []).find(entry => entry.id === versionId);
+    const version = findVersion(s.persona, versionId);
     if (!version) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
-    // The full file list is what makes 전체 expressible: see toggleAssetSelection.
+    // The full file list lets the selection express all files (see toggleAssetSelection).
     toggleAssetSelection(version, filename, assetLabels());
     version.updatedAt = Date.now();
     commit('asset-select', version.name ?? '', s.avatar);
@@ -1224,19 +984,10 @@ function toggleVersionAsset(versionId, filename) {
 
 /* Writes: labels */
 
-// These write labels, not persona content, so they check
-// ambiguous and readOnly directly rather than go through the target guard: a label
-// is not tied to whichever persona this screen is pointed at, so which persona
-// that is does not bear on whether they may proceed.
-function rosterWritable(s) {
-    return !!s && !s.ambiguous && !s.readOnly;
-}
-
-// A refusal that says nothing is the failure mode this project
-// exists to avoid, and these four used to return in silence. The label tab draws
-// its buttons from rosterWritable(getState()) too, so a refusal here is normally
-// unreachable; normally is not never, because the state can turn under a handler
-// that is waiting on a popup.
+// Label writes are not about the target persona, so they check rosterWritable instead
+// of going through guardTarget.
+// The label tab already disables its buttons by rosterWritable, but the state can
+// turn under a handler waiting on a popup, so refusals still get named.
 function rosterRefusal() {
     const s = getState();
     if (!s) return STRINGS.manager.groupRefusalNoState;
@@ -1255,8 +1006,6 @@ async function editLabel(labelId, current) {
     if (!rosterWritable(getState())) return refuseRoster();
     const name = await askText(STRINGS.manager.groupName, current);
     if (!name || !name.trim()) return;
-    // Re-read after the await, and the label found again by id: the state object
-    // from before it may already have been replaced by an event.
     const after = getState();
     if (!rosterWritable(after)) return refuseRoster();
     if (!renameLabel(after.root?.labels, labelId, name)) { notify('error', STRINGS.manager.groupGone); scheduleDraw(); return; }
@@ -1274,10 +1023,7 @@ async function dropLabel(labelId, name) {
     scheduleDraw();
 }
 
-// Creating a label stays in the quick panel too, where it is
-// attached to the row it was made from. Here there is no row, so the label is made
-// empty and the user ticks members in the panel. Making it in only one of the two
-// places is what sent the user back to the panel to do half the job.
+// Made empty: unlike the quick panel's, there is no row here to attach.
 function addLabel(name) {
     const s = getState();
     if (!rosterWritable(s)) return refuseRoster();
@@ -1297,7 +1043,7 @@ function toggleLabelMembership(labelId, avatarId) {
     if (!Array.isArray(s.root.labels)) s.root.labels = [];
     toggleMember(s.root.labels, labelId, avatarId);
     freshContext()?.saveSettingsDebounced?.();
-    // The group's own row carries its count and the 연결/분리 button.
+    // The group's own row carries its count and the attach/detach button.
     if (!redrawRows([rowKey('group', labelId)])) scheduleDraw();
 }
 
@@ -1305,17 +1051,9 @@ function toggleLabelMembership(labelId, avatarId) {
 
 async function selectTarget(avatar) {
     if (avatar === targetAvatar) { pickerOpen = false; scheduleDraw(); return; }
-    // The revise screen's working copies belong to the persona being left, and
-    // every way out of them gets the one question: without this, a save after the
-    // switch dropped a junk version on the new persona and quietly lost every
-    // revision.
-    // The 전문 window's working copies are the same case, and worse if unasked:
-    // its bodies are edits to text that EXISTS, so carrying them to another
-    // persona would write one persona's paragraphs over another's. Both questions
-    // go through confirmDropWorking, which also keeps a second tap from stacking
-    // a second question on the first.
+    // The revise and full-text working copies belong to the persona being left;
+    // carried over, a save would write them onto the new one.
     if (!(await confirmDropWorking())) return;
-    // Re-checked like requestClose: the moment may be gone.
     if (avatar === targetAvatar) { pickerOpen = false; scheduleDraw(); return; }
     resetFullText();
     placementOpen = false;
@@ -1324,8 +1062,7 @@ async function selectTarget(avatar) {
     resetRevise();
     // Search, filters and pages describe the persona being left.
     resetListUi();
-    // What is in the editor belongs to the persona we are leaving, so it is put
-    // away under THAT persona's key before the target moves.
+    // Before the target moves, so the draft is stored under the persona being left.
     stashDraft();
     targetAvatar = avatar;
     openVariant = null;
@@ -1338,17 +1075,15 @@ async function selectTarget(avatar) {
     scheduleDraw();
 }
 
-// An entry is created only when the user asks for
-// one, and never by merely looking at a persona. adoptFor seeds the first variant
-// from the existing description byte for byte, or splits it into the items its
-// titles name (classify.js), which is said once here.
+// An entry is created only on request, never by viewing a persona. adoptFor seeds it
+// from the existing description verbatim, or split by its titles (classify.js).
 async function adoptTarget() {
     const avatar = targetAvatar;
     if (!avatar) return;
     if (!(await askConfirm(STRINGS.manager.confirmAdopt))) return;
     if (avatar !== targetAvatar) { notify('error', STRINGS.manager.targetMovedNotAdopted); return; }
-    // adoptFor answers the existing record for a persona already managed, and its
-    // items would be counted as a split that never happened.
+    // adoptFor returns the existing record for a managed persona, whose items are not
+    // a split.
     const existed = !!getPersona(getRoot(), avatar);
     const persona = adoptFor(avatar);
     if (!persona) { notify('error', refusalMessage(avatar)); return; }
@@ -1357,29 +1092,23 @@ async function adoptTarget() {
     scheduleDraw();
 }
 
-/* Drafts (review findings R2 and R3) */
+/* Drafts */
 
-// What is in the editor right now, found in the document rather than captured.
-// A tap blurs the textarea first, that blur releases the deferred redraw, and the
-// frame can land before the click does, so the node the editor was built with may
-// already be detached by the time the button runs. The rebuilt one carries the
-// typing across (see drawManager), and this reads whichever one is really there.
+// Read from the document, not a captured node: the tap's blur releases the deferred
+// redraw, which can land before the click and detach the node the editor was built with.
 function readEditorText() {
     const area = document.getElementById(PANEL_ID)?.querySelector('.pm-manager-editor-text');
     return area ? area.value : null;
 }
 
-// Called by every path that takes the editor off the screen without saving. The
-// text goes into the draft store under the body it belongs to and comes back when
-// that body is opened again, which is why changing tab or opening a second
-// variant no longer has to ask a question or throw the typing away.
+// Every path that takes the editor off screen without saving stashes the text under
+// its body; it comes back when that body is opened again.
 function stashDraft() {
     if (!editorDirty || !openVariant || !targetAvatar) return;
     const text = readEditorText();
     if (text === null) return;
-    // Typed and then taken back: the stored body is the draft, so there is
-    // nothing to keep, and a kept copy made [제목별 분류] refuse over an edit that
-    // no badge showed.
+    // Typed and taken back: nothing to keep, and a kept draft would make the resplit
+    // refuse over an edit no badge shows.
     const stored = getPersona(getRoot(), targetAvatar)?.variants?.[openVariant.sectionId]
         ?.find(variant => variant?.id === openVariant.variantId)?.text ?? '';
     if (text === stored) { takeDraft(targetAvatar, openVariant.sectionId, openVariant.variantId); return; }
@@ -1388,28 +1117,15 @@ function stashDraft() {
 
 /* Content */
 
-// Every button is at least 40px through .pm-manager-btn, and the
-// disabled form keeps the same box so the layout does not shift when the root
-// turns read only under the user.
-//
-// reason is why the button is disabled. It rides the tooltip like title does, and
-// unlike title it is also drawn as text by actionsRow, because a tooltip needs a
-// hover to appear and a touch screen has none: a reason that lives only in title
-// is a reason the user on the phone can never read.
+// reason explains a disabled button. actionsRow also draws it as text, because touch
+// screens never show a title tooltip.
 function actionButton(label, onClick, enabled, title, reason) {
-    const btn = el('button', 'pm-manager-btn', label);
-    btn.type = 'button';
+    // Click only: acting on touchstart lets the synthesized click land on whatever the
+    // redraw just put under the finger.
+    const btn = button('pm-manager-btn', label, onClick, enabled);
     const tip = (!enabled && reason) ? reason : title;
     if (tip) { btn.title = tip; btn.setAttribute('aria-label', `${label}: ${tip}`); }
-    // Selection and every action react to click only. Opening on
-    // touchstart lets the synthesized click land on whatever the redraw just put
-    // under the finger.
-    if (enabled) btn.addEventListener('click', onClick);
-    else {
-        btn.disabled = true;
-        btn.classList.add('pm-disabled');
-        if (reason) btn.dataset.pmReason = reason;
-    }
+    if (!enabled && reason) btn.dataset.pmReason = reason;
     return btn;
 }
 
@@ -1432,15 +1148,12 @@ function noteOf(text) {
     return el('div', 'pm-manager-note', text);
 }
 
-// An empty list is the one place this panel has room, and the reference fills its
-// empty space with something big rather than with a sentence in the corner.
 function emptyOf(text) { return emptyBlock(text); }
 
 /* Rows that keep their extra actions folded away */
 
-// Rule 6, as one sentence rather than as a guess per button. The wording is the
-// same one the write path answers with, so a control cannot promise something
-// the guard would then refuse. An empty string means nothing is blocking.
+// Why writes are blocked, in the write path's own wording so a control cannot
+// promise what the guard would refuse. Empty when nothing blocks.
 function writeReason(s) {
     if (!s) return STRINGS.manager.refusalNoRoot;
     if (s.readOnly) return STRINGS.manager.refusalReadOnly;
@@ -1449,55 +1162,24 @@ function writeReason(s) {
     return '';
 }
 
-/* ── Rows redrawn in place (user request) ───────────────────────────────────
-   Opening or closing a row changes that row and the one that was open before,
-   and nothing else on the screen. It rebuilt the whole tab instead: on 편집 with
-   thirteen items that was 585 nodes (measured 11ms on the desktop, an estimated
-   four to eight times that on the phone) and the scroll box along with them.
+/* Rows redrawn in place */
 
-   Each row records how to build itself again while it is drawn, and a toggle
-   rebuilds only the rows it touches. A choice belongs to its item, whose look
-   depends on which of its choices is open, so a choice is rebuilt through its
-   item. Whatever cannot be done this way - a full draw already queued or held, a
-   field being typed in, a row drawn from data that has since been replaced -
-   takes the full draw, exactly as before. */
+// Each row registers how to rebuild itself, so a toggle rebuilds only the rows it
+// touches; a choice is rebuilt through its item. Anything else (a draw queued or
+// held, a field being typed in, a row from replaced data) takes the full draw.
 const rowNodes = new Map();
 
-/* The persona picker's pictures, carried across a redraw by address: the quick
-   panel's rule (thumbPool there). The picker draws thirty of them, and every
-   draw while it was open (a search keystroke reaches the list alone, but a tap
-   anywhere else does not) decoded all thirty again. Refilled at the start of each
-   draw, so what a draw did not claim is let go by the next one. */
-const pickerThumbs = new Map();
-
-// reset at the start of a full draw; a list-only repaint (a search keystroke)
-// adds what its own container held to whatever the draw left.
-function harvestPickerThumbs(node, { reset = true } = {}) {
-    if (reset) pickerThumbs.clear();
-    for (const img of node?.querySelectorAll?.('img.pm-quickbar-rowimg, img.pm-quickbar-tileimg') ?? []) {
-        const key = `${img.className}|${img.getAttribute('src')}`;
-        if (!pickerThumbs.has(key)) pickerThumbs.set(key, img);
-    }
-}
-
-function pickerThumb(className, url) {
-    const key = `${className}|${url}`;
-    const kept = pickerThumbs.get(key);
-    if (kept) { pickerThumbs.delete(key); return kept; }
-    const img = document.createElement('img');
-    img.className = className;
-    img.loading = 'lazy';
-    img.alt = '';
-    img.src = url;
-    return img;
-}
+// The picker's thumbnails, reused across redraws (as thumbPool in quickbar.js). A full
+// draw starts the pool afresh; a list-only repaint (a search keystroke) adds what its
+// own container held to whatever the draw left.
+const pickerThumbs = imagePool('img.pm-quickbar-rowimg, img.pm-quickbar-tileimg');
 
 function registerRow(key, node, build, { persona = null, parent = null } = {}) {
     rowNodes.set(key, { node, build, persona, parent });
 }
 
 function redrawRows(keys) {
-    if (drawFrame || drawDeferred || gestureHeld || dragSectionId !== null) return false;
+    if (drawTask.pending() || drawDeferred || gestureHeld || dragSectionId !== null) return false;
     const wanted = new Set();
     for (const key of keys) {
         if (key === null || key === undefined) continue;
@@ -1538,14 +1220,9 @@ function toggleExpanded(key) {
     if (!redrawRows([before, expandedRow])) scheduleDraw();
 }
 
-// The identity half of a row, and the large target that opens the rest of its
-// actions. A button rather than a handler on the whole row: the row also carries
-// its one primary action, and a row level handler would fire for that button's
-// taps too, so the two would fight over one finger.
-//
-// parts are the nodes of the first line. summary is an optional second line, kept
-// to one ellipsised row because a list cannot afford to grow by however much each
-// entry happens to contain.
+// A row's name, as the button that opens its other actions. Not a row-level handler:
+// that would also fire for the row's primary action button. summary is an optional
+// second line, ellipsised to one row.
 function rowName(key, parts, summary) {
     const open = expandedRow === key;
     const btn = el('button', 'pm-manager-rowname');
@@ -1555,16 +1232,10 @@ function rowName(key, parts, summary) {
     for (const part of parts) top.append(part);
     btn.append(top);
     if (summary) btn.append(el('div', 'pm-manager-rowsummary', summary));
-    // Click only. Opening on touchstart lets the synthesized click
-    // land on whatever the redraw just put under the finger.
     btn.addEventListener('click', () => toggleExpanded(key));
     return btn;
 }
 
-// Which row is open is drawn, never hovered: aria-expanded and the open row
-// below say it, instead of a mark that appears on a hover a touch screen cannot
-// make. ⋯ like the quick panel's row tools; it was ↗, which reads as "opens
-// somewhere else".
 function foldMark(open, onToggle) {
     const btn = actionButton('⋯', onToggle, true, STRINGS.common.more);
     btn.classList.add('pm-manager-more');
@@ -1576,11 +1247,8 @@ function moreButton(key) {
     return foldMark(expandedRow === key, () => toggleExpanded(key));
 }
 
-// A block that folds away, for the things that sit above a tab's list rather than
-// inside it. The same head shape as a row (name, one line summary, the mark on
-// the right) so the tap target and the cue read identically, but its open state
-// is a boolean of the tab's own: expandedRow belongs to the list underneath and
-// is cleared by whichever tab draws next.
+// A folding block above a tab's list, shaped like a row. Its open state is the tab's
+// own boolean (see placementOpen), not expandedRow.
 function foldBox(className, title, summary, open, onToggle) {
     const box = el('div', `${className}${open ? ' pm-manager-rowopen' : ''}`);
     const btn = el('button', 'pm-manager-rowname');
@@ -1598,9 +1266,7 @@ function foldBox(className, title, summary, open, onToggle) {
     return box;
 }
 
-// Buttons stacked one per line at 40px each, with the reason for any disabled one
-// written underneath it. Rule 6: a tooltip needs a hover, so a reason that lives
-// only in title is a reason the user on the phone can never read.
+// One button per line, each disabled one's reason written under it (see actionButton).
 function buttonStack(buttons, extraClass) {
     const box = el('div', `pm-manager-stack${extraClass ? ` ${extraClass}` : ''}`);
     for (const btn of buttons) {
@@ -1611,9 +1277,8 @@ function buttonStack(buttons, extraClass) {
     return box;
 }
 
-// The drawer under an open row. Rule 5: the destructive button is last and sits
-// in a block of its own, so the tap that deletes cannot be the tap that missed
-// 복제 by six pixels. The gap is in style.css, where it can be seen.
+// The drawer under an open row. Destructive buttons go last in a block of their own
+// (spaced in style.css), so a near miss cannot delete.
 function expansionOf(buttons, dangerButtons) {
     const box = el('div', 'pm-manager-expand');
     if (buttons?.length) box.append(buttonStack(buttons));
@@ -1627,17 +1292,15 @@ function rowHead() {
 
 function bannerOf(className, message) { return sharedBanner('pm-manager', className, message); }
 
-// The locale is named, like every number in strings.js: this screen is Korean,
-// and the host browser's default put an English date beside Korean captions.
+// Fixed locale, as in strings.js: the browser default can put an English date beside
+// Korean captions.
 function formatTime(at) {
     if (!at) return '';
     try { return new Date(at).toLocaleString('ko-KR'); } catch { return String(at); }
 }
 
-// The active pick control, identical in behaviour to the quick panel's section
-// group: a native select, because it opens the Android picker, and a pick left
-// naming a deleted variant is shown as such rather than snapping to the first
-// option, which would display a combination the prompt does not contain.
+// A native select, for the Android picker. A pick naming a deleted variant is shown as
+// such; snapping to the first option would show a combination the prompt lacks.
 function pickSelect(persona, section, writable) {
     const select = el('select', 'pm-manager-select');
     const variants = persona.variants?.[section.id] ?? [];
@@ -1659,20 +1322,15 @@ function pickSelect(persona, section, writable) {
     return select;
 }
 
-// Whether this body has an unsaved edit worth reporting. A draft that matches what
-// is stored is not one: the user typed something and typed it back, and drawing a
-// badge for it puts a claim on screen that no control anywhere can clear. One rule,
-// asked by the row and by the editor, so the badge and the discard button can never
-// disagree about what exists.
+// The unsaved draft worth a badge, or null: one that matches the stored text is not.
+// The editor applies the same rule, so the badge and its discard button agree.
 function pendingDraft(sectionId, variant) {
     const draft = peekDraft(targetAvatar, sectionId, variant.id);
     return (draft !== null && draft !== (variant.text ?? '')) ? draft : null;
 }
 
-// The body the editor is open on, found on the persona this screen points at
-// right now. openVariant holds two plain strings and nothing else, so a body that
-// was deleted while its editor was open resolves to null here and the list comes
-// back rather than the screen going blank.
+// The body the editor is open on, or null if it was deleted meanwhile (the list
+// comes back).
 function openBody(persona) {
     if (!openVariant) return null;
     const section = (persona?.sections ?? []).find(entry => entry.id === openVariant.sectionId);
@@ -1681,16 +1339,8 @@ function openBody(persona) {
     return variant ? { section, variant } : null;
 }
 
-// The body editor, filling the tab on its own. One screen,
-// one task, so the item list is gone while this is up and comes back when it
-// closes. Everything about drafts below is the machinery that was already here,
-// only laid out differently: the editor still saves on a button, still restores a
-// draft that differs from what is stored, and still puts its text away under this
-// body's key on every path that takes it off the screen.
-//
-// There is deliberately no keydown handler on the textarea: Enter has to insert a
-// newline here, so there is nothing for a hangul composition commit to fire by
-// accident.
+// The body editor, replacing the item list while open. No keydown handler on purpose:
+// Enter inserts a newline, so a hangul IME commit cannot trigger anything.
 function variantEditor(section, variant, writable, reason) {
     const sectionId = section.id;
     const box = el('div', 'pm-manager-editorscreen');
@@ -1698,15 +1348,11 @@ function variantEditor(section, variant, writable, reason) {
         STRINGS.manager.editorHeading(section.name ?? '', variant.label ?? '')));
     const stored = variant.text ?? '';
     const draft = peekDraft(targetAvatar, sectionId, variant.id);
-    // Opening the body is the moment to settle a draft that says nothing. Dropped
-    // silently, because there is nothing to tell the user: the text they get is the
-    // text they would have got either way.
+    // A draft equal to the stored text is dropped silently; it changes nothing.
     if (draft !== null && draft === stored) takeDraft(targetAvatar, sectionId, variant.id);
     const restored = draft !== null && draft !== stored;
     if (restored) {
-        // The screen has unsaved text in it again, so closing has to ask again.
-        // Derived from the draft rather than remembered separately: the flag and
-        // the draft would otherwise be two records of one fact.
+        // Unsaved text again, so closing asks; derived from the draft, not kept separately.
         editorDirty = true;
         box.append(noteOf(STRINGS.manager.editorRestored));
     }
@@ -1717,10 +1363,8 @@ function variantEditor(section, variant, writable, reason) {
     area.setAttribute('aria-label', STRINGS.manager.editorAria(variant.label ?? ''));
     area.addEventListener('input', () => { editorDirty = true; scheduleSizeUpdate(); });
     box.append(area);
-    // The size of what is in the box right now (user request), under the box it
-    // measures. Updated by a trailing timer that rewrites this one line, never by
-    // a redraw: a rebuild here would take the field out of the document in the
-    // middle of a hangul composition.
+    // Updated by sizeTimer rewriting this line, never by a redraw, which would pull the
+    // field out mid IME composition.
     box.append(el('div', 'pm-manager-size pm-size-editor', sizeTextOf(area.value)));
 
     const buttons = [
@@ -1730,8 +1374,6 @@ function variantEditor(section, variant, writable, reason) {
             saveVariantText(sectionId, variant.id, text);
         }, writable, '', reason),
     ];
-    // Only offered when there is something to discard. A button that is always
-    // there and almost always disabled is a control the user has to read twice.
     if (restored) {
         buttons.push(actionButton(STRINGS.manager.editorDiscard, () => {
             takeDraft(targetAvatar, sectionId, variant.id);
@@ -1739,29 +1381,23 @@ function variantEditor(section, variant, writable, reason) {
             scheduleDraw();
         }, true, STRINGS.manager.editorDiscardTitle));
     }
-    // 목록으로, not 닫기: the header's 닫기 (whole screen) is on screen at the same
-    // time, and two buttons with one word and two meanings ask the user to guess
-    // which one loses more.
     buttons.push(actionButton(STRINGS.manager.editorBackToList, () => {
         stashDraft();
-        // Back on the item that was being edited, with its choices showing: a
-        // closed item would hide the row the user just came from.
+        // Reopen the edited item so the row the user came from is visible.
         if (openVariant) expandedRow = rowKey('section', openVariant.sectionId);
         openVariant = null;
         editorDirty = false;
         scheduleDraw();
     }, true, STRINGS.manager.editorCloseTitle));
-    // Rule 3: [저장] and [닫기] stay at the bottom of the panel. Sticky is relative
-    // to the scroll container, which is .pm-scroll, so the footer has to be inside
-    // it, and it is: this whole screen is drawn into the scrolling body.
+    // Sticky is relative to the scroll container, .pm-scroll, which this screen is
+    // drawn inside.
     const foot = el('div', 'pm-manager-editorfoot');
     foot.append(actionsRow(buttons));
     box.append(foot);
     return box;
 }
 
-// One 선택지. The row shows its name and the one action it
-// exists for, which is opening the body, and the rest waits behind the row tap.
+// One choice: its name and the open-body action; the rest waits behind the row tap.
 function variantRow(persona, section, variant, writable, reason) {
     const key = rowKey('choice', section.id, variant.id);
     const open = expandedRow === key;
@@ -1781,12 +1417,11 @@ function variantRow(persona, section, variant, writable, reason) {
     const head = rowHead();
     head.append(rowName(key, parts));
     head.append(actionButton(STRINGS.manager.editorOpen, () => {
-        // R3: the editor that is about to be replaced keeps its typing.
+        // The editor about to be replaced keeps its typing.
         stashDraft();
         openVariant = { sectionId: section.id, variantId: variant.id };
         editorDirty = false;
-        // The list is about to be replaced by the editor, so an open drawer on it
-        // has nothing left to sit under.
+        // The editor replaces the list, drawer and all.
         expandedRow = null;
         scheduleDraw();
     }, true));
@@ -1799,8 +1434,7 @@ function variantRow(persona, section, variant, writable, reason) {
         actionButton(STRINGS.common.rename, () => renameVariant(section.id, variant.id, variant.label ?? ''), writable, '', reason),
         actionButton(STRINGS.common.duplicate, () => duplicateVariant(section.id, variant.id), writable, '', reason),
     ], [
-        // A section always keeps one variant, and the control says
-        // so by being disabled rather than by failing after the tap.
+        // A section keeps at least one variant: disabled rather than failing after the tap.
         actionButton(STRINGS.common.remove, () => dropVariant(section.id, variant.id, variant.label ?? ''), writable && !last,
             '', last ? STRINGS.manager.lastChoiceKept : reason),
     ]));
@@ -1812,17 +1446,15 @@ function sectionBlock(persona, section, index, writable, reason) {
     const open = expandedRow === key;
     const box = el('div', `pm-manager-section${open ? ' pm-manager-rowopen' : ''}`);
     const variants = persona.variants?.[section.id] ?? [];
-    /* 접힌 항목의 선택지 줄 (user request). A closed item is its name and its
-       live pick, which is what the prompt carries and what most taps change; its
-       choice rows and [선택지 추가] are drawn when the item is opened, when one of
-       its choices is, and while a search is on, so a match is never hidden. */
+    // A closed item shows only its name and live pick. Its choice rows appear when it or
+    // one of its choices is open, or while searching, so a match is never hidden.
     const choiceOpen = variants.some(variant => expandedRow === rowKey('choice', section.id, variant.id));
     const searching = listUi.compose.open && listUi.compose.query.trim() !== '';
     const showChoices = open || choiceOpen || searching;
 
     const head = rowHead();
-    // The name goes in its own span: only an element child can be given the
-    // ellipsis that keeps a long item name from pushing the buttons off screen.
+    // Its own span: only an element can take the ellipsis that keeps a long name from
+    // pushing the buttons off screen.
     const headParts = [
         markedText('pm-manager-name', section.name ?? '', listUi.compose.open ? listUi.compose.query : ''),
         el('span', 'pm-manager-count', STRINGS.manager.choiceCount(variants.length)),
@@ -1836,9 +1468,8 @@ function sectionBlock(persona, section, index, writable, reason) {
     head.append(dragHandle(section.id, writable, reason));
     head.append(moreButton(key));
     box.append(head);
-    // dropTargetAt reads this id off the row under the finger. The id and not a
-    // position, because fillComposeList filters the list when a search is open and
-    // a rendered position is then not an index into persona.sections.
+    // Read by dropTargetAt. An id, not a position: a search filters the list, so a
+    // rendered position is not an index into persona.sections.
     box.dataset.pmSection = section.id;
 
     if (open) {
@@ -1870,39 +1501,24 @@ function sectionBlock(persona, section, index, writable, reason) {
 
 /* List search, filters and paging */
 
-// The search toggle for one list. Searching writes nothing, so it never goes
-// dead with the write controls. Closing it clears the query, filters and page.
-/* Which search field, if any, the next draw has to put the user on.
-
-   Opening a search used to mean the row APPEARED and nothing else, and the row
-   for the 편집 tab sits under the tags, the persona, the language names and the
-   item-title select: on a phone the user pressed 검색, landed at the top of the
-   tab, and saw a screen with no search on it. From the quick panel's 검색
-   shortcut it looked worse still, because that one opens this tab on purpose and
-   all the user could see was the tab. 검색 눌러도 편집탭으로 간다고, in their
-   words, 최소한 검색창으로 가야지.
-
-   A key rather than a boolean, so a draw that rebuilds a different tab cannot
-   steal the focus, and cleared by whoever consumes it so it happens exactly once. */
+// The list whose search field the next draw focuses and scrolls to (the row can sit
+// below the fold). A list key, so another tab's draw cannot take it; consumed once.
 let focusSearch = null;
 
 function listSearchButton(key) {
     const ui = listUi[key];
-    const btn = el('button', 'pm-manager-btn', ui.open ? STRINGS.common.searchClose : STRINGS.common.search);
-    btn.type = 'button';
-    btn.setAttribute('aria-pressed', ui.open ? 'true' : 'false');
-    btn.addEventListener('click', () => {
+    const btn = button('pm-manager-btn', ui.open ? STRINGS.common.searchClose : STRINGS.common.search, () => {
         ui.open = !ui.open;
         if (!ui.open) { ui.query = ''; ui.lang = null; ui.tags = []; ui.page = 1; }
         else focusSearch = key;
         scheduleDraw();
     });
+    btn.setAttribute('aria-pressed', ui.open ? 'true' : 'false');
     return btn;
 }
 
-// The input row. Typing repaints ONLY the list container below it, so the
-// field itself is never rebuilt mid composition; full draws rebuild it with
-// the value restored from module state.
+// Typing repaints only the list container below, never this field, so an IME
+// composition survives; full draws rebuild it from listUi.
 function listSearchRow(key) {
     const ui = listUi[key];
     const row = el('div', 'pm-search-row');
@@ -1913,8 +1529,7 @@ function listSearchRow(key) {
     input.setAttribute('aria-label', STRINGS.common.search);
     input.autocapitalize = 'none';
     input.spellcheck = false;
-    // Marked, not focused: this node is not in the document yet. drawManager
-    // takes it from here once the panel has been put together.
+    // Marked, not focused: the node is not in the document yet (see takeSearchFocus).
     if (focusSearch === key) input.dataset.pmFocus = '1';
     input.addEventListener('input', () => {
         ui.query = input.value;
@@ -1925,49 +1540,34 @@ function listSearchRow(key) {
     return row;
 }
 
-// Puts the user on the search field that was just opened: the caret in it, the
-// row on screen, and on a phone the keyboard up. Runs at the end of a draw, when
-// the node exists and has a size, and only for the field the flag names.
+// At the end of a draw, once the field has a size: focus it and bring it on screen.
 function takeSearchFocus() {
     focusSearch = null;
     const panel = document.getElementById(PANEL_ID);
     const input = panel?.querySelector('input[data-pm-focus]');
     if (!input) return;
     delete input.dataset.pmFocus;
-    // Centred rather than merely "in view": the row is a strip in a long list and
-    // the ends of the scroller are exactly where "in view" leaves it half hidden
-    // behind the sticky header or the footer.
+    // Centred: scrolled merely into view, it can end half hidden behind the sticky
+    // header or footer.
     input.scrollIntoView?.({ block: 'center' });
     input.focus?.({ preventScroll: true });
 }
 
-/* One rebuild per frame per list, for the reason redrawRosterList states: a
-   keystroke arrives far faster than a frame and every rebuild but the last is
-   discarded by the next one. Keyed, because two lists can be waiting at once and
-   a single flag would drop one of them. The search FIELD is outside the container
-   being rebuilt, so nothing the user is typing into ever waits. */
-const listFrames = new Map();
+// One rebuild per frame per list, since keystrokes outpace frames. Keyed, because two
+// lists can be waiting at once.
+const listTasks = new Map();
 
 function redrawManagerList(key) {
-    if (listFrames.has(key)) return;
-    if (typeof requestAnimationFrame !== 'function') { redrawManagerListNow(key); return; }
-    listFrames.set(key, requestAnimationFrame(() => {
-        listFrames.delete(key);
-        redrawManagerListNow(key);
-    }));
+    if (!listTasks.has(key)) listTasks.set(key, frameTask(() => redrawManagerListNow(key)));
+    listTasks.get(key).schedule();
 }
 
-// Cancels whatever was waiting. A frame that fires after the screen is gone finds
-// no container and returns, but a live-looking schedule must not outlive it.
+// A stale frame would make redrawManagerList skip that list on the next open.
 function clearListFrames() {
-    if (typeof cancelAnimationFrame === 'function') {
-        for (const id of listFrames.values()) cancelAnimationFrame(id);
-    }
-    listFrames.clear();
+    for (const task of listTasks.values()) task.cancel();
 }
 
-// Repaints one list container in place. Everything is read fresh at call time,
-// exactly like drawManager, and a container that is not on screen is a no-op.
+// Repaints one list container in place; a no-op when it is not on screen.
 function redrawManagerListNow(key) {
     const panel = document.getElementById(PANEL_ID);
     const container = panel?.querySelector(`[data-pm-list="${key}"]`);
@@ -1981,31 +1581,19 @@ function redrawManagerListNow(key) {
     if (key === 'versions') fillVersionList(container, s, writable, reason);
     else if (key === 'assets') fillAssetList(container, s, writable, reason);
     else if (key === 'compose') fillComposeList(container, s, writable, reason);
-    else if (key === 'groups') fillGroupList(container, ctx, s);
+    else if (key === 'groups') fillGroupList(container, s);
 }
 
-/* One version's language, judged from the text ITS picks compose, not from the
-   live combination.
-
-   Memoised across draws, because the answer only moves when the version's picks
-   move or when one of the bodies they name is edited, and the 버전 tab asks it of
-   every version on every list repaint - which is once per frame while somebody is
-   typing in its search box. Twenty versions of a persona this size measured
-   0.58ms a repaint on this desktop, so several times that on the phone, for an
-   answer that had not changed.
-
-   The key carries both clocks. version.updatedAt moves when the picks do;
-   modifiedAt(persona) is the newest updatedAt across every variant, which is what
-   moves when a BODY is edited under an untouched version. A cache keyed on the
-   version alone would have gone stale on the second of those. */
+// A version's language, judged from the text its own picks compose. Memoised: the
+// versions tab asks it of every version on each search keystroke. The key holds
+// version.updatedAt (picks changed) and stamp, modifiedAt(persona) (a body changed).
 const languageMemo = new Map();
 
 function versionLanguage(persona, version, stamp) {
     if (typeof stamp !== 'number') return detectLanguage(composePicked(persona, version?.picks).text);
     const key = `${version?.id}|${version?.updatedAt}|${stamp}`;
     if (languageMemo.has(key)) return languageMemo.get(key);
-    // The same ceiling search-pure puts on its own caches, for the same reason:
-    // an entry per version per edit is unbounded over a long session.
+    // Bounded like search-pure's caches: an entry per version per edit grows all session.
     if (languageMemo.size > 500) languageMemo.clear();
     const answer = detectLanguage(composePicked(persona, version?.picks).text);
     languageMemo.set(key, answer);
@@ -2023,8 +1611,6 @@ async function addTagTo(kindLabel, getOwner) {
     const after = guardTarget(startAvatar);
     if (!after) return;
     const owner = getOwner(ensureShape(after.persona));
-    // The version can be deleted while the name popup is up; the user who just
-    // typed a tag hears about it, same as renameVersion.
     if (!owner) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
     const stored = addTag(owner, tag);
     if (!stored) { notify('info', STRINGS.manager.tagDuplicate); return; }
@@ -2044,37 +1630,23 @@ async function removeTagFrom(kindLabel, tag, getOwner) {
     commit('tag-remove', kindLabel ? `${kindLabel}: ${tag}` : tag, startAvatar);
 }
 
-// A filter chip. Filtering writes nothing, so it is always live; the active
-// state is colour AND the pressed attribute.
+// Filtering writes nothing, so a chip is always live; active is colour and aria-pressed.
 function filterChip(label, active, onClick) {
-    const chip = el('button', `pm-quickbar-chip${active ? ' pm-quickbar-chip-active' : ''}`, label);
-    chip.type = 'button';
+    const chip = button(`pm-quickbar-chip${active ? ' pm-quickbar-chip-active' : ''}`, label, onClick);
     chip.setAttribute('aria-pressed', active ? 'true' : 'false');
-    chip.addEventListener('click', onClick);
     return chip;
 }
 
-// A row of tag chips plus the add button. getOwner re-resolves the tag carrier
-// from a fresh persona at tap time, so no handler holds a persona or version.
+// getOwner resolves the tag owner from a fresh persona at tap time.
 function tagChipsRow(tags, writable, reason, kindLabel, getOwner) {
     const row = el('div', 'pm-quickbar-chips pm-tag-chips');
-    for (const tag of tags) {
-        const chip = el('button', 'pm-quickbar-chip', tag);
-        chip.type = 'button';
-        if (writable) chip.addEventListener('click', () => removeTagFrom(kindLabel, tag, getOwner));
-        else { chip.disabled = true; chip.classList.add('pm-disabled'); }
-        row.append(chip);
-    }
+    for (const tag of tags) row.append(button('pm-quickbar-chip', tag, () => removeTagFrom(kindLabel, tag, getOwner), writable));
     row.append(actionButton(STRINGS.manager.tagAdd, () => addTagTo(kindLabel, getOwner), writable, '', reason));
     return row;
 }
 
-// Whether a section answers the compose tab's search: by its
-// own name, by any choice's name, or by any choice's body. Names take the full
-// grade ladder; bodies take textContains, because the sparse and typo tiers
-// match almost any long prose and would make the filter a no-op (measured: a
-// two-syllable query hit a 4,000-character body through the typo tier whenever
-// either syllable appeared anywhere).
+// Names match through rankOf's full ladder; bodies only by textContains, because the
+// sparse and typo tiers match almost any long prose.
 function sectionMatchesQuery(persona, section, query) {
     if (rankOf(section.name ?? '', query) > 0) return true;
     for (const variant of persona.variants?.[section.id] ?? []) {
@@ -2089,9 +1661,6 @@ function fillComposeList(container, s, writable, reason) {
     const persona = s.persona;
     if (!persona) return;
 
-    // Rule 1's other half: the open row is one string, and a string naming a row
-    // that is no longer in the data has to stop claiming a drawer. Same shape as
-    // the quick panel's check on expandedAvatar.
     const live = new Set();
     for (const section of persona.sections ?? []) {
         live.add(rowKey('section', section.id));
@@ -2101,8 +1670,6 @@ function fillComposeList(container, s, writable, reason) {
     }
     if (expandedRow !== null && !live.has(expandedRow)) expandedRow = null;
 
-    // Rule 4: an empty state names the next action, and the button that does it is
-    // the one right underneath.
     if (!(persona.sections ?? []).length) { container.append(emptyOf(STRINGS.manager.noItems)); return; }
 
     const query = listUi.compose.open ? listUi.compose.query.trim() : '';
@@ -2110,8 +1677,7 @@ function fillComposeList(container, s, writable, reason) {
     if (query) sections = sections.filter(section => sectionMatchesQuery(persona, section, query));
     if (!sections.length) { container.append(emptyOf(STRINGS.common.searchNoHits)); return; }
     for (const section of sections) {
-        // The index is the section's place in the FULL list: the move arrows
-        // reorder the real array, not the filtered view.
+        // Index in the full list: the move arrows reorder the real array, not the filtered view.
         container.append(sectionBlock(persona, section, persona.sections.indexOf(section), writable, reason));
     }
 }
@@ -2126,28 +1692,19 @@ async function doFillDefaults() {
     const after = guardTarget(startAvatar);
     if (!after) return;
     const added = fillDefaultSections(ensureShape(after.persona), freshContext()?.uuidv4, Date.now());
-    // Everything got filled while the question was up: nothing to save, and a
-    // "0개를 추가했다" toast would read as a malfunction.
+    // Filled while the question was up: nothing to save.
     if (!added.length) { notify('info', STRINGS.manager.fillDefaultsNothing); scheduleDraw(); return; }
-    // fillDefaultSections wrote one section-add line per section; commit only
-    // saves and composes here.
     if (commit(null, '', startAvatar)) notify('info', STRINGS.manager.fillDefaultsDone(added.length));
 }
 
-/* 제목별 분류 (user request). The plan is made twice: once to say what will
-   happen, and again after the question, on the persona as it is then, so the
-   write never acts on text read before the await.
-
-   Unsaved typing is the one thing this refuses over. A stashed draft is restored
-   over the body the next time it opens, which would put the old whole text back
-   on top of the split. */
+// Resplit by titles. Refused over unsaved typing: a stashed draft would be restored
+// over its body on next open, putting the old whole text back on top of the split.
 function hasUnsavedBody(avatar, persona) {
     if (editorDirty) return true;
-    // The two working screens hold copies of the bodies too. A revision saved
-    // after the split would write its pre-split text back as new choices.
+    // The revise and full-text copies too: saved after the split, they would write the
+    // pre-split text back as new choices.
     if (reviseDirtyCount() > 0 || fullDirtyCount() > 0) return true;
-    // A draft equal to the stored body is no unsaved edit (pendingDraft draws no
-    // badge for one either).
+    // Same rule as pendingDraft.
     return (persona.sections ?? []).some(section =>
         (persona.variants?.[section?.id] ?? []).some(variant => {
             const draft = peekDraft(avatar, section.id, variant?.id);
@@ -2173,31 +1730,22 @@ async function doResplit() {
     let kept = false;
     const changed = applyResplit(after.persona, fresh, uuid, now, after.settings?.defaultHeadingFormat,
         (variantId, text) => { kept = snapshotKeepingIndex(after.persona, variantId, text, now, after.settings, { force: true }) || kept; });
-    // Snapshots were written, which is when the history caps apply.
     trimHistory(after.root, after.settings, now);
     if (commit('split-headings', STRINGS.manager.logDetails.resplit(changed.length), startAvatar)) {
-        // The toast promises 이력 only when 이력 kept something: with 이력 보관 개수
-        // at 0 the text before the split is stored nowhere.
+        // Mention history only if a snapshot was kept (none is with a history count of 0).
         notify('success', kept ? STRINGS.manager.resplitDone(changed.length) : STRINGS.manager.resplitDoneNoHistory(changed.length));
     }
 }
 
-/* [원래 항목대로] (user request, 2026-11-03). For a persona already managed whose
-   whole description sits in one item: when that text is divided by its own
-   titles, the items are rebuilt from it, named as written, titles printed in
-   its own style. The same rule 관리 시작 now applies by default (state.js
-   seedDescription), offered here for personas taken in before it.
-
-   Refused unless exactly one item holds text, in its live choice only: with
-   text anywhere else, rebuilding would have to decide what to do with it.
-   Refused too when composing the result does not give the same text back. The
-   old body goes into the first new item's history, so 이력 can bring it back. */
+// Split by its own titles: for a managed persona whose whole text sits in one item
+// (adopted before state.js seedDescription did this). Only when that item's live
+// choice holds the only text, and composing the result gives the same text back.
 function ownSplitSource(persona) {
     const holders = (persona.sections ?? []).filter(section =>
         (persona.variants?.[section.id] ?? []).some(variant => String(variant?.text ?? '').trim()));
     if (holders.length !== 1) return null;
     const section = holders[0];
-    const live = (persona.variants?.[section.id] ?? []).find(v => v.id === persona.activePicks?.[section.id]);
+    const live = liveVariant(persona, section);
     const others = (persona.variants?.[section.id] ?? []).filter(v => v !== live && String(v?.text ?? '').trim());
     if (!live || others.length) return null;
     return { section, variant: live };
@@ -2226,19 +1774,18 @@ async function doOwnSplit() {
     const persona = ensureShape(after.persona);
     const now = Date.now();
     const oldVariantId = again.variant.id;
-    // Every choice the rebuild replaces. Their history would stay under ids
-    // nothing can open any more, still counted against the total cap.
+    // Their history would linger under ids nothing can open, still counted against the cap.
     const replaced = Object.values(persona.variants).flatMap(list => (Array.isArray(list) ? list : []).map(variant => variant?.id));
     seedOwnSections(persona, own, freshContext()?.uuidv4, now);
-    // The old body's history follows its text into the first new item, with the
-    // whole old body on top, so 이력 can put everything back.
+    // The old body's history moves to the first new item, with the whole old body on
+    // top, so history can put everything back.
     const firstId = persona.activePicks[persona.sections[0].id];
     const kept = Array.isArray(persona.history?.[oldVariantId]) ? persona.history[oldVariantId] : [];
     if (!persona.history) persona.history = {};
     for (const id of replaced) if (id && id !== firstId) delete persona.history[id];
     if (kept.length) persona.history[firstId] = kept;
     const snapped = snapshotKeepingIndex(persona, firstId, body, now, after.settings, { force: true });
-    // The 이력 tab pointed at a choice that no longer exists.
+    // The history tab may point at a choice that no longer exists.
     historyVariant = null;
     historyIndex = null;
     // Every saved version points at the new items; the old ones are gone.
@@ -2255,19 +1802,9 @@ async function doOwnSplit() {
     }
 }
 
-/* ── Size (user request) ─────────────────────────────────────────────────────
-   Characters and bytes are ours to count. Tokens are not: the number that
-   matters is whatever tokenizer the user's model uses, and this project has
-   already shipped three values it guessed at (a depth, a field, a slash command)
-   and been wrong three times. So the counter is SillyTavern's own, the NAME of
-   it is treated as unverified, and the line simply omits tokens when the probe
-   does not answer a number. */
-/* The probe's answer, remembered for the session. Whether getTokenCount returns
-   a number is a fact about the build, not about the moment, and asking it again
-   per call meant every size line cost TWO counts: one throwaway on the letter a
-   and one on the body. Cleared by nothing, because a build does not change under
-   a running page - and the counter itself is still read fresh per call below,
-   which is the part that is about the moment. */
+/* Size. Tokens come from SillyTavern's own counter, whose name is unverified: the
+   line omits tokens unless the probe answers a number. The probe result is a fact
+   about the build, so it is kept for the session. */
 let tokenProbe = null;
 
 function tokenCounter() {
@@ -2280,20 +1817,12 @@ function tokenCounter() {
         } catch { tokenProbe = false; }
     }
     if (!tokenProbe) return null;
-    // Asked again per call rather than closed over: a context is only true for
-    // the instant it was read, which is the rule at the top of this file. The
-    // count is optional either way, so a call that stops answering just drops
-    // the number rather than breaking the line.
+    // Optional: a call that stops answering drops the number, not the line.
     return text => freshContext()?.getTokenCount?.(text);
 }
 
-/* One slot, the same memo diffPartsFor keeps a few hundred lines down and for the
-   same reason: this is called from inside a draw, and a draw runs for reasons
-   that have nothing to do with the body - a settings save in the background, a
-   persona event, a tab the user came back to. Every one of those re-encoded a
-   few thousand characters and asked SillyTavern's tokenizer about them again to
-   arrive at the line already on screen. The body is the whole of the input, so
-   the body is the whole of the key. */
+// One-slot memo keyed by the body (like diffPartsFor's): draws happen for reasons
+// unrelated to the body, and each would re-run the tokenizer for the same line.
 let sizeMemoText = null;
 let sizeMemoLine = '';
 
@@ -2308,21 +1837,8 @@ function sizeTextOf(text) {
     return sizeMemoLine;
 }
 
-// A trailing timer, not a redraw. Two reasons: a redraw mid composition throws
-// away the syllable being assembled, and the token counter is
-// SillyTavern's function at a cost this file cannot predict, so it must not run
-// once per keystroke on a four thousand character body.
-/* Trailing, and long enough that a sentence typed at speed costs one count.
-
-   The line under the box reports characters, bytes and TOKENS, and the token
-   figure comes from SillyTavern's own counter over the WHOLE body - a few
-   thousand characters, on a phone, every time this fires. At 250ms a continuous
-   typist paid for that four times a second while the answer was obsolete before
-   it was drawn. Half a second still updates the moment they pause, which is when
-   anybody actually reads it, and does less than half the work while they do not.
-
-   Trailing rather than throttled on purpose: what matters is the number for the
-   text as it stands, not a running commentary on the way there. */
+// Trailing, and long enough that a sentence typed at speed costs one count of the
+// whole body (see sizeTimer).
 const SIZE_LINE_DELAY_MS = 500;
 
 function scheduleSizeUpdate() {
@@ -2343,11 +1859,9 @@ function refreshSizeLines() {
     if (s?.persona) fullLine.textContent = sizeTextOf(composeFrom(s.persona, fullBlocks, fullTexts));
 }
 
-/* ── 설명문 전문 확인·수정 (user request) ───────────────────────────────────
-   One screen carrying the whole composed description in prompt order, each body
-   editable where it stands. The revise screen next door never writes over
-   anything (it adds choices and a version); this one writes the bodies
-   themselves, which is why it snapshots each one into the history first. */
+/* Full text: the whole description in prompt order, each body editable in place.
+   Unlike the revise screen, which only adds choices and a version, it overwrites
+   bodies, so each is snapshotted into history first. */
 
 function resetFullText() {
     fullActive = false;
@@ -2357,9 +1871,8 @@ function resetFullText() {
     if (sizeTimer) { clearTimeout(sizeTimer); sizeTimer = 0; }
 }
 
-// The live fields into the working copies. Called before every draw and before
-// every read of them, so a rebuild (a background save, a tab step) can never be
-// the moment the typing stopped existing anywhere.
+// Live fields into the working copies, before every draw and every read, so a
+// rebuild never loses typing.
 function harvestFullTexts() {
     if (!fullActive || !Array.isArray(fullTexts)) return;
     const panel = document.getElementById(PANEL_ID);
@@ -2370,10 +1883,7 @@ function harvestFullTexts() {
     }
 }
 
-// How many bodies leaving would discard, measured against what the screen was
-// opened with rather than against what is stored: a body edited and typed back
-// is not a change, and asking about it would be a question with no answer that
-// does anything.
+// Bodies that leaving would discard, measured against what the screen opened with.
 function fullDirtyCount() {
     if (!fullActive || !Array.isArray(fullBlocks)) return 0;
     harvestFullTexts();
@@ -2387,11 +1897,9 @@ function fullDirtyCount() {
 function openFullText() {
     const s = guardTarget();
     if (!s) return;
-    // Every item, including the empty ones: this screen is where a description
-    // is written, so the items waiting to be filled are exactly what it must show.
+    // Empty items too: this is where they get written.
     const blocks = buildReplaceBlocks(s.persona, true);
-    // Now reachable only when the persona has no items at all, which is a
-    // different sentence from the one that used to stand here.
+    // Only when the persona has no items at all.
     if (!blocks.length) { notify('info', STRINGS.manager.fullTextNoSections); return; }
     resetFullText();
     fullActive = true;
@@ -2418,49 +1926,27 @@ function saveFullText() {
     if (!s) return;
     const startAvatar = targetAvatar;
     harvestFullTexts();
-    // The plan is taken against the persona being written to, and it decides on
-    // its own which bodies are still the ones the screen drew.
+    // The plan skips bodies that are no longer the ones the screen drew.
     const plan = planFullTextSave(s.persona, fullBlocks, fullTexts);
     if (plan.skipped.length) notify('warning', STRINGS.manager.fullTextSkipped(plan.skipped.join(', ')));
     if (!plan.writes.length) { notify('info', STRINGS.manager.nothingChanged); return; }
     const now = Date.now();
     for (const write of plan.writes) {
         const variant = (s.persona.variants?.[write.sectionId] ?? []).find(entry => entry.id === write.variantId);
-        // Planned one statement ago against this same object, so this can only
-        // fail if something reordered the persona in between, which nothing here
-        // can do. Checked anyway: the alternative is a thrown exception that
-        // takes half a save with it.
+        // Cannot happen right after planning; checked so a throw cannot take half a save.
         if (!variant) continue;
         snapshotKeepingIndex(s.persona, write.variantId, write.before, now, s.settings);
         variant.text = write.after;
         variant.updatedAt = now;
         addLog(s.persona, 'variant-edit', variant.label ?? '', now);
-        // A draft left under this body would be restored over the text that was
-        // just saved, the same reason saveVariantText clears one.
         takeDraft(startAvatar, write.sectionId, write.variantId);
     }
     trimHistory(s.root, s.settings, now);
-    // The variant-edit lines are written above, where the loop is, so commit only
-    // saves and composes.
     if (!commit(null, '', startAvatar)) return;
     notify('info', STRINGS.manager.fullTextSaved(plan.writes.length));
-    /* The screen's baseline is what is now stored, for the bodies that were
-       actually written. Without this the dirty count would keep asking about
-       edits that have already been saved, and a body that was emptied would keep
-       a textarea the prompt no longer carries.
-
-       Only those, and each block keeps the (item, choice) it was DRAWN from.
-       Rebuilding every block from the persona re-pointed them at whichever choice
-       is active NOW, and a version applied on another tab moves exactly that. The
-       block then named a different choice while the textarea still held the
-       typing meant for the old one, planFullTextSave's picked !== variantId guard
-       stopped refusing it, and the second [전체 저장] wrote one choice's text into
-       another - silently, because the first save had already reported the skip.
-       Reproduced in jsdom before this was written.
-
-       A block whose choice moved therefore keeps being skipped and keeps saying
-       so on every save, which is the honest answer: the target it was typed for
-       is not on screen any more. */
+    // The written bodies become the new baseline, so the dirty count stops asking.
+    // Each block keeps the choice it was drawn from: rebuilding from the persona would
+    // re-point it at the choice active now and write typing into the wrong choice.
     const written = new Map(plan.writes.map(write => [write.variantId, write.after]));
     if (written.size) {
         fullBlocks = fullBlocks.map(block => (written.has(block.variantId)
@@ -2472,10 +1958,8 @@ function saveFullText() {
     }
 }
 
-// The bodies, in prompt order, under the line each one is printed with. When the
-// heading format adds nothing the caption falls back to naming the item and its
-// active choice, which is a caption rather than prompt text; the note under the
-// guide says which of the two is on screen.
+// Each body under the heading it is printed with; without a heading the caption
+// names the item and choice instead (a note says which is shown).
 function fullTextScreen(s, writable, reason) {
     const wrap = el('div', 'pm-full');
     wrap.append(noteOf(STRINGS.manager.fullTextGuide));
@@ -2483,31 +1967,25 @@ function fullTextScreen(s, writable, reason) {
     const blocks = fullBlocks ?? [];
     const line = el('div', 'pm-manager-size pm-size-full', sizeTextOf(composeFrom(persona, blocks, fullTexts)));
     wrap.append(line);
-    // The two views, as the history tab's mode toggles: the pressed one is filled
-    // (pm-manager-primary; see the note on the history toggles).
+    // The pressed view is filled (pm-manager-primary), as in the history tab's toggles.
     const toggles = el('div', 'pm-manager-actions');
     for (const [key, text] of [['items', STRINGS.manager.fullViewItems], ['raw', STRINGS.manager.fullViewRaw]]) {
         const active = fullView === key;
-        const btn = el('button', `pm-manager-btn${active ? ' pm-manager-primary' : ''}`, text);
-        btn.type = 'button';
-        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
-        btn.addEventListener('click', () => {
+        const btn = button(`pm-manager-btn${active ? ' pm-manager-primary' : ''}`, text, () => {
             if (fullView === key) return;
-            // The boxes are about to leave the screen; what is typed in them
-            // lives on in the working copies and comes back with the boxes.
+            // The boxes leave the screen; their typing lives on in the working copies.
             harvestFullTexts();
             fullView = key;
             scheduleDraw();
         });
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
         toggles.append(btn);
     }
     wrap.append(toggles);
     const format = persona.headingFormat;
     if (fullView === 'raw') {
-        // One block, the text as composed from the working copies: what [전체
-        // 저장] would send right now, headings included. Selectable so it can
-        // be copied, and not editable, because which item a change belongs to
-        // cannot be told from the joined text.
+        // The text a save would send now, headings included. Read only, since the joined
+        // text cannot tell which item an edit belongs to.
         wrap.append(noteOf(STRINGS.manager.fullViewRawGuide));
         const { box, inner } = textBox('pm-full-raw');
         inner.textContent = composeFrom(persona, blocks, fullTexts) || STRINGS.manager.previewEmpty;
@@ -2532,13 +2010,10 @@ function fullTextScreen(s, writable, reason) {
         area.dataset.pmBlock = String(index);
         const value = fullTexts?.[index] ?? block.text;
         area.value = value;
-        // Sized to what it holds, so a one line item does not get the same box as
-        // a four thousand character one and the screen stays scannable.
+        // Sized to its content so the screen stays scannable.
         area.rows = Math.min(20, Math.max(4, value.split('\n').length + Math.floor(value.length / 44)));
         area.disabled = !writable;
         area.setAttribute('aria-label', STRINGS.manager.fullTextAria(block.sectionName));
-        // No keydown handler: Enter inserts a newline here, so there is nothing
-        // for a hangul composition commit to fire by accident.
         area.addEventListener('input', () => scheduleSizeUpdate());
         wrap.append(area);
     });
@@ -2551,32 +2026,20 @@ function fullTextScreen(s, writable, reason) {
     return wrap;
 }
 
-/* ── 프롬프트 배치 (user request) ────────────────────────────────────────────
-   position, depth, role and lorebook on SillyTavern's own persona descriptor,
-   next to the description this extension composes. See compose.js: the values of
-   position and role are SillyTavern's enums and have never been measured, so no
-   number is written here. The lists come from SillyTavern's own selects, which
-   carry each value together with its label and therefore cannot pair them
-   wrongly, and when no such select can be read the control says so instead of
-   offering a choice built out of guesses. */
-// Measured on the device (접점 진단 5, 2026-08-27). position is what its name
-// says; the role select is persona_depth_role, NOT persona_description_role,
-// which is what this file guessed first. The shape scan below found it anyway,
-// which is the only reason the control worked at all before it was measured.
+/* Prompt placement: position, depth, role and lorebook on SillyTavern's persona
+   descriptor. Position and role are SillyTavern enums, so no number is hardcoded:
+   options come from its own selects, and with none readable the control says so. */
+// The role select is persona_depth_role; persona_description_role was an early guess.
 const PLACEMENT_SELECTS = Object.freeze({
     position: { ids: ['persona_description_position'], match: /position/i },
     role: { ids: ['persona_depth_role', 'persona_description_role'], match: /role/i },
 });
 
-// The option LIST, never the option that is selected: SillyTavern's select shows
-// whichever persona SillyTavern itself has selected, which is not necessarily the
-// persona this screen is pointed at. What this screen shows comes from
-// readPlacement, which reads the descriptor of its own target.
+// Only the option list: the select's value belongs to SillyTavern's selected persona,
+// not necessarily this screen's target (readPlacement reads that).
 function enumOptions(field) {
-    // One answer per draw. The summary line, the control and the note under it all
-    // ask, and the fallback below is a document wide query; three of those per
-    // frame is a cost with no new information in it. Plain data, never a node, and
-    // dropped at the top of every draw.
+    // Cached per draw (enumCache): several controls ask, and the fallback below is a
+    // document-wide query.
     if (enumCache && Object.hasOwn(enumCache, field)) return enumCache[field];
     const answer = readEnumOptions(field);
     if (!enumCache) enumCache = {};
@@ -2592,9 +2055,7 @@ function readEnumOptions(field) {
         const byId = readSelectOptions(document.getElementById(id));
         if (byId) return byId;
     }
-    // The id above is the one this build appeared to use and was never measured,
-    // so a rename would take the control away silently. A shape scan over
-    // SillyTavern's own persona controls covers that at the cost of one query.
+    // Fallback shape scan, so a renamed id in SillyTavern does not silently remove the control.
     for (const select of document.querySelectorAll('select[id*="persona"]')) {
         if (!spec.match.test(select.id ?? '')) continue;
         const options = readSelectOptions(select);
@@ -2606,27 +2067,22 @@ function readEnumOptions(field) {
 function placementLabel(field, value) {
     if (value === null || value === undefined || value === '') return STRINGS.manager.placementUnset;
     const found = (enumOptions(field) ?? []).find(option => option.value === value);
-    // A stored number no option carries is shown as the number. The user can see
-    // that it is unrecognised, which is the outcome to prefer over a label that
-    // claims to know what it means.
+    // An unknown stored value is shown raw rather than given a guessed label.
     return found ? found.label : STRINGS.manager.placementRaw(value);
 }
 
-// Every placement write. Not commit(): these are SillyTavern's fields and not our
-// composition, so there is nothing to recompose, and running the description
-// through writeDescription for a depth change would be a write nobody asked for.
+// Every placement write. Not commit(): these are SillyTavern's fields, so there is
+// nothing to recompose and the description must not be rewritten.
 function applyPlacement(patch, kind, detail) {
     const s = guardTarget();
     if (!s) return false;
-    // The controls are drawn disabled in both states, so this is the second half
-    // of rule 6 rather than the first: a path that reached here anyway must not
-    // write where the screen said it would not.
+    // The controls are already disabled in these states; this stops any path that gets
+    // here anyway.
     if (s.readOnly || s.ambiguous) { notify('error', writeReason(s)); return false; }
     const ctx = freshContext();
     if (!ctx) { notify('error', STRINGS.manager.noContext); return false; }
-    // The ACTIVE persona, resolved the way everything else resolves it, not the
-    // one this screen is editing: they are different questions and the singular
-    // prompt keys belong to the first.
+    // Also the active persona (not necessarily the target): SillyTavern's singular
+    // prompt keys belong to it.
     if (!writePlacement(ctx, s.avatar, patch, getState()?.avatar ?? null)) {
         notify('error', STRINGS.manager.placementFailed);
         scheduleDraw();
@@ -2641,8 +2097,6 @@ function applyPlacement(patch, kind, detail) {
 function pickPlacementEnum(field, raw) {
     const value = Number(raw);
     if (!Number.isInteger(value)) return;
-    // Re-resolved rather than trusted from the draw: the header can move the
-    // target between the draw and the change event.
     const label = placementLabel(field, value);
     const head = field === 'position' ? STRINGS.manager.placementPosition : STRINGS.manager.placementRole;
     if (applyPlacement({ [field]: value }, 'placement', `${head}: ${label}`)) {
@@ -2650,9 +2104,8 @@ function pickPlacementEnum(field, raw) {
     }
 }
 
-// SillyTavern's own depth input carries min=0 max=9999 (접점 진단 5). Read from
-// it rather than written here: it is their number, and a build that changes it
-// changes this with no edit. No ceiling at all when the input cannot be found.
+// Read from SillyTavern's own depth input (max=9999) rather than hardcoded; no
+// ceiling when the input cannot be found.
 function measuredDepthMax() {
     const input = typeof document === 'undefined' ? null : document.getElementById('persona_depth_value');
     const max = Number(input?.max);
@@ -2675,10 +2128,8 @@ async function editDepth(current) {
     }
 }
 
-/* The world info list, if this build puts one somewhere this extension can read.
-   Never assumed: every candidate is checked for the shape it would have to have,
-   and the button falls back to typing the name, which is what the field stores
-   either way. */
+// The world info book names, if readable; every candidate is shape-checked. Null
+// falls back to typing the name, which is what the field stores either way.
 function worldNames() {
     const ctx = freshContext();
     for (const candidate of [ctx?.world_names, globalThis.world_names]) {
@@ -2686,17 +2137,12 @@ function worldNames() {
         const names = candidate.filter(name => typeof name === 'string' && name.trim());
         if (names.length === candidate.length) return names;
     }
-    // Neither exists on this build (접점 진단 5: both undefined). The list is in
-    // SillyTavern's own selects, #world_info and #world_editor_select, 214 books
-    // between them. Read the option TEXT, which is the book's name, and drop the
-    // editor select's placeholder row along with anything else carrying no value.
+    // Usually neither exists; the names are the option text of SillyTavern's #world_info
+    // and #world_editor_select. Rows without a value are placeholders.
     if (typeof document === 'undefined') return null;
     let best = null;
     for (const select of document.querySelectorAll('select[id*="world" i]')) {
-        // Not every world select is a list of books: the sort order and the
-        // strategy selects live under the same prefix. A list of books is the
-        // long one, and taking the longest is what tells them apart without
-        // hardcoding which id is which.
+        // Sort order and strategy selects share the prefix; the book list is the longest.
         const names = [...(select.options ?? [])]
             .filter(option => String(option.value ?? '').trim() !== '')
             .map(option => String(option.textContent ?? '').trim())
@@ -2729,11 +2175,9 @@ async function editLorebook(current) {
     }
 }
 
-// One label, one value and the control that changes it, on a line the thumb can
-// reach. Used for the two placement fields that are not enums.
+// Label, value and edit button on one line, for the placement fields that are not enums.
 function valueRow(label, value, buttonLabel, onClick, enabled, reason) {
-    // Tight for the reason the name rows are: a long lorebook name used to grow
-    // this row and push [연결] onto a line of its own, so one form read as two.
+    // Tight, so a long lorebook name cannot push the button onto a line of its own.
     const row = el('div', 'pm-row pm-manager-valuerow pm-manager-tightrow');
     row.append(el('span', 'pm-manager-picklabel', label));
     row.append(el('span', 'pm-manager-value', value));
@@ -2744,8 +2188,7 @@ function valueRow(label, value, buttonLabel, onClick, enabled, reason) {
 function enumRow(field, label, aria, current, writable) {
     const options = enumOptions(field);
     if (!options) {
-        // Rule 6: the control explains itself rather than disappearing, and it
-        // still shows what the persona currently carries.
+        // No readable list: show the current value and say why it cannot be changed.
         const row = el('div', 'pm-row pm-manager-valuerow');
         row.append(el('span', 'pm-manager-picklabel', label));
         row.append(el('span', 'pm-manager-value', placementLabel(field, current)));
@@ -2757,9 +2200,8 @@ function enumRow(field, label, aria, current, writable) {
     const row = el('div', 'pm-row pm-manager-valuerow');
     row.append(el('span', 'pm-manager-picklabel', label));
     const select = el('select', 'pm-manager-select');
-    // A stored value none of the options carries keeps its own entry rather than
-    // snapping to the first one, the same rule pickSelect follows for a deleted
-    // choice: the control has to show the state it is in.
+    // An unknown stored value keeps its own entry rather than snapping to the first,
+    // as in pickSelect.
     if (current !== null && current !== undefined && !options.some(option => option.value === current)) {
         const stray = el('option', null, STRINGS.manager.placementRaw(current));
         stray.value = String(current);
@@ -2807,18 +2249,14 @@ function placementBox(s, writable, reason) {
         STRINGS.manager.connectValue, () => editLorebook(placement.lorebook), writable, reason));
     box.append(noteOf(STRINGS.manager.placementHint));
     if (enumOptions('position')) box.append(noteOf(STRINGS.manager.placementSource));
-    // Rule 6, once for the block rather than once per control: a value row is not
-    // a button stack, so a reason parked on a disabled button in one would live
-    // only in a title attribute, where a phone can never read it.
+    // The reason once for the block: value rows do not draw it, and a title is never
+    // seen on a touch screen.
     if (!writable && reason) box.append(el('div', 'pm-manager-hint', reason));
     return box;
 }
 
-/* ── 언어별 이름 (user request) ──────────────────────────────────────────────
-   The same persona under a different chat language wants a different NAME. The
-   alternates live on our record only: SillyTavern's personas map is what the
-   rest of it identifies a persona by, so writing a name into that map because a
-   chat changed language would rename the persona everywhere at once. */
+/* Names per language. They live on our record only: SillyTavern identifies personas
+   by its personas map, so writing there renames the persona everywhere. */
 const NAME_LANGUAGES = Object.freeze(['ko', 'ja', 'zh', 'en']);
 
 async function editLocalName(lang) {
@@ -2842,48 +2280,28 @@ async function editLocalName(lang) {
     scheduleDraw();
 }
 
-/* [적용]: the alternate name reaches the chat, or nothing happened.
-   Storing a name changes nothing by itself, which is exactly what the user
-   reported (채팅에 적용되지 않음). What the chat and {{user}} read is
-   SillyTavern's own personas map plus name1, so applying means renaming there
-   and then making SillyTavern re-read it.
-
-   Deliberately a button and not automatic. Renaming on a language guess would
-   rename the persona everywhere the moment somebody typed one English line, and
-   the roster, the chat lock and every other extension identify a persona by that
-   name. The user says when. */
+// Applying renames the persona in SillyTavern (its personas map, plus name1 for the
+// chat). A button, never automatic on a language guess: the roster, the chat lock and
+// other extensions identify a persona by that name.
 async function applyLocalName(lang, toChat) {
     const name = localName(guardTarget()?.persona, lang, '');
     if (!name) { notify('info', STRINGS.manager.localNameNone); return; }
     await applyNameWithScope(name, toChat, `${STRINGS.common.languageNames[lang] ?? lang}: ${name}`);
 }
 
-/* One write behind both name buttons and behind 이름 수정, because the only
-   difference between them is one boolean and every guard around it is shared.
-
-   toChat false writes SillyTavern's persona map and stops: {{user}} and the chat
-   are untouched. toChat true also re-selects the persona, which is what carries
-   the name into name1, and therefore into {{user}} and the sender line of new
-   messages. Neither one rewrites a character of past chat text. Nothing in this
-   extension does; the risk the user named is a collision, not a substitution. */
+// The one rename write. toChat false writes only SillyTavern's personas map; true also
+// re-selects the persona, carrying the name into name1 ({{user}} and the sender line
+// of new messages). Past chat text is never rewritten.
 async function applyNameWithScope(name, toChat, detail) {
     const s = guardTarget();
     if (!s) return;
     if (s.readOnly || s.ambiguous) { notify('error', writeReason(s)); return; }
     const startAvatar = targetAvatar;
-    // Which scope is legal depends on whether this persona is the one being
-    // played, and that can change between the draw that enabled the button and
-    // the tap that fires it: SillyTavern's own persona switch is one tap away and
-    // the redraw is deferred while a field has focus. Asked again here, because a
-    // list-only rename of the ACTIVE persona breaks the invariant ctx.js
-    // identifies it by, and a chat rename of a background one would switch the
-    // user onto it. Both are exactly what the two buttons promise not to do.
-    // Asked as a function rather than once, because there is an await below it.
+    // Whether the persona is active can change after the draw and across the await
+    // below, so the scope is re-checked (rule at identifiedDirectly).
     const scopeIsLegal = () => {
         const isActive = (getState()?.avatar ?? null) === startAvatar;
         if (toChat && !isActive) { notify('error', STRINGS.manager.applyChatOnlyActive); scheduleDraw(); return false; }
-        // List-only on the persona being played is legal exactly when the
-        // extension does not need the name to know who that is.
         if (!toChat && isActive && !identifiedDirectly()) {
             notify('error', STRINGS.manager.applyListOnlyActive); scheduleDraw(); return false;
         }
@@ -2895,17 +2313,13 @@ async function applyNameWithScope(name, toChat, detail) {
     if (!Object.hasOwn(personas, startAvatar)) { notify('error', STRINGS.manager.refusalUnknownPersona); return; }
     const current = personas[startAvatar] ?? '';
     if (current === name) { notify('info', STRINGS.manager.nothingChanged); return; }
-    // Two personas sharing a name make the active one unknowable,
-    // and every write in this extension refuses from then on. Walking the user
-    // into that state on purpose is worse than refusing the rename.
+    // A shared name makes the active persona unknowable and every write refuse.
     if (Object.entries(personas).some(([avatar, other]) => avatar !== startAvatar && other === name)) {
         notify('error', STRINGS.manager.localNameTaken);
         return;
     }
-    // The user's own concern, and it exists only for the chat scope: {{user}} is
-    // what the model reads as the user's name, so a chat that already has
-    // somebody called that ends up with two. Said in the confirmation rather than
-    // refused, because it is their chat and they may mean it.
+    // Chat scope only: a chat already using this name would end up with two of it.
+    // Warned in the confirmation, not refused.
     const clash = toChat ? nameCollides({ name, characterName: ctx?.name2, chat: ctx?.chat }) : null;
     const question = !toChat
         ? STRINGS.manager.confirmApplyNameList(current, name)
@@ -2915,12 +2329,8 @@ async function applyNameWithScope(name, toChat, detail) {
     if (!(await askConfirm(question))) return;
     const after = guardTarget(startAvatar);
     if (!after) return;
-    // guardTarget answers whether the MANAGER still points at this persona. It
-    // cannot answer whether this persona is still the one being played, and the
-    // confirmation above is an await: a persona change during it would let a chat
-    // scope rename reach applyPersonaName, whose chat half ends in a switch. That
-    // is the persona hijack 0.6.0 removed from the draw and 0.6.1 removed from the
-    // tap, still reachable through the one window neither of them covered.
+    // guardTarget cannot tell whether this persona is still active; a switch during the
+    // confirmation would let a chat rename end in switching personas.
     if (!scopeIsLegal()) return;
     const result = await applyPersonaName(startAvatar, name, { toChat });
     if (!result.ok) {
@@ -2939,9 +2349,7 @@ async function applyNameWithScope(name, toChat, detail) {
     scheduleDraw();
 }
 
-/* 이름 수정 (user request). The same rename, with the name typed instead of
-   chosen from the language list. It is the persona's SillyTavern name, so it is
-   the same write and the same guards; only where the string comes from differs. */
+// The same rename with a typed name instead of one from the language list.
 async function renameTargetPersona(toChat) {
     const s = guardTarget();
     if (!s) return;
@@ -2957,25 +2365,12 @@ async function renameTargetPersona(toChat) {
     await applyNameWithScope(name, toChat, name);
 }
 
-/* The persona itself: its name, its picture, and making another one from it.
-   Folded like the other two, and grouped because all three write SillyTavern's
-   own record rather than ours, which is why every one of them asks first. */
-// The two name buttons, and the one rule that decides which of them is live.
-//
-// The user asked to separate 채팅에 나오는 이름 from {{user}}. In SillyTavern
-// those two ARE one value (name1), so that split does not exist to be built. The
-// split that does exist is the one below: the persona map, which is the list and
-// our own screens, and the chat, which is name1 and therefore {{user}} and the
-// sender line of new messages.
-//
-// For the persona being played, the two must stay equal: ctx.js identifies the
-// active persona by personas[avatar] === name1, so renaming the
-// list alone would leave the extension unable to say which persona is active,
-// and every write would start refusing. For a persona that is NOT being played,
-// the chat scope is not available at all: reaching it would mean switching the
-// user onto that persona, which is not what a rename button should do.
-// Whether the extension knows WHICH persona is active without deducing it from
-// the name. When it does, the list entry and the chat name are free to differ.
+/* The persona itself: name, picture, and new personas made from it. All three write
+   SillyTavern's record rather than ours, so each asks first. */
+// Name scopes: the list (SillyTavern's personas map) or the chat (also name1, so
+// {{user}}). Chat needs the persona active, or it would switch to it. List-only on the
+// active persona needs it identified directly: otherwise ctx.js matches
+// personas[avatar] === name1, and a mismatch makes every write refuse.
 function identifiedDirectly() {
     const source = getState()?.source;
     return source === 'precise' || source === 'dom';
@@ -2984,10 +2379,6 @@ function identifiedDirectly() {
 function nameScopeButtons(name, writable, reason, onList, onChat) {
     const isActive = (getState()?.avatar ?? null) === targetAvatar;
     const has = !!name;
-    // [목록] used to be closed on the persona being played, because renaming the
-    // list alone broke the name lookup that identified it. That is no longer how
-    // it is identified when SillyTavern hands over the avatar itself, so the
-    // button opens - which is the user's report that it does nothing.
     const listAllowed = !isActive || identifiedDirectly();
     const list = actionButton(STRINGS.manager.applyToList, onList,
         writable && has && listAllowed, '',
@@ -2997,14 +2388,7 @@ function nameScopeButtons(name, writable, reason, onList, onChat) {
     return [list, chat];
 }
 
-/* [목록] and [채팅] as one object.
-
-   They were appended loose into a wrapping row, so when the value beside them
-   grew the row broke BETWEEN them and the two halves of one choice ended up on
-   different lines, reading as if each belonged to something else. 0.1.17 chased
-   this by giving the value its own full-width line, which cost every row three
-   lines whether it needed them or not. Held in one box, the pair either fits
-   beside the value or leaves the line together. */
+// The list and chat buttons in one box, so a wrapping row cannot split the pair.
 function scopePair(buttons) {
     const box = el('div', 'pm-manager-namescope');
     for (const button of buttons) box.append(button);
@@ -3020,16 +2404,13 @@ function personaBox(ctx, s, writable, reason) {
     const nameRow = el('div', 'pm-row pm-manager-valuerow pm-manager-tightrow');
     nameRow.append(el('span', 'pm-manager-picklabel', STRINGS.manager.renamePersona));
     nameRow.append(el('span', 'pm-manager-value', name));
-    // Both buttons ask for the new name first; they differ only in how far it
-    // reaches. The dead one carries the reason, which is how this screen teaches
-    // the difference instead of explaining it in a paragraph.
+    // Both ask for the new name first and differ only in reach; a disabled one shows why.
     nameRow.append(scopePair(nameScopeButtons(name, writable, reason,
         () => renameTargetPersona(false), () => renameTargetPersona(true))));
     box.append(nameRow);
 
-    // The file input lives in the tree rather than being made on demand, the same
-    // way the asset uploader's does, so syncing can take it dead with everything
-    // else instead of leaving a second unexplained button behind.
+    // The file input lives in the tree, like the asset uploader's, so it is disabled
+    // along with everything else.
     const imageRow = el('div', 'pm-row pm-manager-valuerow');
     const input = el('input', 'pm-manager-file pm-hidden');
     input.type = 'file';
@@ -3055,14 +2436,12 @@ function personaBox(ctx, s, writable, reason) {
     imageRow.append(el('span', 'pm-manager-value', ''));
     imageRow.append(actionButton(STRINGS.manager.imageButton, () => input.click(), writable,
         STRINGS.manager.changeImage, reason));
-    /* The other half of the backup a bound version takes. Enabled only when a
-       record exists, and its own sentence when it does not, so the button never
-       stands there meaning nothing. */
+    // Restores the backup a bound version took; disabled with its own reason when none exists.
     const kept = s.persona?.avatarBackup?.label ?? null;
     imageRow.append(actionButton(STRINGS.manager.imageRestore, () => restoreTargetImage(), writable && !!kept,
         '', kept ? reason : STRINGS.manager.imageNoBackup));
     box.append(imageRow, input);
-    // A picture picked with [교체] is framed here before it is written.
+    // A picture picked for replacement is framed here before it is written.
     if (framing?.mode === 'upload' && framing.avatar === s.avatar) box.append(framingEditor(writable, reason));
 
     box.append(actionsRow([
@@ -3075,19 +2454,16 @@ function personaBox(ctx, s, writable, reason) {
     return box;
 }
 
-// The same setting the drawer's checkbox writes, flipped from where the names
-// live. Re-read at tap time like every other handler on this screen.
+// The same setting as the settings drawer's checkbox.
 function toggleAutoName() {
     const root = getRoot();
     if (!root || root.readOnly) { notify('error', STRINGS.manager.refusalReadOnly); return; }
     root.settings.autoLocalName = !root.settings.autoLocalName;
-    // Acts on the chat that is already open, the same way the quick panel's copy
-    // of this switch does. Off has to cancel whatever was already queued.
+    // Acts on the open chat now; off cancels anything already queued.
     if (root.settings.autoLocalName) scheduleAutoName();
     else cancelAutoName();
     freshContext()?.saveSettingsDebounced?.();
-    // The settings drawer keeps a checkbox for the same value, and it syncs on
-    // this event rather than on a redraw of its own.
+    // The settings drawer's checkbox syncs on this event.
     document.dispatchEvent(new CustomEvent('pm:changed'));
     scheduleDraw();
 }
@@ -3104,24 +2480,9 @@ function localNamesBox(ctx, s, writable, reason) {
     if (!namesOpen) return box;
     const base = ctx?.powerUserSettings?.personas?.[s.avatar] ?? '';
     if (base) box.append(noteOf(STRINGS.manager.localNameBase(base)));
-    /* The check marks the name that is IN EFFECT, which is what the same glyph
-       under the same heading means in the quick panel (quickbar.js namesGroup:
-       `entry.name === current`, current being SillyTavern's own name for this
-       persona). It used to mark the CHAT's language here instead, so with a
-       Korean list name and a Japanese chat the two screens ticked different rows
-       at the same moment and nothing on either screen said which fact it was
-       showing. The chat language is still reported, in its own sentence below.
-
-       The emptiness guard is needed here and not there: the quick panel lists
-       only languages that have a name, this screen lists all four including
-       없음, and without it a persona whose list name is blank would tick every
-       unregistered row at once.
-
-       Trimmed on OUR side only, which is exactly what the panel does: it trims
-       the names we store and compares them to SillyTavern's raw. Trimming both
-       looked tidier and broke the very thing this is here for - a list name
-       carrying a trailing space, which only SillyTavern's own rename can
-       produce, made this screen tick a row the panel left blank. */
+    // The check marks the name in effect (SillyTavern's name for this persona), as in
+    // quickbar.js namesGroup. Empty names never match, since all four languages are
+    // listed here. Only our side is trimmed, as the panel does, so both screens agree.
     const appliedName = String(base ?? '');
     const isApplied = lang => {
         const name = String(stored[lang] ?? '').trim();
@@ -3129,16 +2490,10 @@ function localNamesBox(ctx, s, writable, reason) {
     };
     const current = conversationLanguage(freshContext());
     for (const lang of NAME_LANGUAGES) {
-        // A tight row: the value truncates rather than growing the row, and the
-        // two buttons beside it move as one.
         const row = el('div', 'pm-row pm-manager-valuerow pm-manager-tightrow');
         row.append(checkMark(isApplied(lang)));
-        // The language and its name are one button, the way every other row on
-        // this screen puts its identity in one: three buttons do not fit a 411px
-        // row and the third would have been 수정, which edits OUR record rather
-        // than applying anything. A real button rather than a role on the row,
-        // because the row also holds two buttons and nesting the roles is a thing
-        // a screen reader has to guess at.
+        // Language and name are one button that edits our record: a third button would not
+        // fit, and a row role would nest the row's other buttons.
         const edit = el('button', 'pm-manager-rowname pm-manager-nameedit');
         edit.type = 'button';
         edit.disabled = !writable;
@@ -3147,46 +2502,30 @@ function localNamesBox(ctx, s, writable, reason) {
         top.append(el('span', 'pm-manager-picklabel', STRINGS.common.languageNames[lang] ?? lang));
         top.append(el('span', 'pm-manager-value', stored[lang] || STRINGS.manager.placementUnset));
         edit.append(top);
-        // Click only. A button needs no keydown of its own.
         if (writable) edit.addEventListener('click', () => editLocalName(lang));
         row.append(edit);
         row.append(scopePair(nameScopeButtons(stored[lang], writable, reason,
             () => applyLocalName(lang, false), () => applyLocalName(lang, true))));
         box.append(row);
     }
-    // What the glyph on the language rows means. Said on the screen because this
-    // box draws TWO kinds of check: these, and the switch state on the 자동 적용
-    // row below. The sentence names which rows it is about for that reason.
+    // Says what the language rows' check means, since the auto-apply row uses one too.
     box.append(noteOf(STRINGS.manager.localNameAppliedHint));
-    // Always drawn, including when it answers nothing: an automatic rule that did
-    // not fire is indistinguishable from one that is broken unless the screen
-    // says what it read.
+    // Always drawn: without it, an automatic rule that did not fire looks broken.
     box.append(noteOf(`${STRINGS.manager.localNameCurrent}: ${current
         ? (STRINGS.common.languageNames[current] ?? current)
         : STRINGS.manager.localNameNoChat}`));
-    // The switch belongs where the names are, not only in the settings drawer:
-    // registering an alternate and having it used are one intention, and the user
-    // should not have to go looking in another screen for the half that acts.
     const auto = getRoot()?.settings?.autoLocalName === true;
     const autoRow = el('div', 'pm-row pm-manager-valuerow');
-    // The state is the check, the way every other state on this screen is said.
-    // 켜짐 and 꺼짐 are verbs bent into nouns, which the writing rule refuses, and
-    // a mark the eye already knows beats a word invented to satisfy a rule.
+    // The state is a check mark: on/off words would be nominalised verbs, which the copy
+    // rules (test/wording.test.mjs) refuse.
     autoRow.append(checkMark(auto));
     autoRow.append(el('span', 'pm-manager-picklabel', STRINGS.manager.autoNameRow));
     autoRow.append(el('span', 'pm-manager-value', ''));
     autoRow.append(actionButton(auto ? STRINGS.manager.autoNameTurnOff : STRINGS.manager.autoNameTurnOn,
         () => toggleAutoName(), writable, '', reason));
     box.append(autoRow);
-    /* Why the automatic rule is sitting still, when it is: the name it would
-       apply is already somebody else's in this chat. Drawn only when it is true.
-
-       A name that is ALREADY in force is not a candidate, so it cannot have been
-       skipped over a clash. pickAutoName says so first (quickbar-pure.js: `if
-       (map[avatar] === name) return null`) and never reaches the clash test. This
-       line did reach it, and with the check now marking the applied name the two
-       statements met on one screen: a tick saying 적용됨 and a sentence under it
-       saying 동명이라 건너뜀, about the same name. */
+    // Why the automatic rule is idle: its name is already someone else's in this chat.
+    // A name already in force is skipped first, as pickAutoName does.
     const wanted = current ? String(stored[current] ?? '').trim() : '';
     const clash = (wanted && wanted !== appliedName)
         ? nameCollides({ name: wanted, characterName: ctx?.name2, chat: ctx?.chat })
@@ -3195,22 +2534,14 @@ function localNamesBox(ctx, s, writable, reason) {
     box.append(noteOf(STRINGS.manager.autoNameHint));
     box.append(noteOf(STRINGS.manager.localNameEditHint));
     box.append(noteOf(STRINGS.manager.applyScopeHint));
-    // Same as the placement block: one reason for the block, where it can be read.
+    // One reason for the block, as in placementBox.
     if (!writable && reason) box.append(el('div', 'pm-manager-hint', reason));
     return box;
 }
 
-/* ── 페르소나 이미지 교체 (user request) ─────────────────────────────────────
-   SillyTavern's own avatar file, not one of our assets. The endpoints have never
-   been measured on this build, so the listing is asked for FIRST and has to come
-   back as an array of strings containing this persona's own filename. That is
-   three things proven before anything is written: the API is there, it speaks
-   the shape we expect, and the id we hold is the one it knows. A build where any
-   of that is false gets a sentence naming what failed, not a silent no-op. */
-/* [원본 되돌리기]. The picture kept before the first bound version overwrote the
-   avatar, put back where it came from. The record is left in place: restoring
-   does not consume the backup, and a user who restores and then applies a
-   version again must not have a second backup taken of the restored original. */
+/* Persona image: SillyTavern's own avatar file, not one of our assets. */
+// Puts back the picture kept before the first bound version overwrote the avatar. The
+// record stays: a later apply must not back up the restored original a second time.
 async function restoreTargetImage() {
     const s = guardTarget();
     if (!s) return;
@@ -3232,8 +2563,7 @@ async function restoreTargetImage() {
         notify('error', STRINGS.manager.imageApplyFailed(result.detail ?? result.error));
         return;
     }
-    // The avatar is no longer any bound label's picture, so the cache that skips
-    // a rewrite must forget what it thought was up there.
+    // The avatar no longer shows any bound label, so the skip-rewrite cache is cleared.
     const live = getPersona(getRoot(), startAvatar);
     if (live) {
         live.avatarWritten = null;
@@ -3243,18 +2573,14 @@ async function restoreTargetImage() {
     notify('info', STRINGS.manager.imageRestored);
 }
 
-/* [교체]. The picked file opens in the framing editor first, so the new picture
-   can be moved and scaled into the avatar's 2:3 frame before anything is
-   written. It used to go up whole with no way to frame it at all: the framing
-   tools existed only for pictures bound to a version, so a picture replaced
-   here had none. A file the browser cannot measure (an unusual format) skips
-   the editor and goes up whole, after the same question as before. */
+// The picked file opens in the framing editor (the avatar's 2:3 frame) first. A file
+// the browser cannot measure skips the editor and goes up whole after a confirmation.
 async function changeTargetImage(file) {
     const s = guardTarget();
     if (!s) return;
     if (s.readOnly || s.ambiguous) { notify('error', writeReason(s)); return; }
-    // One picture on the wire at a time: a second file picked now would open a
-    // new editor while the first upload still lands on the avatar.
+    // One upload at a time: a second editor would open while the first upload still
+    // lands on the avatar.
     if (framingBusy) { notify('info', STRINGS.manager.framingUploading); return; }
     const startAvatar = targetAvatar;
     const size = await imageSize(file);
@@ -3281,16 +2607,11 @@ async function changeTargetImage(file) {
     revealFraming();
 }
 
-// The write behind [교체], with or without a crop. crop is pixels, as the
-// endpoint takes it, or null for the picture whole.
+// crop is in pixels, as the endpoint takes it, or null for the whole picture.
 async function uploadTargetImage(startAvatar, file, crop) {
-    /* avatarWritten is a cache of "which asset label is on the avatar file right
-       now", and applyBoundImage skips its whole write when the label it was asked
-       for matches. The user has just put a different picture there by hand, so
-       that cache is wrong, and leaving it meant the version whose picture was
-       replaced could never put its own back. Cleared inside the write queue, for
-       the same reason [원본 되돌리기] clears it, so a version apply queued behind
-       this upload already reads it cleared. */
+    // avatarWritten caches which asset label is on the avatar, and applyBoundImage skips
+    // writing a match. Cleared inside the write queue so a version apply queued behind
+    // this upload sees it cleared.
     const result = await replacePersonaAvatar(freshContext(), startAvatar, file, crop, () => {
         const live = getPersona(getRoot(), startAvatar);
         if (live && live.avatarWritten !== null) {
@@ -3304,9 +2625,8 @@ async function uploadTargetImage(startAvatar, file, crop) {
         return true;
     }
     scheduleDraw();
-    /* A build without that endpoint falls back to SillyTavern's own file input,
-       which finishes inside SillyTavern's crop dialog. Nothing is measured
-       afterwards, because the user is answering a dialog. */
+    // Without that endpoint, hand the file to SillyTavern's own file input, whose crop
+    // dialog finishes the job.
     if (result.status === 404) {
         const missing = feedPersonaImage(document, startAvatar, file);
         if (missing) { notify('error', STRINGS.manager.changeImageNoControl(missing)); return false; }
@@ -3317,33 +2637,21 @@ async function uploadTargetImage(startAvatar, file, crop) {
     return false;
 }
 
-/* ── 버전별 페르소나 이미지 (user request) ───────────────────────────────────
-   The write itself lives in assets.js. What is here is the part that belongs to
-   a screen: which persona and version were tapped, and what the user is told
-   about each way it can end. A picture that failed to move never rolls back the
-   version that was already applied, so every branch below reports and stops. */
-/* A listing still in flight is not an answer. loadAssets sets its avatar
-   synchronously before it awaits, so between the version tab's first draw and the
-   sprites round trip landing there is a window where assetState names the right
-   persona and holds an empty list. Everything that reads the list has to ask the
-   same question, which is why it is asked in one place. */
+/* Per-version persona image. The write lives in assets.js; a failed picture never
+   rolls back the applied version, so each branch below reports and stops. */
+// loadAssets sets the avatar before it awaits, so an in-flight listing names the right
+// persona with an empty list; everything reading the list asks this first.
 function listingReady(avatarId) {
     return assetState.avatar === avatarId && !assetState.error && !assetState.loading;
 }
 
 async function runBoundImage(avatarId, versionId, force) {
-    // The listing this screen already holds, when it is the right persona's.
-    // Saves one of the three round trips a version tap would otherwise make.
-    // An empty list from a load still running would be taken for a complete
-    // answer downstream, and a version bound to a file that exists would be
-    // reported as 지정된 에셋 없음. null sends applyBoundImage to fetch its own.
+    // This screen's listing when ready, saving a round trip; null makes applyBoundImage
+    // fetch its own.
     const known = listingReady(avatarId) ? assetState.list : null;
     const result = await runBoundImageWrite(avatarId, versionId, force, known);
     if (!result || result.skipped) return;
-    // This screen has its own draw. The shared writer redraws the quick panel,
-    // which is a different surface: without this the version drawer and the
-    // header avatar keep the picture they were drawn with, and the user taps
-    // again because nothing appeared to happen.
+    // The shared writer redraws only the quick panel.
     scheduleDraw();
     if (result.ok) {
         if (result.unrecorded) { notify('warning', STRINGS.manager.imageAppliedUnrecorded); return; }
@@ -3361,9 +2669,6 @@ async function pickBoundAsset(versionId) {
     const s = guardTarget();
     if (!s) return;
     const startAvatar = targetAvatar;
-    // The listing is fetched here when this screen does not hold it yet. Sending
-    // the user to the asset tab first, which is what this used to do, was a
-    // detour for a request this button can make itself.
     if (!listingReady(startAvatar)) {
         if (!(assetState.avatar === startAvatar && assetState.loading)) await loadAssets(startAvatar);
         else { notify('info', STRINGS.manager.assetListLoading); return; }
@@ -3376,7 +2681,7 @@ async function pickBoundAsset(versionId) {
     if (!choice) return;
     const after = guardTarget(startAvatar);
     if (!after) return;
-    const version = (after.persona?.versions ?? []).find(entry => entry.id === versionId);
+    const version = findVersion(after.persona, versionId);
     if (!version) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
     if (bindAsset(version, choice, Date.now())) commit('image-bind', `${version.name ?? ''} / ${choice}`, startAvatar);
 }
@@ -3384,21 +2689,15 @@ async function pickBoundAsset(versionId) {
 function clearBoundAsset(versionId) {
     const s = guardTarget();
     if (!s) return;
-    const version = (s.persona?.versions ?? []).find(entry => entry.id === versionId);
+    const version = findVersion(s.persona, versionId);
     if (!version) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
     if (bindAsset(version, null, Date.now())) commit('image-bind', version.name ?? '', targetAvatar);
 }
 
-/* The picture block on an open version row. One thumbnail at a time: expandedRow
-   holds a single key, so however many versions a persona has, this draws at most
-   one image. */
+// The picture block on an open version row. expandedRow holds one key, so this draws
+// at most one image.
 function versionImageBlock(version, writable, reason) {
     const box = el('div', 'pm-manager-assetsel');
-    // A listing still in flight is not an answer. loadAssets sets its avatar
-    // synchronously before it awaits, so this row matched the persona while the
-    // list was still empty and the block reported a perfectly good binding as
-    // "the file is gone" - which is the one sentence that sends a user looking
-    // for a file nothing deleted.
     const listingOk = listingReady(targetAvatar);
     const view = versionImageState(version, assetLabels(), listingOk);
     const framed = !!validCrop(version.avatarCrop);
@@ -3418,9 +2717,7 @@ function versionImageBlock(version, writable, reason) {
         const path = findAsset(assetState.list, view.label)?.path;
         if (path) {
             const img = el('img', 'pm-manager-targetimg');
-            // The sprite path serves the file at full size. This is a preview the
-            // width of a thumbnail, so the browser is told how small it will be
-            // drawn and the row stays cheap to open on a phone.
+            // The sprite path serves the full-size file; the drawn size keeps the preview cheap.
             img.width = 96;
             img.height = 96;
             img.decoding = 'async';
@@ -3430,10 +2727,8 @@ function versionImageBlock(version, writable, reason) {
             box.append(img);
         }
     }
-    // Why the picture's own buttons are dead, said for the state it is in: no
-    // picture bound, a bound file that is gone, or a listing still on its way.
-    // 'unknown' covers a listing that failed as well as one on its way, and a
-    // failure must not read as 준비 중 next to the 읽기 실패 shown below it.
+    // Why the picture buttons are disabled. 'unknown' covers a failed listing as well as
+    // a loading one, and a failure must not read as loading.
     const listingError = assetState.avatar === targetAvatar ? assetState.error : null;
     const deadReason = view.state === 'ok' ? reason
         : view.state === 'none' ? STRINGS.manager.versionImageNoBinding
@@ -3452,22 +2747,13 @@ function versionImageBlock(version, writable, reason) {
     return box;
 }
 
-/* ── 위치·크기 조절 (user request) ───────────────────────────────────────────
-   One editor, two uses. mode 'version' frames a version's bound asset and
-   stores the crop on the version. mode 'upload' frames a file just picked with
-   [교체] and writes it to the avatar with that crop. The frame is the avatar's
-   2:3 shape at a fixed width, the picture moves under it, and the dashed
-   square is what a list or chat icon shows. Dragging and pinching write only
-   the picture's style, one frame at a time; nothing is drawn again and nothing
-   is saved until the save button.
-
-   Module state, so a redraw rebuilds the editor where the user left it. Plain
-   values only, plus the picked File in upload mode (its object URL is revoked
-   by dropFraming on every way out). */
+/* Framing editor. 'version' mode stores a crop on a version's bound asset; 'upload'
+   mode writes a just-picked file to the avatar with it. The frame is the avatar's 2:3
+   shape; the dashed square is what list and chat icons show. Module state, so a
+   redraw rebuilds the editor where it was; dropFraming revokes the object URL. */
 const FRAME_WIDTH = 240;
 let framing = null;
-// Set while an upload from the editor is on the wire, so a second tap on the
-// same button does not send the picture twice.
+// True while the editor's upload is in flight, so a second tap cannot send it twice.
 let framingBusy = false;
 
 function dropFraming() {
@@ -3477,8 +2763,7 @@ function dropFraming() {
     framing = null;
 }
 
-// The editor opens where the tap was not: [교체] sits in a fold near the top and
-// a version's row can be far down the list. Brought into view once it exists.
+// The editor can open far from the tap, so it is scrolled into view once drawn.
 function revealFraming() {
     if (typeof requestAnimationFrame !== 'function') return;
     requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -3495,14 +2780,13 @@ function closeFraming() {
 function openFraming(versionId) {
     const s = guardTarget();
     if (!s) return;
-    const version = (s.persona?.versions ?? []).find(entry => entry?.id === versionId);
+    const version = findVersion(s.persona, versionId);
     const label = boundAsset(version);
     const path = findAsset(assetState.list, label, bindingIsExact(version))?.path;
     if (!version || !label || !path) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
     const avatar = targetAvatar;
-    // The picture's own size, which the crop is a fraction of. The path carries
-    // the listing's freshness token (assets.js), so a file replaced under the
-    // same name is measured as it is now, not as the browser last decoded it.
+    // The crop is a fraction of the picture's size. The path carries the listing's
+    // freshness token, so a file replaced under the same name is measured fresh.
     const probe = new Image();
     probe.onload = () => {
         if (targetAvatar !== avatar || !probe.naturalWidth) return;
@@ -3546,9 +2830,8 @@ function framingEditor(writable, reason) {
         img.style.width = `${placed.width}px`;
         img.style.height = `${placed.height}px`;
         img.style.transform = `translate(${placed.left}px, ${placed.top}px)`;
-        // Written even while the slider has focus: a touched slider keeps focus,
-        // and skipping it then left the slider at 3 after a wheel zoom back to 2,
-        // so the next nudge jumped. Writing the value it already has is harmless.
+        // Written even while the slider has focus (a touched slider keeps it), or a wheel
+        // zoom leaves it stale and the next nudge jumps.
         zoom.value = String(state.view.zoom);
     };
     // Pointer moves arrive faster than frames on a phone; one style write per frame.
@@ -3561,10 +2844,8 @@ function framingEditor(writable, reason) {
 
     zoom.addEventListener('input', () => setView({ ...state.view, zoom: Number(zoom.value) }));
 
-    /* One finger drags, two pinch, a wheel or trackpad zooms. Positions are
-       tracked per pointer, and every move is turned into a change of the view in
-       the picture's own fractions, so the result does not depend on how large
-       the frame happens to be drawn. */
+    // One finger drags, two pinch, a wheel zooms. Moves become view changes in the
+    // picture's own fractions, independent of the drawn frame size.
     const pointers = new Map();
     const spread = () => {
         const [a, b] = [...pointers.values()];
@@ -3579,9 +2860,8 @@ function framingEditor(writable, reason) {
         frame.addEventListener('pointerdown', e => {
             gestureHeld = true;
             pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-            // Keeps the moves coming when the finger leaves the frame. It throws for
-            // a pointer the browser no longer counts as down, and a throw here
-            // would drop the drag that the line above already recorded.
+            // Keeps moves coming outside the frame. Throws for a pointer no longer down, which
+            // must not drop the drag already recorded.
             try { frame.setPointerCapture?.(e.pointerId); } catch { /* moves still arrive inside the frame */ }
             last = { mid: middle(), spread: pointers.size > 1 ? spread() : 0 };
             e.preventDefault();
@@ -3614,10 +2894,8 @@ function framingEditor(writable, reason) {
         frame.addEventListener('pointercancel', lift);
         // A frame taken out of the document loses its capture and hears no up.
         frame.addEventListener('lostpointercapture', lift);
-        // Desktop: the wheel zooms instead of scrolling the screen out from under
-        // the picture, by as much as the wheel moved. A mouse notch (deltaY 100)
-        // is about twenty percent; a touchpad sends many small deltas, and a fixed
-        // step per event took twelve of them from 2.5x to the 5x limit.
+        // The wheel zooms in proportion to deltaY (a mouse notch of 100 is about 20%),
+        // since a touchpad sends many small deltas.
         frame.addEventListener('wheel', e => {
             e.preventDefault();
             setView({ ...state.view, zoom: state.view.zoom * Math.exp(-e.deltaY * 0.002) });
@@ -3630,8 +2908,7 @@ function framingEditor(writable, reason) {
     box.append(el('div', 'pm-manager-hint', STRINGS.manager.framingHint));
     box.append(el('div', 'pm-manager-hint', STRINGS.manager.framingGuide));
     const reset = actionButton(STRINGS.manager.framingReset, () => setView({ zoom: 1, cx: 0.5, cy: 0.5 }), writable, '', reason);
-    // Not while the picture is on the wire: closing the editor did not stop the
-    // upload, which then replaced the avatar after the user had walked away.
+    // Not while uploading: closing does not stop the upload.
     const cancel = actionButton(STRINGS.common.cancel, () => closeFraming(), !framingBusy, '',
         framingBusy ? STRINGS.manager.framingUploading : '');
     if (state.mode === 'upload') {
@@ -3650,15 +2927,13 @@ function framingEditor(writable, reason) {
     return box;
 }
 
-/* Stores the framing on the version. A version that is the one in use gets its
-   picture written again at once, since that is what the user is looking at;
-   another version's framing waits for that version to be applied. */
+// Stores the crop on the version; rewrites the avatar now only if that version is active.
 function saveFraming() {
     const state = framing;
     if (state?.mode !== 'version') return;
     const s = guardTarget(state.avatar);
     if (!s) return;
-    const version = (s.persona?.versions ?? []).find(entry => entry?.id === state.versionId);
+    const version = findVersion(s.persona, state.versionId);
     if (!version || boundAsset(version) !== state.label) { notify('error', STRINGS.manager.versionGone); closeFraming(); return; }
     version.avatarCrop = cropFromView(state.nw, state.nh, state.view);
     version.updatedAt = Date.now();
@@ -3668,9 +2943,8 @@ function saveFraming() {
     else notify('info', STRINGS.manager.framingSavedLater);
 }
 
-// [이 위치로 적용] and [자르지 않고 그대로]: the picked file goes up, cut to the
-// frame or whole. The editor stays open until the server has answered, so a
-// failure leaves the user where they can try again.
+// Uploads the picked file, cropped or whole. The editor stays open until the server
+// answers, so a failure can be retried.
 async function saveUploadFraming(cropped) {
     const state = framing;
     if (state?.mode !== 'upload' || framingBusy) return;
@@ -3688,23 +2962,15 @@ async function saveUploadFraming(cropped) {
     else scheduleDraw();
 }
 
-/* ── 새 페르소나로 복제 (user request) ───────────────────────────────────────
-   The plan, which is the only honest one available: SillyTavern owns
-   creating a persona, /persona-duplicate is measured present on the device and
-   its arguments are not, so the command is run and the RESULT is measured by
-   diffing the persona map. Exactly one new key is the copy; anything else is
-   reported rather than guessed at. */
+/* Duplicate as a new persona. SillyTavern owns persona creation and the command's
+   arguments are unverified, so it runs and the result is found by diffing the
+   personas map: exactly one new key is the copy, anything else is reported. */
 const DUPLICATE_COMMANDS = Object.freeze(['persona-duplicate']);
 
-// The browser locale and numeric: true, and nothing else. Built once per load:
-// the picker sorts thirty rows on every draw, and the locale cannot change
-// inside a session.
+// Built once: the picker sorts on every draw, and the locale cannot change in a session.
 const PICKER_COLLATOR = new Intl.Collator(undefined, { numeric: true });
 
-// The two flows below mint through the same measured command and verify the
-// result the same way, and all three flows under this line end on the same
-// screen reset. Shared, because this file has already had one duplicated block
-// drift; the third copy of each was the warning.
+// The screen reset that duplicate, create and copy all end on.
 function landOnPersona(avatar) {
     pickerMode = 'target';
     pickerOpen = false;
@@ -3724,9 +2990,8 @@ function landOnPersona(avatar) {
     resetListUi();
 }
 
-// Runs the discovered duplicate command and answers with the ONE new key in the
-// persona map, or null after reporting why. The many-found sentence is the
-// caller's, because what gets cancelled differs (구성 복사 vs 기본 구성).
+// Runs the duplicate command and answers the one new personas key, or null after
+// reporting why. The caller words the many-found message.
 async function mintPersona(command, label, manyFoundMessage) {
     const before = new Set(Object.keys(freshContext()?.powerUserSettings?.personas ?? {}));
     try {
@@ -3734,12 +2999,8 @@ async function mintPersona(command, label, manyFoundMessage) {
     } catch (e) {
         console.warn(`[${MODULE_NAME}] ${command} failed`, e);
     }
-    // SillyTavern finishes after the command resolves, exactly as it does for a
-    // switch, so the answer is waited for rather than read on the next line.
+    // SillyTavern finishes after the command resolves, so the result is polled for.
     const added = [];
-    // No scheduler argument: waitFor's own turn is the only shape there is now.
-    // The local one that used to be passed here took no resolve, so this await
-    // never returned and the whole duplicate hung with nothing on screen.
     await waitFor(() => {
         added.length = 0;
         for (const key of Object.keys(freshContext()?.powerUserSettings?.personas ?? {})) {
@@ -3760,8 +3021,7 @@ async function duplicateTargetPersona() {
     if (s.readOnly || s.ambiguous) { notify('error', writeReason(s)); return; }
     const startAvatar = targetAvatar;
     const commands = freshContext()?.SlashCommandParser?.commands;
-    // Discovered, never hardcoded into a call: the same rule the persona switch
-    // follows, and the reason that one survived a SillyTavern rename.
+    // Discovered, never assumed, as the persona switch does.
     const command = DUPLICATE_COMMANDS.find(name => commands && Object.hasOwn(commands, name) && commands[name]);
     if (!command) { notify('error', STRINGS.manager.duplicateNoCommand); return; }
     const personas = freshContext()?.powerUserSettings?.personas ?? {};
@@ -3772,40 +3032,26 @@ async function duplicateTargetPersona() {
     if (!destAvatar) return;
     const after = guardTarget(startAvatar);
     if (!after) return;
-    // The new persona is SillyTavern's; the composition on it is ours to put
-    // there, through the same copy the picker's 복사 uses.
+    // SillyTavern made the persona; the composition is ours, via the picker's copy.
     const copy = copyPersonaOnto(after.root, startAvatar, destAvatar,
         freshContext()?.uuidv4, Date.now(), STRINGS.manager.copyLogDetail(label));
-    // The refusal was being thrown away and the success toast printed over it.
-    // SillyTavern has made the persona either way, so this is not a failure to
-    // roll back; what it is is a persona carrying the description SillyTavern
-    // copied rather than the one this extension just built for it, and the user
-    // has to be told which of the two they are looking at.
-    // outside 'discard': the description on the new persona is SillyTavern's copy
-    // of the source's, not an edit anybody made, and keeping it left every
-    // duplicate with a redundant 외부 수정 choice holding the same text.
+    // A refusal is reported, not rolled back: the persona exists either way, but carries
+    // SillyTavern's copied description. outside 'discard': that copy is not an outside
+    // edit and would otherwise become a redundant choice.
     const composed = copy ? saveAndComposeFor(destAvatar, { outside: 'discard' }) : null;
     freshContext()?.saveSettingsDebounced?.();
     const newName = freshContext()?.powerUserSettings?.personas?.[destAvatar] ?? destAvatar;
-    // Onto the copy, which is what the user made and what they will edit next.
+    // Onto the copy, which the user will edit next.
     landOnPersona(destAvatar);
     if (copy && !composed) notify('warning', refusalMessage(destAvatar));
     else notify('info', STRINGS.manager.duplicateDone(newName));
     scheduleDraw();
 }
 
-/* ── 새 페르소나 생성 (user request) ─────────────────────────────────────────
-   SillyTavern owns creating a persona and no dedicated creation path has been
-   measured on this build, so the one measured mint is reused: /persona-duplicate
-   makes the entry and the result is verified by diffing the persona map, exactly
-   as the duplicate above does. What makes the result NEW instead of a copy is
-   done by us afterwards, in this order: the typed name goes on first (one map
-   entry, applyPersonaName's list scope), because saveAndComposeFor refuses while
-   any two personas share a name and SillyTavern may have named the copy exactly
-   like its source. Then a blank default composition replaces the description
-   SillyTavern copied over. The avatar image stays inherited: replacing an image
-   is its own measured control ([이미지 변경], right above this button), and the
-   confirm popup says so before anything runs. */
+/* New persona: minted by duplicating (no other creation path is known), then made
+   new. The typed name goes on first, since saveAndComposeFor refuses while two
+   personas share a name and the copy may carry its source's. Then a blank default
+   composition replaces the copied description. The image stays inherited. */
 async function createTargetPersona() {
     if (!(await confirmDropWorking())) return;
     const s = guardTarget();
@@ -3813,15 +3059,12 @@ async function createTargetPersona() {
     if (s.readOnly || s.ambiguous) { notify('error', writeReason(s)); return; }
     const startAvatar = targetAvatar;
     const commands = freshContext()?.SlashCommandParser?.commands;
-    // Discovered, never hardcoded into a call: the same rule the duplicate follows.
     const command = DUPLICATE_COMMANDS.find(name => commands && Object.hasOwn(commands, name) && commands[name]);
     if (!command) { notify('error', STRINGS.manager.createNoCommand); return; }
     const name = (await askText(STRINGS.manager.createNamePrompt, ''))?.trim();
     if (!name) return;
-    // Refused before SillyTavern is asked for anything: renaming INTO a duplicate
-    // name is the one outcome the name machinery must never produce, and finding
-    // out only after the persona exists would leave it stuck under whatever name
-    // SillyTavern gave it.
+    // Checked before anything is minted: found later, the new persona would be stuck
+    // under whatever name SillyTavern gave it.
     const taken = Object.values(freshContext()?.powerUserSettings?.personas ?? {}).includes(name);
     if (taken) { notify('error', STRINGS.manager.createNameTaken(name)); return; }
     if (!(await askConfirm(STRINGS.manager.confirmCreatePersona(name)))) return;
@@ -3829,42 +3072,26 @@ async function createTargetPersona() {
     const label = freshContext()?.powerUserSettings?.personas?.[startAvatar] ?? startAvatar;
     const destAvatar = await mintPersona(command, label, STRINGS.manager.createManyFound);
     if (!destAvatar) return;
-    // The typed name, list scope only: nothing here touches the chat. A refusal
-    // is not rolled back by deleting the persona, because no deletion path has
-    // been measured; the persona exists either way and the toast says under
-    // which name.
+    // List scope only. A refusal is not rolled back (no known deletion path); the toast
+    // says which name the persona ended up with.
     const renamed = await applyPersonaName(destAvatar, name, { toChat: false });
-    /* Deliberately NOT guardTarget(startAvatar): the persona already exists in
-       SillyTavern, so bailing because the SOURCE moved (the manager closed during
-       the wait, the record vanished) would leave the copy carrying the source's
-       description while claiming to be new. The blank composition is owed to the
-       persona that now exists, whatever happened to the one it was minted from. */
+    // Not guardTarget(startAvatar): the new persona exists, so it gets its blank
+    // composition whatever happened to the source meanwhile.
     const root = getRoot();
     const seeded = !!root && !root.readOnly;
     let composed = null;
     if (seeded) {
-        // A blank default composition, not a copy: that is the difference between
-        // this button and the one beside it. The birth log line is what keeps the
-        // pruner off an entry whose variants are all deliberately empty.
+        // The birth log line keeps the pruner off an entry whose variants are all empty.
         const persona = ensurePersona(root, destAvatar, freshContext()?.uuidv4);
         addLog(persona, 'persona-create', name, Date.now());
-        // Overwrites the description SillyTavern copied with the (empty) composition.
-        // Refused when the copy's name is shared and the active persona cannot be
-        // told apart: then it still carries the source's description, which the
-        // duplicate path already reports and this one used to pass over.
-        // outside 'discard', for the duplicate path's reason: kept, the source's
-        // whole description sat in the "blank" persona as a 외부 수정 choice,
-        // and with an empty composition nothing would be written at all.
+        // Overwrites the copied description with the empty composition; outside 'discard'
+        // as in duplicateTargetPersona.
         composed = saveAndComposeFor(destAvatar, { outside: 'discard' });
     }
     freshContext()?.saveSettingsDebounced?.();
-    // Onto the new persona, exactly as the duplicate lands on its copy.
     landOnPersona(destAvatar);
     if (!seeded || !composed) {
-        // The root went away or turned read only between the confirm and now, or
-        // the write was refused. The persona exists but still carries the copied
-        // description, and a refusal that says nothing is the failure mode this
-        // project exists to avoid.
+        // The persona exists but still carries the copied description.
         notify('warning', refusalMessage(destAvatar));
     } else if (renamed?.ok) {
         notify('info', STRINGS.manager.createDone(name));
@@ -3875,11 +3102,8 @@ async function createTargetPersona() {
     scheduleDraw();
 }
 
-/* ── 페르소나 복사 (user request) ────────────────────────────────────────────
-   SillyTavern owns making a persona and the path for it has not been measured on
-   this build, so the destination is one it already lists and what gets replaced
-   is our record for it. The picker is where the destination is chosen, because it
-   already carries thumbnails, search and paging for the same thirty rows. */
+/* Copy onto a persona SillyTavern already lists: our record for it is replaced. The
+   destination is chosen in the persona picker. */
 function openCopyPicker() {
     const s = guardTarget();
     if (!s) return;
@@ -3911,10 +3135,8 @@ async function copyOnto(destAvatar) {
     if (!(await askConfirm(STRINGS.manager.copyConfirm(fromName, toName)))) return;
     const after = guardTarget(startAvatar);
     if (!after) return;
-    // Kept so the destination can be put back. saveAndComposeFor is the step that
-    // can still refuse, and a refusal after the record was replaced would leave
-    // the user with a persona whose data was overwritten and whose description
-    // was not, which is the one outcome worse than a plain failure.
+    // Kept to put the destination back if saveAndComposeFor refuses, rather than leave
+    // its record replaced and its description not.
     const previous = after.root.personas?.[destAvatar] ?? null;
     const copy = copyPersonaOnto(after.root, startAvatar, destAvatar,
         freshContext()?.uuidv4, Date.now(), STRINGS.manager.copyLogDetail(fromName));
@@ -3928,9 +3150,6 @@ async function copyOnto(destAvatar) {
         return;
     }
     freshContext()?.saveSettingsDebounced?.();
-    // The copy is what the user made and what they are about to work on, so the
-    // screen moves onto it. Everything screen local belongs to the persona being
-    // left, exactly as selectTarget clears it.
     landOnPersona(destAvatar);
     notify('info', STRINGS.manager.copyDone(toName));
     scheduleDraw();
@@ -3941,13 +3160,8 @@ function composeTab(s, writable, reason) {
     const persona = s.persona;
     if (!persona) return box;
 
-    // The same rule the revise screen follows on the
-    // 버전 tab: one screen, one task. While the 전문 window is up the tab body IS
-    // that window, and the item list comes back when it closes.
     if (fullActive) { box.append(fullTextScreen(s, writable, reason)); return box; }
 
-    // A body that vanished under its own editor drops the
-    // selection and falls through to the list below.
     if (openVariant) {
         const body = openBody(persona);
         if (body) {
@@ -3958,22 +3172,16 @@ function composeTab(s, writable, reason) {
         editorDirty = false;
     }
 
-    // Persona tags: a chips row at the top of the tab, the one
-    // place every adopted persona passes through.
     box.append(el('div', 'pm-manager-tagshead', STRINGS.manager.personaTagsHead));
     box.append(tagChipsRow(persona.tags ?? [], writable, reason, '', p => p));
 
-    // The per persona blocks sit next to the tags, folded. Principle 4: thirty
-    // personas means the item list is what this tab is for, and four more open
-    // rows above it would push that list off the first screen.
+    // Folded, so they do not push the item list off the first screen.
     const live = freshContext();
     box.append(personaBox(live, s, writable, reason));
     box.append(localNamesBox(live, s, writable, reason));
 
-    // The heading format, per persona. It sits here rather than in the
-    // settings drawer because the value lives on the persona: a global switch
-    // would leave every persona already adopted on 없음 and read as a control that
-    // does nothing. The drawer keeps the default for personas made from now on.
+    // Here, not in the settings drawer: the value lives on the persona, and the drawer
+    // only holds the default for new ones.
     box.append(headingFormatRow(persona, writable, reason));
 
     box.append(actionsRow([
@@ -3991,17 +3199,11 @@ function composeTab(s, writable, reason) {
     box.append(list);
 
     box.append(actionsRow([actionButton(STRINGS.manager.addItem, () => addSection(), writable, '', reason)]));
-    // 프롬프트 배치 goes last, under the items (user request). It is SillyTavern's
-    // setting for where the finished description lands, so it belongs after the
-    // thing it places rather than above it, and it is the row on this tab that
-    // gets touched least often.
     box.append(placementBox(s, writable, reason));
     return box;
 }
 
-// Changing this rewrites the prompt, so it goes through commit like
-// every other composition change: the log records it and the description is
-// recomposed on the spot rather than at some later save.
+// Changing this rewrites the prompt, so it goes through commit.
 function headingFormatRow(persona, writable, reason) {
     const row = el('div', 'pm-row pm-manager-headingrow');
     row.append(el('span', 'pm-manager-name', STRINGS.manager.headingFormatLabel));
@@ -4023,9 +3225,6 @@ function headingFormatRow(persona, writable, reason) {
     select.addEventListener('change', () => {
         const wanted = select.value;
         if (!formats.includes(wanted)) return;
-        // Re-resolved rather than written through the persona this row was drawn
-        // from: the header can move the target between the draw and the tap, and
-        // this write changes what the prompt says.
         const after = guardTarget();
         if (!after) return;
         ensureShape(after.persona).headingFormat = wanted;
@@ -4041,9 +3240,8 @@ function headingFormatRow(persona, writable, reason) {
 
 /* Versions tab */
 
-// The 고르게 한다, in the row where the dead slot is reported. The
-// options are the section's living variants, and 없음 stays selectable so the
-// control shows the state it is in rather than pretending a choice was made.
+// Repairs a dead slot where it is reported. The no-pick option stays selected, so the
+// control shows its real state rather than a choice nobody made.
 function deadPickSelect(persona, version, row, writable) {
     const select = el('select', 'pm-manager-select');
     const none = el('option', null, NO_PICK_LABEL);
@@ -4064,17 +3262,13 @@ function deadPickSelect(persona, version, row, writable) {
     return select;
 }
 
-// The row the user complained about: five buttons on
-// one line became a name, the combination as one line, and [적용]. The per section
-// detail, the repair select for a dead slot and the other four actions all live in
-// the drawer the row tap opens.
+// Name, combination summary and apply; details, repairs and other actions open below.
 function versionRow(persona, version, writable, reason) {
     const key = rowKey('version', version.id);
     const open = expandedRow === key;
     const box = el('div', `pm-manager-version${open ? ' pm-manager-rowopen' : ''}`);
     registerRow(key, box, () => versionRow(persona, version, writable, reason), { persona });
-    // Ends of the whole list, not of the filtered page: a move is always one
-    // place in the stored order.
+    // Ends of the whole list, not the filtered page: a move is one place in stored order.
     const versions = persona.versions ?? [];
     const atTop = versions[0] === version;
     const atEnd = versions[versions.length - 1] === version;
@@ -4084,13 +3278,10 @@ function versionRow(persona, version, writable, reason) {
         checkMark(version.id === persona.activeVersionId),
         markedText('pm-manager-name', version.name ?? '', listUi.versions.open ? listUi.versions.query : ''),
     ], versionSummaryLine(persona, version)));
-    // A version whose picks name something that is gone cannot be
-    // applied, because applying it would drop that section out of the prompt. The
-    // button goes disabled with a reason instead of failing after the tap, and the
-    // reason says where the repair is.
+    // Picks naming something deleted would drop that section from the prompt, so apply
+    // is disabled with a reason that points at the repair.
     const applicable = versionApplicable(persona, version.id);
-    // A word, never an image: a page of twenty rows would otherwise fetch twenty
-    // pictures to say one thing each. The picture itself is in the open row.
+    // A word, not a thumbnail, so a page of rows does not fetch a picture each.
     if (boundAsset(version)) head.append(el('span', 'pm-manager-value', STRINGS.manager.versionImageMark));
     head.append(actionsRow([
         actionButton(STRINGS.common.apply, () => {
@@ -4114,12 +3305,9 @@ function versionRow(persona, version, writable, reason) {
     box.append(picks);
     box.append(versionImageBlock(version, writable, reason));
     box.append(versionAssetBlock(version, writable));
-    // Version tags. getOwner re-resolves the version from a
-    // fresh persona at tap time by reading version.id when it runs, the same
-    // idiom every other row action here uses.
     box.append(el('div', 'pm-manager-tagshead', STRINGS.manager.personaTagsHead));
     box.append(tagChipsRow(version.tags ?? [], writable, reason, version.name ?? '',
-        p => (p.versions ?? []).find(entry => entry.id === version.id)));
+        p => findVersion(p, version.id)));
     box.append(expansionOf([
         actionButton(STRINGS.common.rename, () => renameVersion(version.id, version.name ?? ''), writable, '', reason),
         actionButton(STRINGS.common.duplicate, () => duplicateVersion(version.id), writable, '', reason),
@@ -4133,7 +3321,7 @@ function versionRow(persona, version, writable, reason) {
     return box;
 }
 
-/* 고쳐서 새 버전 */
+/* Revise as a new version */
 
 function resetRevise() {
     reviseActive = false;
@@ -4148,10 +3336,8 @@ function resetRevise() {
     revisePopupFrame = 0;
 }
 
-// How many unsaved revisions leaving would discard: the applied steps, plus an
-// open 수정 칸 whose text has moved off the selection it started from. The box
-// is read from the live field first, because typing since the last draw exists
-// nowhere else yet; the stored copy covers the box being off screen (a tab away).
+// Unsaved revisions leaving would discard: applied steps, plus an open edit box that
+// changed. The live field is read first: typing since the last draw exists nowhere else.
 function reviseDirtyCount() {
     if (!reviseActive) return 0;
     let count = reviseSteps.length;
@@ -4164,14 +3350,9 @@ function reviseDirtyCount() {
 }
 
 function openRevise() {
-    // guardTarget rather than a bare read: the persona can vanish between the
-    // draw that offered the button and the tap, and that has to be said, not
-    // swallowed.
     const s = guardTarget();
     if (!s) return;
     const blocks = buildReplaceBlocks(s.persona);
-    // An empty state is a sentence, not a blank screen, and this
-    // one names where the text is written.
     if (!blocks.length) { notify('info', STRINGS.manager.reviseNothing); return; }
     resetRevise();
     reviseActive = true;
@@ -4182,25 +3363,20 @@ function openRevise() {
 }
 
 async function leaveRevise() {
-    // The same one-question-at-a-time flag requestClose uses: a double tap on
-    // [목록으로] must not stack two confirmations.
+    // The same one-question-at-a-time flag requestClose uses.
     if (closeAsked) return;
     const dirty = reviseDirtyCount();
     if (dirty > 0) {
         const ok = await askOnce(STRINGS.manager.reviseConfirmLeave(dirty));
-        // Re-checked like requestClose: the screen may be gone by now.
         if (!ok || !document.getElementById(HOST_ID)) return;
     }
     resetRevise();
     scheduleDraw();
 }
 
-// One selection boundary, resolved to a block element and a string offset. The
-// blocks draw each working text as a single text node, so a boundary inside
-// that node maps one to one; a drag to the very edge of a block can instead
-// land the boundary on the block ELEMENT (browser dependent), where the offset
-// counts children: 0 is before the text, anything past it is after, and both
-// are still within-block positions worth normalising rather than refusing.
+// A selection boundary as {block element, string offset}. Each block is one text
+// node, but a drag to a block's edge can land on the element itself (browser
+// dependent), where offset counts children: 0 is before the text, more is after.
 function reviseBoundary(node, offset) {
     if (node?.nodeType === 3) {
         const host = node.parentElement;
@@ -4230,10 +3406,8 @@ function readReviseSelection() {
     return { block, start: from, end: to, rect: range.getBoundingClientRect() };
 }
 
-// Shows the popup beside the selection. Absolute inside .pm-revise, which is
-// position relative, so it scrolls with the text and needs no scroll listener:
-// both rects are viewport based and their difference is the offset inside the
-// wrapper wherever the scroller happens to be.
+// Absolute inside the position: relative .pm-revise, so it scrolls with the text;
+// both rects are viewport based, so their difference is the offset in the wrapper.
 function positionRevisePopup(rect) {
     const panel = document.getElementById(PANEL_ID);
     const wrap = panel?.querySelector('.pm-revise');
@@ -4241,11 +3415,8 @@ function positionRevisePopup(rect) {
     if (!wrap || !popup) return;
     popup.classList.remove('pm-hidden');
     const wrapRect = wrap.getBoundingClientRect();
-    // Below the selection first: Android's own selection toolbar
-    // sits above the selection, and two controls on the same spot leave ours
-    // covered. Below is also where the eye already is when a drag ends. Above
-    // is the fallback for a selection at the very end of the content, where
-    // below would land outside the wrapper.
+    // Below the selection, since Android's selection toolbar sits above it; above only
+    // when below would leave the wrapper.
     const below = rect.bottom - wrapRect.top + 6;
     const top = below + popup.offsetHeight <= wrap.clientHeight
         ? below
@@ -4268,12 +3439,8 @@ function onReviseSelectionChange() {
     if (info) {
         if (revisePopupHide) { clearTimeout(revisePopupHide); revisePopupHide = 0; }
         reviseSelection = { block: info.block, start: info.start, end: info.end };
-        // One position write per frame: during a handle drag this
-        // event fires faster than paint, and every write-then-measure pair
-        // forced a layout of the whole dialog. The frame re-reads the live
-        // selection so the popup lands where the drag ended up, not where it
-        // began; if the selection died in between, the collapse fired its own
-        // event and the grace path below owns the hiding.
+        // One position write per frame: a handle drag fires this faster than paint. The
+        // frame re-reads the live selection; if it died, the grace path below hides.
         if (revisePopupFrame) return;
         if (typeof requestAnimationFrame !== 'function') { positionRevisePopup(info.rect); return; }
         revisePopupFrame = requestAnimationFrame(() => {
@@ -4285,10 +3452,8 @@ function onReviseSelectionChange() {
         });
         return;
     }
-    // The selection is gone, but the popup waits a moment before following it:
-    // on Android the tap that presses the popup collapses the selection first,
-    // and hiding here would take the target away in the middle of that tap. The
-    // stored offsets are what the click acts on, so the grace loses nothing.
+    // Hidden after a grace period: on Android, tapping the popup collapses the selection
+    // first, and the click then acts on the stored offsets.
     if (revisePopupHide) return;
     revisePopupHide = setTimeout(() => {
         revisePopupHide = 0;
@@ -4300,17 +3465,13 @@ function openReviseBox() {
     if (!reviseActive || !reviseSelection) return;
     const text = reviseTexts?.[reviseSelection.block];
     if (typeof text !== 'string') return;
-    // Clamped like applyReplacement clamps: the offsets came from a selection on
-    // the drawn text, but a redraw between then and this click makes them stale,
-    // and a smaller edit beats a crash.
+    // Clamped: a redraw since the selection can leave the offsets stale.
     const start = Math.max(0, Math.min(reviseSelection.start, text.length));
     const end = Math.max(start, Math.min(reviseSelection.end, text.length));
     if (start === end) return;
     reviseEditing = { block: reviseSelection.block, start, end, original: text.slice(start, end) };
     reviseSelection = null;
-    // The box opens below the whole block, which for a long body can be a
-    // screenful away from the selection; the draw scrolls it into view so the
-    // tap visibly did something.
+    // The box opens below the whole block, possibly a screen away, so the draw scrolls to it.
     reviseScrollToBox = true;
     try { document.getSelection()?.removeAllRanges(); } catch { /* best effort */ }
     hideRevisePopup();
@@ -4322,15 +3483,13 @@ function applyReviseBox() {
     const input = document.getElementById(PANEL_ID)?.querySelector('.pm-revise-input');
     if (!input) return;
     const { block, start, end, original } = reviseEditing;
-    // Typing nothing new is a cancel, not a step: a no-op entry in the list
-    // would offer an undo that undoes nothing.
+    // Unchanged text is a cancel, not a no-op step.
     if (input.value === original) { reviseEditing = null; scheduleDraw(); return; }
     const prev = reviseTexts[block];
     reviseTexts[block] = applyReplacement(prev, start, end, input.value);
     reviseSteps.push({ block, prevText: prev, from: original, to: input.value });
     reviseEditing = null;
-    // The stored drag described the text that just changed; nothing may act on
-    // those offsets again.
+    // The stored drag's offsets described the old text.
     reviseSelection = null;
     scheduleDraw();
 }
@@ -4355,15 +3514,10 @@ async function saveRevise() {
     const undo = replaceVersionUndo(persona);
     const result = makeReplaceVersion(persona, reviseBlocks, reviseTexts, name, freshContext()?.uuidv4, Date.now());
     if (!result) return;
-    // A section that vanished between opening and saving is said
-    // out loud, never silently dropped. The manager is modal, so normally none.
+    // Sections that vanished since opening are reported, never silently dropped.
     if (result.skipped.length) notify('warning', STRINGS.manager.reviseSkipped(result.skipped.join(', ')));
-    // commit writes the version-create line; the variant-add lines were written
-    // inside makeReplaceVersion, where the loop is. The reset only happens on an
-    // accepted write: a refusal redraws this screen with the working
-    // copies intact instead of discarding every revision along with the save.
-    // Logged as a version made, but it also moves every edited item's pick onto
-    // its new choice, so the prompt changes and has to be written.
+    // write: true, since the edited items' picks move to their new choices. Reset only
+    // on an accepted write; a refusal keeps the working copies and undoes the version.
     if (commit('version-create', result.version.name, startAvatar, { write: true })) resetRevise();
     else undoReplaceVersion(persona, result, undo);
 }
@@ -4372,17 +3526,12 @@ function reviseBox() {
     const box = el('div', 'pm-revise-box');
     const area = el('textarea', 'pm-revise-input');
     area.rows = 4;
-    // typed first: a draw that happened while the box was off screen (a tab
-    // away) parked the typing there, and rebuilding from the original would
-    // silently roll it back.
+    // typed first: a draw while the box was off screen parked the typing there.
     area.value = reviseEditing?.typed ?? reviseEditing?.original ?? '';
     area.setAttribute('aria-label', STRINGS.manager.reviseBoxAria);
-    // No keydown handler: Enter has to insert a newline here, same as the body
-    // editor: the composition guard has nothing to do in a textarea.
     box.append(area);
     box.append(actionsRow([
-        // 적용 edits only this screen's working copy; the guarded write is
-        // [버전으로 저장], which re-checks the target like every other save.
+        // Edits only the working copy; saveRevise is the guarded write.
         actionButton(STRINGS.common.apply, () => applyReviseBox(), true),
         actionButton(STRINGS.common.cancel, () => { reviseEditing = null; scheduleDraw(); }, true),
     ]));
@@ -4395,8 +3544,6 @@ function reviseScreen(writable, reason) {
     const blocks = reviseBlocks ?? [];
     if (blocks.length > 1) wrap.append(noteOf(STRINGS.manager.reviseOneItemOnly));
     blocks.forEach((block, index) => {
-        // The caption only exists when there is more than one item, because with
-        // one there is no boundary to explain.
         if (blocks.length > 1) wrap.append(el('div', 'pm-revise-caption', block.sectionName));
         const body = el('div', 'pm-revise-text');
         body.dataset.pmBlock = String(index);
@@ -4413,12 +3560,8 @@ function reviseScreen(writable, reason) {
         }
         wrap.append(list);
     }
-    // Hidden until a selection positions it. Click only; the stored offsets carry
-    // it past the selection collapsing.
-    const popup = el('button', 'pm-revise-popup pm-hidden', STRINGS.manager.revisePopup);
-    popup.type = 'button';
-    popup.addEventListener('click', () => openReviseBox());
-    wrap.append(popup);
+    // Hidden until a selection positions it; the click acts on the stored offsets.
+    wrap.append(button('pm-revise-popup pm-hidden', STRINGS.manager.revisePopup, () => openReviseBox()));
     const foot = el('div', 'pm-manager-editorfoot');
     foot.append(actionsRow([
         actionButton(STRINGS.manager.reviseUndo, () => undoRevise(), reviseSteps.length > 0 && !reviseEditing),
@@ -4436,26 +3579,20 @@ function fillVersionList(container, s, writable, reason) {
     const versions = persona.versions ?? [];
     const live = new Set(versions.map(version => rowKey('version', version.id)));
     if (expandedRow !== null && !live.has(expandedRow)) expandedRow = null;
-    // Not "버전 없음" but what to do about it, with the
-    // button that does it standing directly underneath.
     if (!versions.length) { container.append(emptyOf(STRINGS.manager.noVersionsHere)); return; }
 
     const ui = listUi.versions;
     let list = versions;
     if (ui.open) {
-        // Language answers computed once per version per fill: the chips and
-        // the filter below would otherwise compose every version twice per
-        // keystroke. A call-local map, not module state.
-        // The persona's own clock, read once for the whole fill.
+        // Once per version per fill: the chips and the filter would otherwise compose each twice.
         const stamp = modifiedAt(persona);
         const langCache = new Map();
         const langOf = version => {
             if (!langCache.has(version.id)) langCache.set(version.id, versionLanguage(persona, version, stamp));
             return langCache.get(version.id);
         };
-        // Language and tag filter chips, from what the versions
-        // actually carry right now. A filter naming something gone is dropped
-        // rather than silently emptying the list.
+        // Chips from what the versions carry now. A filter naming something gone is dropped
+        // rather than left to empty the list.
         const langs = [];
         const tags = [];
         for (const version of versions) {
@@ -4501,11 +3638,8 @@ function fillVersionList(container, s, writable, reason) {
 
     const paged = pageOf(list, ui.page, s.root?.settings?.pageSizeVersions ?? 20);
     ui.page = paged.page;
-    /* A binding can only be described honestly once the asset list is loaded, and
-       this tab never loaded it. Asked for once per persona, and only when a
-       binding actually exists to describe, so a persona with none pays nothing.
-       loadAssets sets assetState.avatar synchronously before its await, so this
-       cannot fan out into one request per frame. */
+    // Bindings are described from the asset listing, which this tab must load itself.
+    // loadAssets sets assetState.avatar before its await, so this fires once, not per frame.
     if (assetState.avatar !== targetAvatar && !assetState.loading && (persona.versions ?? []).length) {
         void loadAssets(targetAvatar);
     }
@@ -4517,15 +3651,11 @@ function fillVersionList(container, s, writable, reason) {
 }
 
 function versionsTab(s, writable, reason) {
-    // One screen, one task. While a revision is in progress the
-    // tab body IS the revise screen; the state lives in module variables, so
-    // stepping to another tab and back resumes it rather than losing it.
+    // Revise state lives in module variables, so leaving the tab and coming back resumes it.
     if (reviseActive) return reviseScreen(writable, reason);
     const box = el('div', 'pm-manager-tabbody');
     const persona = s.persona;
     if (!persona) return box;
-    // The way into the revise screen sits at the TOP of this
-    // tab, where a long version list cannot scroll it out of reach.
     box.append(actionsRow([
         actionButton(STRINGS.manager.reviseOpen, () => openRevise(), writable, '', reason),
         listSearchButton('versions'),
@@ -4541,16 +3671,8 @@ function versionsTab(s, writable, reason) {
 
 /* History tab */
 
-// 변경 기록 일괄 삭제 (user request). The structure log only ever grows, and on a
-// persona that has been edited for weeks it is fifty rows of noise between the
-// user and the one line they are looking for.
-//
-// Nothing is written afterwards. The first version left a line saying how many
-// rows had gone, reasoning from the expiry rule, where history that vanishes
-// without a trace is indistinguishable from data loss. That rule is about
-// records the extension dropped on its own; this is the user asking for an empty
-// list, and answering with a row is refusing the request. 기록 삭제 기록을 또
-// 남기면 의도에 어긋난다, in their words.
+// Clears the change log. Nothing is logged afterwards: the user asked for an empty
+// list (the expiry rule's trace line is for records the extension drops itself).
 async function clearLog() {
     const s = guardTarget();
     if (!s) return;
@@ -4561,8 +3683,7 @@ async function clearLog() {
     if (!(await askConfirm(STRINGS.manager.confirmClearLog(count)))) return;
     const after = guardTarget(startAvatar);
     if (!after) return;
-    // Counted again on the persona being written to: the question was on screen
-    // for as long as the user took, and a save can have added lines meanwhile.
+    // Counted again: a save may have added lines while the question was up.
     const cleared = (after.persona.log ?? []).length;
     after.persona.log = [];
     freshContext()?.saveSettingsDebounced?.();
@@ -4583,10 +3704,8 @@ function historyVariantSelect(persona) {
     const none = el('option', null, STRINGS.manager.historyChoicePlaceholder);
     none.value = '';
     select.append(none);
-    // Grouped by section, which is how the user thinks of a variant: 외형의 40대,
-    // not a bare label that two sections could both carry.
-    // Counts only: the option label is `${label} (${count})` and no preview from
-    // this call is ever rendered.
+    // Grouped by section, since two sections can share a choice label. Counts only: no
+    // preview from this call is rendered.
     for (const group of historyView(persona, null, null)) {
         const optgroup = el('optgroup');
         optgroup.label = group.sectionName;
@@ -4607,13 +3726,8 @@ function historyVariantSelect(persona) {
     return select;
 }
 
-// One column, three toggles. Two columns side by side do not fit
-// on a phone, and a diff that only uses colour is unreadable to a part of the
-// people who need it, so deletions are struck through and additions are underlined
-// with a background as well.
-// The panel shell rule applied to the history tab's text boxes: the shell keeps the
-// border and clips, the inner wrapper scrolls, so the box's own scrollbar stays
-// inside its rounded edge exactly as the panel's does.
+// The shell keeps the border and clips while the inner wrapper scrolls, so the
+// scrollbar stays inside the rounded edge, as on the panel.
 function textBox(extraClass) {
     const box = el('div', `pm-manager-text${extraClass ? ` ${extraClass}` : ''}`);
     const inner = el('div', 'pm-manager-textscroll');
@@ -4621,14 +3735,8 @@ function textBox(extraClass) {
     return { box, inner };
 }
 
-// One diff, kept until its inputs move. diffWords builds an LCS table over both
-// bodies: history.js documents 14ms and a transient 7.5MB Uint32Array at 2,800
-// characters a side, which is the size of this user's real descriptions. Nothing
-// above diffBlock checked whether anything had changed, so every pm:changed while
-// a snapshot sat selected in 차이 mode paid it again. Keyed by the two bodies
-// themselves rather than by (variantId, index, updatedAt), because that is what
-// the answer actually depends on and it cannot go stale behind a missed field.
-// Holds plain {type, text} records and two strings, so module state stays data.
+// One-slot memo: diffWords' LCS table is costly on long bodies (see history.js), and
+// every redraw would rebuild it. Keyed by the two bodies, which is all it depends on.
 let diffMemo = null;
 
 function diffPartsFor(before, after) {
@@ -4642,10 +3750,7 @@ function diffBlock(before, after) {
     const parts = diffPartsFor(before, after);
     const { box, inner } = textBox('pm-manager-diff');
     for (const part of parts) {
-        // Only the changed runs carry a class. Unchanged text used to be wrapped in
-        // a pm-diff-same span that no rule ever matched, which on a 3,000 character
-        // body is hundreds of elements built to look exactly like the text node
-        // underneath them.
+        // Unchanged runs stay plain text nodes; a span each would add hundreds of elements.
         if (part.type === 'del' || part.type === 'add') {
             inner.append(el('span', part.type === 'del' ? 'pm-diff-del' : 'pm-diff-add', part.text));
         } else {
@@ -4653,9 +3758,8 @@ function diffBlock(before, after) {
         }
     }
     if (!parts.truncated) return box;
-    // The no-silent-failure rule applied to a comparison: a diff that quietly stopped
-    // being a word diff looks exactly like a body that really was replaced whole,
-    // and the user has no way to tell which they are reading. So it says which.
+    // Says when the diff fell back to lines or the whole text, which would otherwise
+    // look like a body that really was replaced.
     const wrap = el('div');
     wrap.append(
         noteOf(parts.truncated === 'line'
@@ -4678,13 +3782,10 @@ function historyDetail(persona, variantId, snapshotText, writable, reason) {
         ['diff', STRINGS.manager.historyModeDiff],
     ]) {
         const active = historyMode === key;
-        // pm-manager-primary, not pm-manager-tab-active: that fill is reset by the
-        // button rule that follows it in style.css, so the pressed toggle drew
-        // its knocked-out type on no fill at all and vanished.
-        const btn = el('button', `pm-manager-btn${active ? ' pm-manager-primary' : ''}`, label);
-        btn.type = 'button';
+        // pm-manager-primary, not pm-manager-tab-active: a later button rule in style.css
+        // resets that fill, and the pressed toggle's text vanished.
+        const btn = button(`pm-manager-btn${active ? ' pm-manager-primary' : ''}`, label, () => { historyMode = key; scheduleDraw(); });
         btn.setAttribute('aria-pressed', active ? 'true' : 'false');
-        btn.addEventListener('click', () => { historyMode = key; scheduleDraw(); });
         toggles.append(btn);
     }
     box.append(toggles);
@@ -4700,8 +3801,6 @@ function historyDetail(persona, variantId, snapshotText, writable, reason) {
     box.append(actionsRow([
         actionButton(STRINGS.manager.historyRestore, () => restoreSnapshot(variantId, historyIndex), writable, '', reason),
     ]));
-    // Restoring snapshots the current text first, so it is itself
-    // undoable. Saying so is what makes the button safe to press.
     box.append(noteOf(STRINGS.manager.historyRestoreNote));
     return box;
 }
@@ -4712,8 +3811,6 @@ function historyTab(s, writable, reason) {
     if (!persona) return box;
 
     if (hasEvictionNotice(persona)) {
-        // The user has to be able to find out why their history
-        // got shorter, and this screen is where they come looking.
         box.append(bannerOf('pm-manager-warn', STRINGS.manager.evictionNotice));
     }
 
@@ -4729,9 +3826,7 @@ function historyTab(s, writable, reason) {
         if (!list.length) {
             box.append(emptyOf(STRINGS.manager.historyEmpty));
         } else {
-            // historyView is asked for the whole persona and the one group we want
-            // is picked out of it, so the ordering and the preview rule live in one
-            // place rather than being repeated here.
+            // Picked out of historyView, so ordering and previews follow one rule.
             const entry = historyView(persona, null, historyVariant)
                 .flatMap(group => group.variants)
                 .find(item => item.variantId === historyVariant);
@@ -4752,15 +3847,11 @@ function historyTab(s, writable, reason) {
         }
     }
 
-    // The other half: the structure log. Newest first, and capped on
-    // screen rather than in storage, because the cap here is about how much a phone
-    // can usefully show at once.
+    // The change log, newest first, capped on screen only (LOG_ROWS), not in storage.
     const logBox = el('div', 'pm-manager-logbox');
     const logHead = rowHead();
     logHead.append(el('div', 'pm-manager-head pm-manager-loghead', STRINGS.manager.logHead));
     const log = [...(persona.log ?? [])].reverse().slice(0, LOG_ROWS);
-    // At the top of the list, not under fifty rows of it: the whole point of the
-    // button is that the list has grown past the point of being read.
     logHead.append(actionButton(STRINGS.manager.logClear, () => clearLog(),
         writable && log.length > 0, '', log.length ? reason : ''));
     logBox.append(logHead);
@@ -4768,10 +3859,8 @@ function historyTab(s, writable, reason) {
     for (const line of log) {
         const row = el('div', 'pm-manager-logrow');
         row.append(el('span', 'pm-manager-historytime', formatTime(line.at)));
-        // Anything the map does not name falls back to the raw stored kind rather
-        // than to a blank cell, so a line written by a newer build stays legible.
-        // Own properties only: a stored kind of 'constructor' out of a hand
-        // edited settings.json must fall back, not render an inherited member.
+        // Unknown kinds (a newer build's) show raw. Own properties only, so a kind like
+        // 'constructor' from a hand-edited settings.json cannot hit an inherited member.
         row.append(el('span', 'pm-manager-logkind',
             Object.hasOwn(STRINGS.manager.logKinds, line.kind) ? STRINGS.manager.logKinds[line.kind] : String(line.kind ?? '')));
         row.append(el('span', 'pm-manager-name', previewText(line.detail, 30)));
@@ -4783,14 +3872,8 @@ function historyTab(s, writable, reason) {
 
 /* Assets tab */
 
-/* The folder as the user owns it.
-
-   The backups this feature writes sit in the same folder because it is the only
-   one we have, but they are our bookkeeping, not the user's pictures. Every
-   screen reads the folder through here or through assetLabels, so the backup
-   cannot be inserted into a chat, bound to a version, ticked into an asset
-   selection, or deleted by somebody who has no idea what it is. It is reached
-   only by [원본 되돌리기] on the 편집 tab, which is the one thing it is for. */
+// The folder without our avatar backups, which share it. Every screen reads assets
+// through here or assetLabels, so a backup is only reachable through image restore.
 function visibleAssets() {
     return withoutBackups(assetState.list);
 }
@@ -4801,72 +3884,51 @@ function assetLabels() {
 
 function assetStyleClass() {
     const style = getRoot()?.settings?.assetStyle ?? 'plain';
-    // Not quite the folding buildImgHtml does: that one applies the default first
-    // and strips after, this one strips first and defaults if nothing survived, so
-    // a style name made only of digits reads as a bare pm-asset- there and as
-    // pm-asset-plain here. What matters is the same in both, and is the reason the
-    // strip exists at all: a style name out of settings.json is user controlled and
-    // it is going into a class attribute.
+    // Stripped because the style name comes from settings.json and goes into a class
+    // attribute. (buildImgHtml strips after defaulting, so all-digit names differ.)
     return `pm-asset pm-asset-${String(style).replace(/[^a-z]/gi, '') || 'plain'}`;
 }
 
-// Insert, then close. This screen is a modal dialog, which makes the rest of the
-// document inert: the send box behind it cannot take focus, its caret cannot move,
-// and the user watching a full screen manager sees nothing happen at all. So the
-// value is built from the caret the field still carries from BEFORE this screen
-// opened, which is where the user actually was, and everything that needs the
-// field to be live is done once the screen is gone.
+// Insert, then close. The modal makes the send box inert, so the value is built from
+// the caret it kept from before this screen opened, and focus waits until we close.
 async function insertIntoSendBox(text) {
     const boxEl = document.getElementById('send_textarea');
     if (!boxEl) { notify('error', STRINGS.manager.sendBoxMissing); return; }
     if (!(await confirmDropWorking())) return;
     const next = insertAtCursor(boxEl.value, boxEl.selectionStart, boxEl.selectionEnd, text);
     boxEl.value = next.value;
-    // Closed straight through rather than through requestClose: that one asks a
-    // question when the editor is dirty, and the question is another popup. The
-    // editor's text is put away under its own key first, exactly as a tab switch
-    // does, so nothing is lost by not asking about it. The two working copies
-    // that would be lost were asked about above.
+    // Closed directly, not via requestClose: the editor's text is stashed, and the
+    // working copies were asked about above.
     stashDraft();
-    // The one exception to the reopen rule. The whole point of this action is to
-    // leave the user looking at the send box with the caret in it, and reopening
-    // the quick panel over that would undo exactly what the tap was for.
+    // No quick panel reopen: the user should land in the send box.
     closeManager(false);
-    // Only now, with the document no longer inert. A focus call against an inert
-    // element is dropped and the caret would then sit wherever the browser left it.
+    // Only now: focus on an inert element is dropped.
     try { boxEl.focus(); } catch { /* focus is best effort */ }
     if (typeof boxEl.setSelectionRange === 'function') {
         try { boxEl.setSelectionRange(next.caret, next.caret); } catch { /* best effort */ }
     }
-    // SillyTavern watches this field for its own auto resize and draft keeping, and
-    // a value assigned from script fires nothing by itself. Never measured on this
-    // build: if nothing listens, dispatching costs one synchronous no-op.
+    // SillyTavern's auto resize and draft keeping listen for input, which a scripted
+    // value assignment does not fire.
     boxEl.dispatchEvent(new Event('input', { bubbles: true }));
     notify('success', STRINGS.manager.sendBoxInserted);
 }
 
-// styleClass is resolved once by the caller and handed down: assetStyleClass goes
-// through getRoot(), which builds a fresh context and runs migrate() over every
-// persona and version, and it cannot change part way through one repaint. Calling
-// it per row meant a 20 row page paid 20 of each, on every keystroke in the asset
-// search.
+// styleClass comes from the caller: assetStyleClass goes through getRoot(), which
+// runs migrate() over everything, so it is resolved once per repaint, not per row.
 function assetRow(item, key, writable, reason, styleClass) {
     const rowId = rowKey('asset', item.label);
     const open = expandedRow === rowId;
     const row = el('div', `pm-manager-assetrow${open ? ' pm-manager-rowopen' : ''}`);
     registerRow(rowId, row, () => assetRow(item, key, writable, reason, styleClass));
     const head = rowHead();
-    // Built as an element rather than through buildImgHtml, which returns an HTML
-    // string and therefore needs DOMPurify. There is no string to sanitise here:
-    // the path is the one the server handed back and it is assigned as a property.
+    // An element rather than buildImgHtml's HTML string, which would need DOMPurify:
+    // the path is assigned as a property, so there is nothing to sanitise.
     const img = el('img', styleClass);
     img.src = item.path;
     img.alt = '';
     img.loading = 'lazy';
     head.append(img);
     head.append(rowName(rowId, [markedText('pm-manager-name', item.label, listUi.assets.open ? listUi.assets.query : '')]));
-    // This row exists to put the picture in the chat, so
-    // that is the button on it, and 삭제 waits in the drawer (rule 5).
     head.append(actionButton(STRINGS.manager.assetInsert, () => insertIntoSendBox(insertTagText(key, item.label)), true,
         STRINGS.manager.assetInsertTitle));
     head.append(moreButton(rowId));
@@ -4879,22 +3941,20 @@ function assetRow(item, key, writable, reason, styleClass) {
     return row;
 }
 
-// The per version asset selection, drawn on the version it belongs to. null means
-// 전체, so every box is ticked and unticking one is what materialises the list.
+// A version's asset selection. null means all files, so every box is ticked and
+// unticking one materialises the list.
 function versionAssetBlock(version, writable) {
     const box = el('div', 'pm-manager-assetsel');
     const labels = assetLabels();
     const all = !Array.isArray(version.assetSelection);
     box.append(el('div', 'pm-manager-picklabel',
         all ? STRINGS.manager.assetSelectionAll : STRINGS.manager.assetSelectionSome(version.assetSelection.length)));
-    // The version tab fetches the listing itself (versionsTab), so the only
-    // states left to explain are a failed listing and one still on its way.
+    // The versions tab loads the listing, so only failure and loading are left to explain.
     if (assetState.avatar === targetAvatar && assetState.error) {
         box.append(noteOf(STRINGS.manager.imageListingFailed(assetState.error)));
         return box;
     }
-    // Same reason as versionImageBlock above: the list being empty because the
-    // request has not come back is not the list being empty.
+    // Still loading is not an empty folder.
     if (assetState.avatar !== targetAvatar || assetState.loading) {
         box.append(noteOf(STRINGS.manager.assetLoading));
         return box;
@@ -4916,10 +3976,8 @@ function versionAssetBlock(version, writable) {
     return box;
 }
 
-// The empty state carries the button that fills it, and a bare file input is not
-// a button: the phone draws it as a second control
-// with a label of the browser's choosing. So the button is ours and the input
-// behind it is display none, exactly as the settings screen's import control does.
+// Our button over a hidden file input: a phone draws a bare input as a second control
+// with a label of the browser's choosing.
 function uploadRow(writable, reason) {
     const row = el('div', 'pm-manager-upload');
     const input = el('input', 'pm-manager-file pm-hidden');
@@ -4930,8 +3988,7 @@ function uploadRow(writable, reason) {
     input.setAttribute('aria-label', STRINGS.manager.assetUploadAria);
     input.addEventListener('change', () => {
         const files = [...(input.files ?? [])];
-        // Cleared before the upload so the same file can be picked again after a
-        // failure; a file input holding the previous choice fires no change event.
+        // Cleared first so picking the same file again still fires change.
         input.value = '';
         if (files.length) uploadAssets(files);
     });
@@ -4944,11 +4001,8 @@ function assetsTab(s, writable, reason) {
     const persona = s.persona;
     if (!persona) return box;
 
-    // Lazily, and only for the persona this screen points at. loadAssets sets its
-    // avatar synchronously before it awaits, so the next draw sees a match and this
-    // cannot turn into a request per frame. A listing already in flight for another
-    // persona is not waited for: it publishes nothing once this line has moved the
-    // avatar out from under it.
+    // loadAssets sets its avatar before awaiting, so this fires once; a listing still in
+    // flight for another persona then publishes nothing.
     if (assetState.avatar !== targetAvatar) {
         loadAssets(targetAvatar);
         box.append(noteOf(STRINGS.manager.assetLoading));
@@ -4956,26 +4010,19 @@ function assetsTab(s, writable, reason) {
     }
     if (assetState.loading) { box.append(noteOf(STRINGS.manager.assetLoading)); return box; }
 
-    // A listing failure disables this tab and says why, with the
-    // status the server gave. The rest of the screen keeps working.
     const shared = getState();
     const sharedError = (shared?.avatar === targetAvatar) ? shared.assetError : null;
     const error = assetState.error ?? sharedError;
     if (error) {
         box.append(bannerOf('pm-manager-warn', STRINGS.manager.assetListFailed(error)));
-        // refreshAssetViews and not loadAssets: the error drawn above is whichever
-        // of the two listings failed, and this tab reads BOTH. Retrying only our
-        // own left state.js's error standing, so a retry that actually succeeded
-        // redrew the same failure screen and there was no way out of it but a
-        // persona switch.
+        // refreshAssetViews, not loadAssets: the error may come from state.js's listing,
+        // which has to be retried too.
         box.append(actionsRow([actionButton(STRINGS.manager.assetRetry, () => refreshAssetViews(targetAvatar), true)]));
         return box;
     }
 
     const key = resolveFolderKey(s.root, targetAvatar);
     box.append(noteOf(STRINGS.manager.assetFolder(key)));
-    // The sentence says what to do and the upload button
-    // is the next thing under it.
     if (!visibleAssets().length) box.append(emptyOf(STRINGS.manager.assetNone));
     box.append(uploadRow(writable, reason));
     if (visibleAssets().length) {
@@ -4997,9 +4044,7 @@ function fillAssetList(container, s, writable, reason) {
     if (expandedRow !== null && !live.has(expandedRow)) expandedRow = null;
     const folderKey = resolveFolderKey(s.root, targetAvatar);
     const ui = listUi.assets;
-    // Deleting the last asset hides the search controls but used to leave the
-    // query behind, showing "맞는 것이 없다" under "에셋 없음" with nothing on
-    // screen to clear it. An empty listing resets the search.
+    // An empty listing hides the search controls, so it also resets the search.
     if (!visibleAssets().length) { Object.assign(ui, emptyListUi()); return; }
     let list = visibleAssets();
     const query = ui.open ? ui.query.trim() : '';
@@ -5023,9 +4068,7 @@ function fillAssetList(container, s, writable, reason) {
 
 /* Labels tab */
 
-// Making a label lives in both screens now. Enter is guarded by
-// isComposingKey exactly like every other text entry point here, so a hangul
-// composition commit cannot fire it.
+// Enter is guarded by isComposingKey, so a hangul IME commit cannot submit.
 function newLabelRow(writable) {
     const row = el('div', 'pm-quickbar-newlabel');
     const input = el('input', 'pm-quickbar-newlabel-input');
@@ -5035,13 +4078,11 @@ function newLabelRow(writable) {
     input.setAttribute('aria-label', STRINGS.manager.newGroupAria);
     const submit = () => {
         if (!input.value.trim()) return;
-        // addLabel only schedules the redraw, so this clears the live field the
-        // user is still looking at rather than one that has been replaced.
+        // addLabel only schedules the redraw, so this field is still the live one.
         if (!addLabel(input.value)) return;
         input.value = '';
-        // Submitting ends the typing session. Without this the redraw waits for a
-        // blur that has no reason to come, and the label just made would not show
-        // up under the user's finger.
+        // Ends the typing session: the deferred redraw would otherwise wait for a blur that
+        // never comes.
         input.blur();
     };
     input.addEventListener('keydown', e => {
@@ -5056,34 +4097,28 @@ function newLabelRow(writable) {
     return row;
 }
 
-function labelsTab(ctx, s) {
+function labelsTab(s) {
     const box = el('div', 'pm-manager-tabbody');
     box.append(actionsRow([listSearchButton('groups')]));
     if (listUi.groups.open) box.append(listSearchRow('groups'));
     const list = el('div');
     list.dataset.pmList = 'groups';
-    fillGroupList(list, ctx, s);
+    fillGroupList(list, s);
     box.append(list);
     box.append(newLabelRow(rosterWritable(getState())));
     return box;
 }
 
-function fillGroupList(container, ctx, s) {
+function fillGroupList(container, s) {
     container.replaceChildren();
-    // Enabled from EXACTLY what the four handlers gate on. The screen wide flag is
-    // computed from targetState(), whose readOnly comes from getRoot() rather than
-    // from the shared cache, so a cache
-    // that has not been built yet left every button here live and every tap on one
-    // silent. One source, one answer.
+    // Gated by rosterWritable(getState()), exactly what the label handlers check: the
+    // screen-wide flag reads getRoot() and can disagree, leaving live buttons that refuse.
     const writable = rosterWritable(getState());
     const labels = s.root?.labels ?? [];
-    // A member id whose persona SillyTavern no longer has is filtered out of the
-    // count but never deleted, because a persona removed by mistake is sometimes
-    // restored. groupRow counts.
+    // Members whose persona SillyTavern no longer has are left out of groupRow's count
+    // but never deleted: a persona removed by mistake is sometimes restored.
     const live = new Set(labels.map(label => rowKey('group', label.id)));
     if (expandedRow !== null && !live.has(expandedRow)) expandedRow = null;
-    // The empty state says what to type and which button
-    // makes it, and newLabelRow below is where both of those are.
     if (!labels.length) { container.append(emptyOf(STRINGS.manager.groupsEmpty)); return; }
     let list = labels;
     const query = listUi.groups.open ? listUi.groups.query.trim() : '';
@@ -5098,9 +4133,8 @@ function fillGroupList(container, ctx, s) {
     for (const label of list) container.append(groupRow(label, query, writable));
 }
 
-// One group, as its own function so opening it, or ticking the persona in or out
-// of it, rebuilds this row alone. The count is worked out here for the same
-// reason: a count handed in by the list would be the count before the tick.
+// One group row, rebuilt alone on open or membership change; the count is computed
+// here so a rebuild never shows the count from before the tick.
 function groupRow(label, query, writable) {
     const key = rowKey('group', label.id);
     const open = expandedRow === key;
@@ -5114,9 +4148,6 @@ function groupRow(label, query, writable) {
         el('span', 'pm-manager-count', STRINGS.manager.groupMemberCount(count)),
     ]));
     const member = (label.members ?? []).includes(targetAvatar);
-    // The other half of the same rule, as actionButton states it: a disabled control
-    // carries its reason as text, because a tooltip needs a hover and a touch
-    // screen has none.
     const reason = targetAvatar ? (writable ? '' : rosterRefusal()) : STRINGS.manager.groupPickPersonaFirst;
     head.append(actionsRow([
         actionButton(member ? STRINGS.manager.groupDetach : STRINGS.manager.groupAttach,
@@ -5152,31 +4183,24 @@ function personaPickerButton(ctx) {
     }
     const name = (targetAvatar && ctx?.powerUserSettings?.personas?.[targetAvatar]) || targetAvatar || STRINGS.manager.noPersona;
     btn.append(el('span', 'pm-manager-name', name));
-    // The open state is drawn, not hovered.
     btn.append(el('span', 'pm-manager-caret', pickerOpen ? '▲' : '▼'));
     btn.title = STRINGS.manager.pickerTitle;
     btn.setAttribute('aria-expanded', pickerOpen ? 'true' : 'false');
     btn.addEventListener('click', () => {
-        // Opening the picker replaces the whole body, editor included, so what is
-        // in it is put away first exactly as a tab switch does.
+        // The picker replaces the whole body, editor included.
         stashDraft();
         pickerOpen = !pickerOpen;
-        // This button always means the picker's own job, in both directions.
-        // Leaving it in copy mode would make the next tap on a row overwrite a
-        // persona for somebody who came here to switch which one they are editing.
+        // Always target mode from this button: a leftover copy mode would make the next row
+        // tap overwrite a persona.
         pickerMode = 'target';
-        // The row whose drawer was open is about to leave the screen with it.
         expandedRow = null;
         scheduleDraw();
     });
     return btn;
 }
 
-/* The picker's own view control (user request). Thirty personas told apart by a
-   face rather than by a name is why the quick panel has tiles, and the picker is
-   the same thirty rows. It writes the SAME setting the quick panel does: two
-   settings for one question would let the two lists disagree about how this user
-   wants their personas shown, and there is no reason they should. */
+// The picker's view mode: its own setting (pickerViewMode), separate from the quick
+// panel's.
 function pickerViewSelect() {
     const select = el('select', 'pm-manager-select');
     for (const key of ['list', 'tiles', 'tilesNamed']) {
@@ -5184,15 +4208,11 @@ function pickerViewSelect() {
         option.value = key;
         select.append(option);
     }
-    // The picker's own setting, not the quick panel's (user request). Sharing one
-    // meant choosing tiles in one place changed the other, and there was no way to
-    // have a list here and tiles there.
     const stored = getRoot()?.settings?.pickerViewMode;
     select.value = ['tiles', 'tilesNamed'].includes(stored) ? stored : 'list';
     select.setAttribute('aria-label', STRINGS.quick.viewCaption);
     select.addEventListener('change', () => {
-        // Re-resolved at tap time like every other handler here, and refused on a
-        // read only root rather than written and lost.
+        // Refused on a read-only root rather than written and lost.
         const root = getRoot();
         if (!root || root.readOnly) { scheduleDraw(); return; }
         root.settings.pickerViewMode = select.value;
@@ -5202,9 +4222,7 @@ function pickerViewSelect() {
     return select;
 }
 
-// One persona as a tile. The quick panel's own tile carries its select mode and
-// its switch behaviour, neither of which belongs here, so this is the same
-// markup and the same classes with this screen's one action on it.
+// The quick panel's tile markup and classes, without its select mode and switching.
 function pickerTile(ctx, avatar, name, query, named) {
     const current = avatar === targetAvatar;
     const tile = el('button', `pm-quickbar-tile${named ? ' pm-quickbar-tile-named' : ''}${current ? ' pm-quickbar-tile-active' : ''}`);
@@ -5212,12 +4230,10 @@ function pickerTile(ctx, avatar, name, query, named) {
     tile.setAttribute('aria-label', name);
     if (current) tile.setAttribute('aria-current', 'true');
     const imgbox = el('div', 'pm-quickbar-tileimgbox');
-    // The name sits under the image as well as inside it, for the same reason the
-    // quick panel does it: a thumbnail that fails to load leaves the name showing
-    // rather than an anonymous square.
+    // The name also sits under the image, so a thumbnail that fails to load still shows it.
     imgbox.append(markedText('pm-quickbar-tilename', name, query));
     const url = thumbnailUrl(ctx, avatar);
-    if (url) imgbox.append(pickerThumb('pm-quickbar-tileimg', url));
+    if (url) imgbox.append(pickerThumbs.take('pm-quickbar-tileimg', url));
     tile.append(imgbox);
     if (named) tile.append(markedText('pm-quickbar-tilelabel', name, query));
     tile.addEventListener('click', () => {
@@ -5229,9 +4245,7 @@ function pickerTile(ctx, avatar, name, query, named) {
 
 function personaPicker(ctx) {
     const box = el('div', 'pm-manager-picker');
-    // The picker does two jobs now, and which one a tap does is the thing the
-    // user has to know before their finger lands. So the copy job says so at the
-    // top, in a band, and carries its own way out.
+    // Copy mode announces itself before the tap, with its own way out.
     if (pickerMode === 'copy') {
         box.append(bannerOf('pm-manager-warn', STRINGS.manager.copyHead));
         box.append(noteOf(STRINGS.manager.copyGuide));
@@ -5251,7 +4265,7 @@ function personaPicker(ctx) {
 }
 
 function fillPickerList(container, ctx) {
-    harvestPickerThumbs(container, { reset: false });
+    pickerThumbs.harvest(container);
     container.replaceChildren();
     const personas = ctx?.powerUserSettings?.personas ?? {};
     let entries = Object.entries(personas);
@@ -5259,9 +4273,7 @@ function fillPickerList(container, ctx) {
         container.append(noteOf(STRINGS.manager.personasUnavailable));
         return;
     }
-    // The collator, same arguments as the quick panel's list. The
-    // avatar id breaks the ties so two same named personas do not swap places
-    // between draws.
+    // The avatar id breaks ties so same-named personas keep their order between draws.
     entries.sort((a, b) => {
         const byName = PICKER_COLLATOR.compare(String(a[1] ?? ''), String(b[1] ?? ''));
         if (byName !== 0) return byName;
@@ -5287,8 +4299,7 @@ function fillPickerList(container, ctx) {
     const viewMode = root?.settings?.pickerViewMode;
     if (viewMode === 'tiles' || viewMode === 'tilesNamed') {
         const grid = el('div', 'pm-quickbar-tiles');
-        // Same rule as the quick panel: a chosen column count wins, otherwise the
-        // responsive auto fill decides.
+        // A chosen column count wins; otherwise the CSS auto fill decides.
         const columns = Number(root?.settings?.rosterTileColumns ?? 0);
         if (columns >= 2) grid.style.gridTemplateColumns = `repeat(${columns}, minmax(0, 1fr))`;
         for (const [avatar, name] of paged.slice) {
@@ -5304,15 +4315,11 @@ function fillPickerList(container, ctx) {
     for (const [avatar, name] of paged.slice) {
         const row = el('div', 'pm-row pm-manager-personarow');
         const url = thumbnailUrl(ctx, avatar);
-        if (url) row.append(pickerThumb('pm-quickbar-rowimg', url));
+        if (url) row.append(pickerThumbs.take('pm-quickbar-rowimg', url));
         row.append(markedText('pm-manager-name', String(name ?? ''), query));
-        // Reading the list must not create an entry for
-        // anybody. getPersona only reads, and the label is how the user learns
-        // which personas this extension is actually carrying data for.
+        // getPersona only reads: listing must not create entries.
         if (!getPersona(root, avatar)) row.append(el('span', 'pm-manager-count', STRINGS.manager.notAdoptedTag));
         row.append(checkMark(avatar === targetAvatar));
-        // Which job the tap does is read at tap time, not baked in at draw time:
-        // pickerMode is one string and the handler outlives the draw that made it.
         makeRowActivatable(row, () => {
             if (pickerMode === 'copy') copyOnto(avatar);
             else selectTarget(avatar);
@@ -5325,22 +4332,11 @@ function fillPickerList(container, ctx) {
     if (pager) container.append(pager);
 }
 
-/* ── Drag to reorder items (user request) ────────────────────────────────────
-   Pointer events rather than HTML5 drag and drop: dragstart never fires on
-   Android Chromium for a touch, so the native API is desktop only, while pointer
-   events cover both from one code path.
-
-   The drag is armed by a handle, never by the row, because the row is already a
-   tap target that opens its drawer and a list of items is also something the user
-   scrolls through with a finger. A handle means a scroll gesture that starts on a
-   row is still a scroll.
-
-   Module state holds an id and numbers only, per the project rule: no node is
-   retained, and every frame re-queries what it needs from the id. */
-/* A finger on the framing picture or on a section's drag handle. A redraw
-   replaces the node the finger is on: the drag died and the picture froze until
-   the finger lifted, and the delayed redraw after a save is exactly what arrives
-   in the middle of a slow drag. Draws wait for the finger, then run once. */
+/* Drag to reorder items. Pointer events, since dragstart never fires for touch on
+   Android Chromium. Armed by a handle only, so a scroll starting on a row is still a
+   scroll. State is an id and numbers; every frame re-queries nodes by id. */
+// A finger on the framing picture or a drag handle. A redraw would replace the node
+// under it and kill the gesture, so draws wait for the finger, then run once.
 let gestureHeld = false;
 let drawWaitingOnGesture = false;
 
@@ -5354,12 +4350,9 @@ let dragSectionId = null;
 let dragOverSection = null;
 let dragAutoScroll = 0;
 
-// Called on every teardown as well as on a normal drop. drawManager replaces the
-// panel's children, which destroys the capturing handle, and a destroyed handle
-// never fires pointerup: without this the drag stayed armed, the auto-scroll rAF
-// kept running against a frozen coordinate from a dead node (a retained node, and
-// a scroll the user could not hold), and a later plain TAP on any handle reached
-// finish() with the stale target and silently moved a section.
+// Also called on every teardown: a redraw destroys the capturing handle, which then
+// never fires pointerup, leaving the drag armed, the auto-scroll running, and a later
+// tap on any handle moving a section to the stale target.
 function clearDragState() {
     dragSectionId = null;
     dragOverSection = null;
@@ -5371,21 +4364,9 @@ function clearDragState() {
     releaseGestureDraw();
 }
 
-// Which row the pointer is over, measured from the rows rather than listened for
-// on them: a pointer capture sends every move to the handle, so the rows never
-// see the pointer at all.
-//
-// Returns the row's SECTION ID, not its position. fillComposeList filters the
-// list when a search is open, so the rendered rows are a subset and their
-// positions are not indices into persona.sections. Returning a position and
-// handing it to reorderSection put a dragged item at the wrong place whenever a
-// search was active. The id survives the filter; dropSectionAt converts it.
-//
-// `after` is the other half of the answer, and the half that was missing. Every
-// row named here meant "insert ABOVE this one", so the one position a thirteen
-// item list most often needs - the end - could not be expressed at all: dragging
-// past the bottom named the last row and landed one slot short of it. A finger
-// below the last row's midpoint is asking to go after it, and now says so.
+// The row under the pointer, measured from row rects (the capture sends every move to
+// the handle). Answers a section id, since a search filters the rendered rows, and
+// after: true below the last row's midpoint, the only way to reach the end.
 function dropTargetAt(clientY) {
     const host = document.getElementById(PANEL_ID);
     const rows = [...(host?.querySelectorAll('[data-pm-section]') ?? [])];
@@ -5397,9 +4378,8 @@ function dropTargetAt(clientY) {
     return { sectionId: rows[rows.length - 1].dataset.pmSection ?? null, after: true };
 }
 
-// The rule is drawn on the edge the drop will land against, so what the screen
-// promises and what the write does cannot disagree: above the row for an insert
-// before it, below it for the one target that inserts after.
+// The rule is drawn on the edge the drop lands against: above the row, or below it
+// for after.
 function paintDragOver(target) {
     const host = document.getElementById(PANEL_ID);
     for (const row of host?.querySelectorAll('[data-pm-section]') ?? []) {
@@ -5409,14 +4389,9 @@ function paintDragOver(target) {
     }
 }
 
-// A drag that reaches the edge of the scroller has to keep going, or a 13 item
-// list cannot be reordered end to end on a phone that shows six of them.
-//
-// One geometry pass per frame (device jank), the same rule the visualViewport
-// handler and the revise popup follow: pointermove only records the finger, and
-// this frame does the row rects, the highlight and the scroll together, reads
-// before writes. It also keeps the drop target honest while the list scrolls
-// under a stationary finger, which per-move handling never saw.
+// Scrolls while the finger is near the scroller's edge. One geometry pass per frame,
+// reads before writes; pointermove only records the finger, and the frame also
+// tracks the target while the list scrolls under a still finger.
 function startAutoScroll(getY) {
     if (dragAutoScroll) return;
     const step = () => {
@@ -5442,24 +4417,19 @@ function dragHandle(sectionId, writable, reason) {
     handle.type = 'button';
     handle.setAttribute('aria-label', STRINGS.manager.dragHandle);
     if (!writable) {
-        handle.disabled = true;
-        handle.classList.add('pm-disabled');
+        disable(handle);
         if (reason) handle.dataset.pmReason = reason;
         return handle;
     }
     let lastY = 0;
-    // Whether any pointermove fired this drag. The frame loop computes a target
-    // even under a stationary finger (the row the handle itself is in), so
-    // without this a plain press-and-release would reach dropSectionAt, fail the
-    // same-index check and redraw the whole panel for a tap that moved nothing.
+    // Whether any pointermove fired: the frame loop finds a target even under a still
+    // finger, so a plain tap would otherwise redraw the panel for nothing.
     let moved = false;
     handle.addEventListener('pointerdown', e => {
-        // Left button or touch only, and the capture keeps every later move on
-        // this element even as the rows move under the finger.
+        // Left button or touch only; the capture keeps later moves on this handle.
         if (e.button !== undefined && e.button !== 0) return;
         e.preventDefault();
-        // Cleared here too: a tap with no movement fires no pointermove, so a
-        // leftover target from an interrupted drag would be used as this one's.
+        // A tap fires no pointermove, so a stale target from an interrupted drag must go.
         dragOverSection = null;
         dragSectionId = sectionId;
         moved = false;
@@ -5471,64 +4441,47 @@ function dragHandle(sectionId, writable, reason) {
     handle.addEventListener('pointermove', e => {
         if (dragSectionId === null) return;
         e.preventDefault();
-        // Only the finger position. pointermove outruns frames on the device, and
-        // the row rects it used to read here forced a layout per event against
-        // the classes and scrollTop being written around it; startAutoScroll's
-        // frame owns the per-frame work now, in read-then-write order.
+        // Only the finger position; startAutoScroll's frame does the layout work.
         moved = true;
         lastY = e.clientY;
     });
     const finish = () => {
         if (dragSectionId === null) return;
         const id = dragSectionId;
-        // Measured at release, from the finger's final position: the frame loop's
-        // copy exists for the highlight and can be a frame behind, or not exist
-        // at all when the release beats the first frame. A drag that never moved
-        // stays a tap and drops nothing.
+        // Measured at release: the frame loop's target can be a frame behind, or missing if
+        // the release beats the first frame. A drag that never moved drops nothing.
         const onto = moved ? dropTargetAt(lastY) : null;
         clearDragState();
         if (onto) dropSectionAt(id, onto);
     };
     handle.addEventListener('pointerup', finish);
     handle.addEventListener('pointercancel', () => clearDragState());
-    // The browser drops the capture when the node leaves the document, which is
-    // the one teardown the handlers above cannot see.
+    // The capture is dropped when the node leaves the document, with no pointerup.
     handle.addEventListener('lostpointercapture', () => clearDragState());
     return handle;
 }
 
-// The write, guarded the same way every other write on this screen is: the header
-// can move the target between the gesture starting and it ending.
 function dropSectionAt(sectionId, target) {
     const after = guardTarget();
     if (!after) return;
     const persona = ensureShape(after.persona);
-    // The drop target is named, so the index is resolved against the data that
-    // exists NOW rather than against whatever the list looked like when the drag
-    // started. A section deleted mid-drag simply has no index and nothing moves.
+    // Indices resolved against the data now; a section deleted mid-drag has none and
+    // nothing moves.
     const sections = persona.sections ?? [];
     const onto = sections.findIndex(sec => sec.id === target?.sectionId);
     const from = sections.findIndex(sec => sec.id === sectionId);
     // Dropping an item on itself is a tap that travelled a few pixels, not a move.
     if (onto === -1 || from === -1 || onto === from) { scheduleDraw(); return; }
-    // reorderSection splices the item OUT first, which shifts every index after it
-    // down by one, so a downward drag landed one slot past the line the user was
-    // looking at: A dropped above C gave B,C,A,D where the rule promised B,A,C,D.
-    // Upward drags were already right, which is why it looked like it worked.
-    // Neither unit test caught it: both sides were self-consistent and the seam
-    // between them was the wrong part.
+    // reorderSection splices the item out first, shifting later indices down by one, so
+    // a downward drag needs one less.
     const adjusted = onto > from ? onto - 1 : onto;
-    // And the one target that means "after this row" rather than "before it",
-    // which is the only way the end of the list is reachable by a finger.
     const toIndex = target?.after ? adjusted + 1 : adjusted;
     if (!reorderSection(persona, sectionId, toIndex)) { scheduleDraw(); return; }
     const name = (persona.sections ?? []).find(sec => sec.id === sectionId)?.name ?? '';
     commit('section-move', name);
 }
 
-// The band under the tab strip: the tab's name, set large, once. It used to be
-// repeated three times across the band with the outer two as outlines (the
-// reference's wordmark), and the user asked for one word in the middle.
+// The band under the tab strip: the tab's name, set large.
 function bandRow(word) {
     const band = el('div', 'pm-band');
     band.append(el('span', 'pm-band-word', word));
@@ -5536,10 +4489,8 @@ function bandRow(word) {
 }
 
 function headerRow(ctx) {
-    // pm-mass makes this block the panel's one solid shape, with the drip edge and
-    // the detached droplet hanging out of its bottom (style.css, "The liquid
-    // edge"). Both are pseudo-elements, so nothing operable lives in the
-    // decoration and the row's own children are unaffected.
+    // pm-mass draws the solid block and its drip edge with pseudo-elements (style.css),
+    // so nothing operable lives in the decoration.
     const head = el('div', 'pm-manager-header pm-mass');
     head.append(personaPickerButton(ctx));
     head.append(actionButton(STRINGS.common.close, () => requestClose(), true));
@@ -5557,19 +4508,11 @@ function tabsRow() {
         btn.setAttribute('aria-selected', active ? 'true' : 'false');
         btn.addEventListener('click', () => {
             if (managerTab === key) return;
-            // R2: the editor is about to leave the screen, and what is in it is
-            // kept under this variant's key rather than dropped. A confirmation
-            // here would be a question the user has to answer to change tab.
             stashDraft();
-            // The picker covers the whole body and returns before the tab content
-            // is ever built, so pressing a tab underneath it moved the underline
-            // and left the same picker on screen - in copy mode, still armed to
-            // copy onto whatever row was tapped next.
+            // The picker covers the tab body, so a tab tap closes it, copy mode included.
             pickerOpen = false;
             pickerMode = 'target';
             managerTab = key;
-            // The open row belongs to the tab being left, and every tab keys its
-            // rows differently, so it has nothing to reopen on the new one.
             expandedRow = null;
             scheduleDraw();
         });
@@ -5581,55 +4524,35 @@ function tabsRow() {
 function drawManager() {
     const panel = document.getElementById(PANEL_ID);
     if (!panel) return;
-    // Read once per draw, from SillyTavern's own controls, and not carried across
-    // frames: the list belongs to whatever SillyTavern has in the document now.
     enumCache = null;
     applyShapeClass(panel);
     if (gestureHeld || dragSectionId !== null) { drawWaitingOnGesture = true; return; }
     drawWaitingOnGesture = false;
     rowNodes.clear();
-    // A redraw destroys the capturing handle, so any drag in flight is over
-    // whether the pointer knows it or not.
     clearDragState();
-    // A redraw is already waiting for an input to be given up. Registering a
-    // second listener on a second input would draw twice for one release.
+    // Already waiting for a field to blur; a second listener would draw twice.
     if (drawDeferred) return;
-    // A background settings save lands some time after a tap, and rebuilding then
-    // takes the focused textarea out of the document mid composition, which loses
-    // a half typed hangul syllable. Wait for the user to leave the field. The
-    // listener is one shot and holds no node of its own.
+    // Wait for the user to leave a focused field: rebuilding takes it out of the
+    // document mid IME composition and loses a half-typed hangul syllable.
     const active = document.activeElement;
     if (active && panel.contains(active) && isTextEntry(active)) {
         drawDeferred = true;
-        // Released after the gesture that blurred the field has finished, never
-        // in the middle of it. The blur comes from the mousedown of the tap on
-        // [저장]; a rebuild before that tap's mouseup put a new node under the
-        // finger, the click went to a common ancestor, and [저장] did nothing
-        // (measured with a 60ms press in Chromium). See afterGesture in dom.js.
+        // Released after the blurring gesture ends (afterGesture): the blur comes on the
+        // tap's mousedown, and a rebuild before its mouseup would swallow the click.
         active.addEventListener('blur', () => afterGesture(() => { drawDeferred = false; scheduleDraw(); }), { once: true });
         return;
     }
 
-    // One read for the whole draw. Drawing is synchronous, so neither can go stale
-    // before the last group is built, and no handler keeps a reference to either.
+    // One read for the whole draw; drawing is synchronous and no handler keeps either.
     const ctx = freshContext();
     const s = targetState();
 
-    // The panel is a clipped shell and .pm-scroll is what
-    // scrolls, so the scrollbar is drawn inside the rounded border rather than
-    // over it. Everything below reads and writes the wrapper.
-    //
-    // replaceChildren empties it, and an empty box has nothing to scroll, so the
-    // browser clamps scrollTop to 0 before the new content arrives. The same save
-    // and restore is applied to what the user has typed into the editor: a blur
-    // releases the deferral and schedules a draw, and that draw would otherwise
-    // rebuild the textarea from the stored text with the typing gone.
+    // .pm-scroll scrolls inside the clipped panel. Emptying it clamps scrollTop to 0, so
+    // the offset is saved and restored, as is editor typing: the draw a blur releases
+    // would otherwise rebuild the textarea from the stored text.
     const oldScroll = panel.querySelector('.pm-scroll');
-    // One offset per screen, not one for the whole manager. A single number was
-    // carried to whatever drew next: back from a body to the list landed at the
-    // top, a long 편집 tab opened 버전 halfway down, and the 25th persona picked
-    // in the picker opened its 편집 tab mid list. The screen being left keeps its
-    // offset; the screen being entered gets its own, or the top.
+    // One offset per screen: the screen being left keeps its offset, and the one entered
+    // gets its own, or the top.
     const screen = screenKey();
     if (lastScreen !== null && oldScroll) scrollByScreen.set(lastScreen, oldScroll.scrollTop);
     const scrollTop = screen === lastScreen ? (oldScroll?.scrollTop ?? 0) : (scrollByScreen.get(screen) ?? 0);
@@ -5638,47 +4561,30 @@ function drawManager() {
     const typed = (editing && editorDirty)
         ? { value: editing.value, start: editing.selectionStart, end: editing.selectionEnd }
         : null;
-    // The 수정 칸 gets the same treatment for the same race: a tap on [적용]
-    // blurs the field, the blur releases the draw deferral, and the rebuilt
-    // textarea would hand the click the original text instead of the typing.
+    // The revise edit box too, for the same race.
     const reviseField = panel.querySelector('.pm-revise-input');
     const reviseTyped = reviseField
         ? { value: reviseField.value, start: reviseField.selectionStart, end: reviseField.selectionEnd }
         : null;
-    // Parked on the module state as well, because the caret-preserving restore
-    // below only bridges two consecutive draws with the box in both. A draw
-    // that leaves the box out (tab switch, picker) would otherwise be the last
-    // time the typing existed anywhere. A plain string, per the rule
-    // at the top of this file.
+    // Also parked in module state: the restore below only bridges draws that both show
+    // the box, and a draw without it (tab switch, picker) would lose the typing.
     if (reviseEditing && reviseField) reviseEditing.typed = reviseField.value;
-    // The 전문 window has one field per body and no single one to restore, so its
-    // typing is parked on the working copies instead, which is what the rebuild
-    // draws from. Same race as the two above: a draw is the moment the fields
-    // stop existing, and it must not also be the moment the typing does.
+    // Full-text typing is parked on the working copies, which the rebuild draws from.
     harvestFullTexts();
 
-    // The scrolling box is kept and only its contents and the bar above it are
-    // replaced, for the quick panel's reason: a new box per draw stopped a fling
-    // dead, and a redraw arrives after every save.
+    // The scroll box itself is kept: a new one per draw would stop a fling dead.
     const keepScroll = !!oldScroll && oldScroll.parentNode === panel;
-    harvestPickerThumbs(oldScroll);
+    pickerThumbs.clear();
+    pickerThumbs.harvest(oldScroll);
     if (keepScroll) {
         for (const child of [...panel.children]) if (child !== oldScroll) child.remove();
         oldScroll.replaceChildren();
     } else {
         panel.replaceChildren();
     }
-    // The tab bar stays at the top, so changing tab never
-    // means scrolling back up first. The persona picker rides with it, because
-    // the 닫기 button lives there and a close that can scroll out of reach is the
-    // same complaint one level up. The bar sits OUTSIDE .pm-scroll, as a flex row
-    // of the panel above it: a sticky bar inside the scroller had content passing
-    // underneath, and the theme's translucent tint let that content show through.
-    // Out here nothing ever passes under it, at no compositing cost.
+    // Header, tabs and band stay on top, outside .pm-scroll: as a sticky bar inside it,
+    // content showed through the theme's translucent tint.
     const sticky = el('div', 'pm-manager-sticky');
-    // The band names the tab the user is on, in the reference's repeated-word
-    // form. It sits under the tab strip rather than replacing it: the strip is how
-    // you move between tabs, the band is what tells you where you landed.
     sticky.append(headerRow(ctx), tabsRow(), bandRow(STRINGS.manager.tabs[managerTab]));
     const scroll = keepScroll ? oldScroll : el('div', 'pm-scroll');
     if (keepScroll) panel.insertBefore(sticky, scroll);
@@ -5690,10 +4596,7 @@ function drawManager() {
     if (pickerOpen) {
         body.append(personaPicker(ctx));
         if (scroll.scrollTop !== scrollTop) scroll.scrollTop = scrollTop;
-        // The picker draws its own search row and returns before the tail of this
-        // function, so the focus request made by 검색 was never consumed: the field
-        // appeared, the caret stayed wherever it was, and on a phone the keyboard
-        // never came up. Every other list on this screen lands on its field.
+        // Returns before the tail below, so the search focus is taken here too.
         if (focusSearch) takeSearchFocus();
         return;
     }
@@ -5702,19 +4605,14 @@ function drawManager() {
         body.append(noteOf(STRINGS.manager.stateUnread));
         return;
     }
-    // ambiguous means ctx.js could not decide which persona is ACTIVE, which is
-    // what saveAndComposeFor refuses on, and readOnly means a newer build owns
-    // this data. Writing in either case would land somewhere we cannot vouch for,
-    // so every control that writes is disabled and the reason is on screen.
+    // readOnly means a newer build owns this data (ambiguous: see targetState); every
+    // writing control is disabled, with the reason on screen.
     const writable = !s.ambiguous && !s.readOnly && s.listed !== false;
-    // Computed once and handed to every tab, so a disabled
-    // button anywhere on this screen can say why in the same words.
     const reason = writeReason(s);
     if (s.ambiguous) body.append(bannerOf('pm-manager-warn', STRINGS.manager.ambiguous));
     if (s.readOnly) body.append(bannerOf('pm-manager-warn', STRINGS.common.readOnly));
 
     if (!s.avatar) {
-        // No persona selected is a message, never a blank screen.
         body.append(noteOf(STRINGS.manager.pickPersonaHere));
         return;
     }
@@ -5722,61 +4620,45 @@ function drawManager() {
         body.append(bannerOf('pm-manager-warn', STRINGS.manager.personaGone));
     }
 
-    // 그룹 is shared by every persona and reads nothing of this one, so it is not
-    // held behind 관리 시작: with an unadopted persona on screen, making a group
-    // used to mean adopting a persona first.
+    // Labels are shared and read nothing of this persona, so the tab works before adoption.
     if (!s.persona && managerTab === 'labels') {
-        // No heading of its own: the tab strip and the band above already name
-        // the tab, and a third copy of 그룹 under them was noise.
+        // No heading: the tab strip and the band already name the tab.
         const group = el('div', 'pm-manager-group');
         group.append(el('div', 'pm-manager-tabdesc', STRINGS.manager.tabDescriptions.labels));
-        group.append(labelsTab(ctx, s));
+        group.append(labelsTab(s));
         body.append(group);
         if (scroll.scrollTop !== scrollTop) scroll.scrollTop = scrollTop;
-        // This branch returns before the tail of drawManager too, and 검색 here
-        // opened its field with no caret and no keyboard.
+        // Returns before the tail too.
         if (focusSearch) takeSearchFocus();
         return;
     }
 
     if (!s.persona) {
-        // adoptFor seeds the first variant from the existing
-        // description, losslessly, and creates nothing until the user asks.
         body.append(noteOf(STRINGS.manager.notAdopted));
         body.append(actionsRow([actionButton(STRINGS.manager.adoptButton, () => adoptTarget(), writable, '', reason)]));
         return;
     }
 
-    // An outside edit on the persona being edited has to be visible
-    // here, because switching version on top of it throws it away.
     if (ctx && hasDiverged(ctx, s.avatar, s.persona)) {
         body.append(bannerOf('pm-manager-warn', STRINGS.manager.divergedBanner));
     }
 
-    // A section that fell out of the prompt has to be visible, with
-    // its name, on every tab. Silence is the worst outcome available here.
     const missing = compose(s.persona).missing;
     if (missing.length) {
         body.append(bannerOf('pm-manager-warn', STRINGS.manager.missingBanner(missing.length, missing.join(', '))));
     }
 
-    // No heading of its own, as above: the tab strip and the band name the tab.
     const group = el('div', 'pm-manager-group');
-    // One line under the tab name saying what the
-    // tab is for, always drawn. It used to be nowhere at all, and a title attribute
-    // would have put it somewhere a phone cannot reach.
     group.append(el('div', 'pm-manager-tabdesc', STRINGS.manager.tabDescriptions[managerTab] ?? ''));
     if (managerTab === 'versions') group.append(versionsTab(s, writable, reason));
     else if (managerTab === 'history') group.append(historyTab(s, writable, reason));
     else if (managerTab === 'assets') group.append(assetsTab(s, writable, reason));
-    else if (managerTab === 'labels') group.append(labelsTab(ctx, s));
+    else if (managerTab === 'labels') group.append(labelsTab(s));
     else group.append(composeTab(s, writable, reason));
     body.append(group);
 
     if (scroll.scrollTop !== scrollTop) scroll.scrollTop = scrollTop;
-    // Restored into the rebuilt field, not the one that was read: that node is
-    // gone. Focus is deliberately not restored, because taking it back would
-    // reopen the keyboard the user just closed.
+    // Focus is not restored: it would reopen the keyboard the user just closed.
     if (typed) {
         const rebuilt = panel.querySelector('.pm-manager-editor-text');
         if (rebuilt) {
@@ -5808,36 +4690,24 @@ function drawManager() {
 function onOpenRequest(e) {
     const detail = e?.detail;
     if (!detail || !TAB_KEYS.includes(detail.tab)) return;
-    // Set before anything else: the dispatch is synchronous and the quick panel
-    // reads this flag on the line after it.
+    // First: the dispatch is synchronous and the quick panel reads this right after it.
     detail.handled = true;
     openManager(detail.tab);
-    // The quick panel's 검색 shortcut asks for the tab AND its search row open, so
-    // the user lands on a keyboard rather than on a list they then have to open
-    // search on. Set after openManager, which resets listUi.
+    // The quick panel's search shortcut also asks for the search row. Set after
+    // openManager, which resets listUi.
     if (detail.search && listUi[detail.tab]) {
         listUi[detail.tab].open = true;
-        // And LAND on it. Opening the row without this put the user at the top of
-        // the tab with the search somewhere below the fold, which is the whole of
-        // what the device reported about this button.
         focusSearch = detail.tab;
         scheduleDraw();
     }
 }
 
-// Called by the settings screen after 설정 가져오기 replaces the whole root. The
-// asset listing and the drafts both describe the tree that just went away: a
-// stale listing would offer files under the old folder key, and a draft would
-// resurface pre-import text as "저장하지 않았던 편집" on top of the imported body
-// whenever the file reuses the same ids, which re-importing an old export of the
-// same data always does. The manager is modal, so it cannot be open while the
-// drawer's import button is reachable; the redraw is belt and braces for any
-// path that ever changes that.
+// Called by the settings screen after an import replaces the root. The listing and
+// the drafts describe the old tree, and drafts would resurface old text over imported
+// bodies that reuse ids. The modal hides the import button; the redraw is a safeguard.
 export function invalidateManagerCaches() {
     assetState = { avatar: null, list: [], error: null, loading: false };
-    // An import replaces every body under us, so a diff keyed on the old ones is
-    // an answer about data that no longer exists. The language answers are keyed
-    // on ids the imported tree can reuse, so they go the same way.
+    // languageMemo is keyed on ids the imported tree can reuse.
     diffMemo = null;
     languageMemo.clear();
     clearDrafts();
@@ -5848,20 +4718,17 @@ export function mountManager() {
     if (mounted || typeof document === 'undefined') return;
     mounted = true;
     track(cleanups, document, 'pm:open-manager', onOpenRequest);
-    // The screen does not follow the active persona any more, because it writes to
-    // a target of its own. It still redraws on every state change: whether writing
-    // is allowed at all can change under it, and so can the data itself.
+    // Redraws on every state change, since writability and the data can change under it
+    // (the target itself does not follow the active persona).
     track(cleanups, document, 'pm:changed', () => {
         if (document.getElementById(HOST_ID)) scheduleDraw();
     });
 }
 
 export function unmountManager() {
-    // Teardown, not a close the user asked for: the usual reopen would put
-    // a quick panel on screen for an extension that is being taken apart.
+    // Teardown: no quick panel reopen.
     closeManager(false);
     runCleanups(cleanups);
-    // Teardown, not a screen the user stepped out of: nothing may survive it.
     clearDrafts();
     mounted = false;
     managerTab = 'compose';

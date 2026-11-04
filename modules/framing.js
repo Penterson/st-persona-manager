@@ -1,23 +1,11 @@
-// 페르소나 이미지 위치·크기 조절 (user request, 2026-10-24).
-//
-// A version's bound picture used to become the persona image exactly as uploaded:
-// SillyTavern crops an avatar only when its own crop dialog sends a crop, and this
-// extension writes through the same endpoint without one, so the server kept the
-// whole picture and every list and chat icon showed whatever its centre happened
-// to be. The user now frames it: a crop rectangle stored on the version, handed to
-// the endpoint as SillyTavern's own crop query when the picture is written.
-//
-// Pure: numbers in, numbers out. No document, so the node suite runs it as is.
+// Framing a version's picture: a crop stored on the version as fractions, sent as
+// SillyTavern's own crop query when written. Pure numbers, so the node suite runs it.
 
-/* The frame is the avatar's own shape. SillyTavern's server covers an avatar to
-   AVATAR_WIDTH x AVATAR_HEIGHT, 512 x 768 (src/constants.js, read 2026-10-24),
-   when resizing is on, and older builds always did. A crop of any other shape
-   would be cropped AGAIN, around its centre, by that cover; a 2:3 crop is only
-   scaled. */
-export const FRAME_ASPECT = 512 / 768;
+/* SillyTavern covers avatars to 512 x 768 when resizing (older builds always), so a
+   crop of any other shape would be cropped again around its centre; 2:3 is only scaled. */
+const FRAME_ASPECT = 512 / 768;
 
-// How far in the user may zoom: the crop never gets narrower than a fifth of the
-// largest crop the picture allows.
+// The crop never gets narrower than a fifth of the largest the picture allows.
 export const MAX_ZOOM = 5;
 
 const finite = n => typeof n === 'number' && Number.isFinite(n);
@@ -70,9 +58,7 @@ export function cropFromView(nw, nh, view, aspect = FRAME_ASPECT) {
     };
 }
 
-// The editor opens on the stored crop. A crop stored for a picture of another
-// shape (the file under that name was replaced) is read for its centre and zoom
-// and clamped, rather than thrown away.
+// A crop made on a picture of another shape keeps its centre and zoom, clamped.
 export function viewFromCrop(nw, nh, crop, aspect = FRAME_ASPECT) {
     const c = validCrop(crop);
     const base = coverSize(nw, nh, aspect);
@@ -110,9 +96,8 @@ export function previewBox(nw, nh, view, frameWidth, aspect = FRAME_ASPECT) {
     };
 }
 
-/* What is on the avatar file, as the skip check compares it: the label alone for
-   a picture written whole, the label and the crop for a framed one. Changing only
-   the framing must write again. */
+// The skip check's key for the avatar file: the label, plus the crop when framed, so
+// reframing alone still writes.
 export function writtenKey(label, crop) {
     const c = validCrop(crop);
     if (!label) return null;

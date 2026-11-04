@@ -1,52 +1,29 @@
-// Pure logic behind the quick switch bar.
-// Nothing here touches the DOM, so 검사/quickbar.test.mjs can import it in plain
-// Node. The DOM half lives in quickbar.js and must never be imported by a test.
+// Pure logic behind the quick switch bar. No DOM, so tests import it in plain Node;
+// the DOM half is quickbar.js, which tests must never import.
+import { findVersion } from './store.js';
 import { livingLabels, filterByLabel, sortEntries } from './roster.js';
 import { STRINGS } from './strings.js';
 import { chatSources, contextLanguage } from './search-pure.js';
 
-// Measured on the device. This build has no /persona-set-name, which is exactly
-// what the plan had hardcoded. These three
-// exist and share the same argument shape (unnamed[persona name], named[mode]).
-// The array is the preference order; the command actually used is discovered at
-// runtime from SlashCommandParser.commands so the next ST rename cannot repeat
-// the same failure silently.
-export const PERSONA_COMMAND_NAMES = Object.freeze(['persona-set', 'persona', 'name']);
+// Persona-switch slash commands in preference order, all taking (unnamed: persona name,
+// named: mode). Builds differ, so the one used is looked up in SlashCommandParser.commands.
+const PERSONA_COMMAND_NAMES = Object.freeze(['persona-set', 'persona', 'name']);
 
-// The words live in STRINGS; these exports are the names the
-// DOM half and the tests already reach them by.
+// Aliases kept for the names the DOM half and the tests import.
 export const NO_VERSION_LABEL = STRINGS.quick.iconNoVersion;
 export const MODIFIED_SUFFIX = STRINGS.quick.iconModifiedSuffix;
 
-// How many scheduler turns a persona switch gets before we call it a failure.
-// The switch is not synchronous: the slash command resolves before SillyTavern has
-// finished swapping name1, so reading name1 on the next line reports a failure that
-// did not happen. That false failure then fires the mode argument whose allowed
-// values were never measured, and leaves the panel holding an avatar that has
-// already moved. Claiming an unobserved success is forbidden, and this is the
-// other half of the same rule: do not claim an unobserved failure either.
-export const SWITCH_WAIT_TURNS = 10;
+// Scheduler turns a persona switch gets before it counts as failed. The slash command
+// resolves before SillyTavern has swapped name1, so checking at once reports false failures.
+const SWITCH_WAIT_TURNS = 10;
 
-// A persona switch flips values SillyTavern already has in memory; making a
-// persona writes a file on the server first. Ten turns is about a third of a
-// second, which is right for the first and would report the second as a failure
-// on any connection worth the name. Two seconds, and the caller says which of the
-// two it is waiting for rather than inheriting whichever number came first.
+// Creating a persona writes a file on the server first, so it gets about two seconds
+// where a switch (in memory only) gets a third of one.
 export const CREATE_WAIT_TURNS = 60;
 
-// One scheduler turn. requestAnimationFrame is the right clock while the tab is
-// visible and never fires while it is hidden, so a timer runs alongside it and
-// whichever arrives first ends the turn. Waiting forever would be worse than
-// waiting too long.
-//
-// It lives here, next to the only function that consumes it, because there used
-// to be two of these in two files and one of them had the WRONG SHAPE: it took no
-// resolve and returned a promise instead, so waitFor's `new Promise(resolve =>
-// schedule(resolve))` was handed a resolve that nobody ever called and the await
-// never came back. 페르소나 복제 hung there, silently and forever, whenever
-// SillyTavern had not already finished by the first check. One exported turn and
-// a default below is what makes that unrepeatable rather than merely fixed.
-export const TURN_MS = 32;
+// One scheduler turn: calls resolve on the next animation frame or after TURN_MS, whichever
+// comes first, since requestAnimationFrame never fires in a hidden tab.
+const TURN_MS = 32;
 
 export function schedulerTurn(resolve) {
     let done = false;
@@ -55,10 +32,8 @@ export function schedulerTurn(resolve) {
     setTimeout(once, TURN_MS);
 }
 
-// Waits for a condition to hold, giving the page one scheduler turn between checks.
-// schedule is a parameter so a node test can drive the turns without a browser clock,
-// and the predicate is checked before the first wait so a switch that already landed
-// costs nothing. Returns whether the condition held in the end.
+// Polls predicate once per scheduler turn and returns whether it held in the end.
+// schedule(resolve) must call resolve; tests inject their own to drive the turns.
 export async function waitFor(predicate, schedule = schedulerTurn, turns = SWITCH_WAIT_TURNS) {
     for (let i = 0; i < turns; i++) {
         if (predicate()) return true;
@@ -67,25 +42,14 @@ export async function waitFor(predicate, schedule = schedulerTurn, turns = SWITC
     return !!predicate();
 }
 
-/* The SillyTavern popup probe. The long note above runPopup in quickbar.js says
-   what is being measured and why; these two are the decisions inside it, kept here
-   so a node test can check them without a document. None of this may end in a
-   screen that does nothing and explains nothing. */
+// The SillyTavern popup probe's decisions; runPopup in quickbar.js does the measuring.
 
-// How long a popup await may run before an unanswerable one is assumed. Every
-// screen this extension draws rides a modal dialog, which makes the rest of the
-// document inert, so a build whose popup is a plain div paints its question UNDER
-// our host and nothing can answer it. Four seconds is long enough that a user
-// reading the question is not interrupted and short enough that a hang gets fixed
-// while they are still looking at it.
+// A popup unanswered this long may be unreachable: our screens are modal dialogs, so a
+// build that draws its popup as a plain div puts it under our host, in the inert page.
 export const POPUP_STUCK_MS = 4000;
 
-// How many stuck windows a popup is re-examined over before the wait is left
-// alone for good. shouldSelfCorrect defers to any foreign dialog on screen, so a
-// single unrelated dialog that happened to be open at the four second mark used
-// to defeat the correction for that popup forever: nothing ever looked again.
-// Re-checking a bounded number of times covers the dialog that closes shortly
-// after our window; one that outlives every window is the documented tradeoff.
+// Stuck windows a popup is re-checked over. shouldSelfCorrect defers while a foreign
+// dialog is open, so this covers one that closes soon after; a longer one is accepted.
 export const POPUP_STUCK_CHECKS = 3;
 
 function asSet(value) {
@@ -93,17 +57,9 @@ function asSet(value) {
     return new Set(value ?? []);
 }
 
-// The verdict the popup probe reaches, as data. The three arguments are sets or
-// arrays of dialog identities: what was already open when we asked for a popup,
-// what was seen open at any point while we waited, and what is still open now.
-// True means this build draws its popup as a dialog, so it joins the same top
-// layer as our host and needs no help.
-//
-// A dialog counts only when it BOTH appeared during the window and is still open
-// at the end. The old probe counted anything that showed up, so another
-// extension's dialog flashing past recorded a div build as a dialog build, and
-// nothing ever revisits that verdict: every popup for the rest of the session
-// would then be drawn under our host with no way to answer it.
+// True when this build draws its popup as a dialog, in the same top layer as our host.
+// Only a dialog that is new AND still open at the end counts: another extension's dialog
+// flashing past must not fake the verdict, which is never revisited.
 export function popupVerdict({ before, during, openAtEnd } = {}) {
     const was = asSet(before);
     const still = asSet(openAtEnd);
@@ -113,28 +69,20 @@ export function popupVerdict({ before, during, openAtEnd } = {}) {
     return false;
 }
 
-// Whether a popup that is still unanswered is unanswered because the verdict above
-// was wrong. needsDrop true means we already dropped our host for this popup, so a
-// long wait is just a user reading; a foreign dialog on screen means the question
-// IS reachable and the wait is theirs to end. Only the third case, a long wait with
-// our host still up and nothing else open, has the shape of a mismeasurement.
+// Whether a long-unanswered popup means the verdict was wrong. Not if our host is already
+// dropped (the user is just reading) or a foreign dialog is open (the question is reachable).
 export function shouldSelfCorrect({ needsDrop, elapsedMs, foreignOpen } = {}) {
     if (needsDrop) return false;
     if (!(Number(elapsedMs) >= POPUP_STUCK_MS)) return false;
     return !foreignOpen;
 }
 
-// The controls the diverged banner offers, as data, so the read only rule is one
-// decision a node test can check rather than three event handlers in the DOM half.
-// 가져오기 overwrites the variant text and 되돌리기 rewrites the description, and both
-// used to run before state.js refused the save, which left the mutation sitting in
-// the live extensionSettings for SillyTavern to persist on its own next save. A
-// read only root has to lose the buttons, exactly like every other writing control.
+// The diverged banner's controls. Revert and absorb mutate settings before state.js can
+// refuse the save, and ST's next save would persist that, so read-only disables them.
 export function divergedActions(writable) {
     return [
         { key: 'revert', label: STRINGS.quick.divergeRevert, mutates: true, enabled: !!writable },
         { key: 'absorb', label: STRINGS.quick.divergeAbsorb, mutates: true, enabled: !!writable },
-        // Dismissing writes nothing, so it stays available in every state.
         { key: 'later', label: STRINGS.quick.divergeLater, mutates: false, enabled: true },
     ];
 }
@@ -142,19 +90,14 @@ export function divergedActions(writable) {
 export function pickPersonaCommand(commands) {
     if (!commands || typeof commands !== 'object') return null;
     for (const name of PERSONA_COMMAND_NAMES) {
-        // Own properties only. SlashCommandParser.commands is a plain object, so
-        // `'name' in commands` would also be true for anything reachable through
-        // Object.prototype, and we would then run a command ST does not have.
-        // Iterating our preference list rather than the object's keys is what makes
-        // the result independent of registration order.
+        // Own properties only: commands is a plain object and `in` would see Object.prototype.
         if (Object.hasOwn(commands, name) && commands[name]) return name;
     }
     return null;
 }
 
-// Control characters are folded by code point rather than by a regular expression
-// range, because writing that range needs backslash-u escapes and this repo has
-// been corrupted three times by escapes turning into the raw bytes they name.
+// Folded by code point, not a regex range: the range needs backslash-u escapes, and tools
+// have turned those into the raw bytes they name in this repo.
 function foldControls(text) {
     let out = '';
     for (const ch of text) {
@@ -165,74 +108,48 @@ function foldControls(text) {
 }
 
 export function quoteArg(value) {
-    // A newline terminates the command line and nothing after it can be escaped
-    // back into the argument, so folding is the only honest option. Personas on
-    // this device include CJK names such as 陆瑜, which pass through untouched.
+    // A newline would end the command line and cannot be escaped, so controls become spaces.
     const text = foldControls(String(value ?? ''))
-        // One pass with a callback so the backslash we add is never re-escaped.
-        // The pipe separates commands, braces open macros, and the quote would
-        // close the argument early.
+        // One pass, so an added backslash is never re-escaped. | separates commands, braces
+        // open macros, and " would close the argument.
         .replace(/[\\"|{}]/g, m => '\\' + m);
     return `"${text}"`;
 }
 
-// A node the user may be typing into, so a redraw has to wait for it. A hangul
-// composition lives in the element itself, and replacing that element throws away the
-// syllable being assembled.
-//
-// Only a textarea and this panel's one text input qualify. Every checkbox in the
-// label editor is an <input> too, Chromium focuses one when it is tapped, and a rule
-// that matched every input therefore set the deferral on a tap that involves no
-// typing at all: every redraw until that checkbox lost focus was dropped, so
-// unchecking the active chip's label left the row sitting in a list it had left.
-// The DOM half passes document.activeElement; a node is enough, nothing is stored.
+// Whether our data may be written at all: not when the active persona is ambiguous or the
+// root belongs to a newer build. Label and settings writes, which are not tied to one
+// persona, check only this.
+export function rosterWritable(s) {
+    return !!s && !s.ambiguous && !s.readOnly;
+}
+
+// A node the user may be typing into, where a redraw must wait: replacing it discards a
+// hangul composition in progress. Not every <input>: Chromium focuses a tapped checkbox,
+// and deferring on that would drop redraws while nobody is typing.
 export function isTextEntry(node) {
     const tag = node?.tagName;
     if (tag === 'TEXTAREA') return true;
     if (tag !== 'INPUT') return false;
-    // Every input this panel builds sets its type, and the DOM resolves the property
-    // to a lowercase string even when the attribute is missing or unknown. search
-    // joined text when the search boxes arrived: they compose hangul exactly like
-    // the label input, and a full redraw mid composition is what this defers.
+    // .type is always a lowercase string; search boxes compose hangul too.
     return node.type === 'text' || node.type === 'search';
 }
 
-// Whether a single pick names a section and a variant this persona actually has.
-// pickVariant used to write activePicks[sectionId] = variantId unchecked, and the
-// event it acts on can outlive the <select> that produced it: a native picker left
-// open across a redraw resolves against a node that is no longer in the document, so
-// the key it carries can belong to a persona that is no longer active. A foreign key
-// in activePicks never matches any version's picks, which is how it renders as a
-// permanent MODIFIED_SUFFIX on the icon.
+// Whether this persona has the section and variant: a native picker left open across a
+// redraw can resolve after the active persona moved, and a foreign pick would never match
+// a version, leaving the icon marked modified for good.
 export function pickApplicable(persona, sectionId, variantId) {
     if (!persona || !sectionId || !variantId) return false;
     if (!(persona.sections ?? []).some(section => section.id === sectionId)) return false;
     return (persona.variants?.[sectionId] ?? []).some(variant => variant.id === variantId);
 }
 
-// Whether this version belongs to this persona and can be applied to it as it
-// stands. applyVersion looks the version up before it awaits a confirmation, and the
-// active persona can move while that popup is open, so the object it holds may belong
-// to the persona the panel opened on rather than the one the write would land on.
-// Re-finding the version through here, on the persona resolved after the await, is
-// what keeps one persona's variant ids from being written onto another's picks.
-//
-// A pick that names a deleted variant fails too: applying it would put a pick in the
-// live combination that no longer selects anything, and the section it belongs to
-// would drop out of the composed description.
-//
-// A pick for a SECTION deleted since the version was saved is skipped. removeSection
-// leaves the key in every version on purpose (nothing is silently rewritten), and
-// compose reads only sections that exist, so the key selects nothing either way.
-// Failing on it made every version saved before a section delete unappliable for
-// good, with a reason pointing at a [⋯] whose detail has no row for a section that
-// is gone - nothing on screen could repair it.
+// Whether the version applies to this persona as it stands; re-run after any await, since
+// the active persona can move during a popup. A pick of a deleted variant fails; a pick of a
+// deleted section is skipped (removeSection leaves those keys and compose ignores them).
 export function versionApplicable(persona, versionId) {
-    const version = (persona?.versions ?? []).find(v => v?.id === versionId);
+    const version = findVersion(persona, versionId);
     if (!version) return false;
     const living = new Set((persona.sections ?? []).map(section => section?.id));
-    // Own enumerable keys only, which is what a picks object saved into settings.json
-    // carries; nothing reachable through Object.prototype is treated as a pick.
     for (const [sectionId, variantId] of Object.entries(version.picks ?? {})) {
         if (!living.has(sectionId)) continue;
         if (!pickApplicable(persona, sectionId, variantId)) return false;
@@ -240,12 +157,11 @@ export function versionApplicable(persona, versionId) {
     return true;
 }
 
-// The version is the one marked active and the live combination still equals it,
-// so applying it again would write the same text, log the same line and queue the
-// same picture upload a second time (a double tap did exactly that).
+// Active and unchanged: re-applying (say, a double tap) would repeat the write, log line
+// and picture upload.
 export function versionAlreadyApplied(persona, versionId) {
     if (!persona || persona.activeVersionId !== versionId) return false;
-    const version = (persona.versions ?? []).find(v => v?.id === versionId);
+    const version = findVersion(persona, versionId);
     return !!version && picksEqual(persona.activePicks, version.picks, livingSections(persona));
 }
 
@@ -253,10 +169,8 @@ function livingSections(persona) {
     return (Array.isArray(persona?.sections) ? persona.sections : []).map(section => section?.id).filter(Boolean);
 }
 
-/* Compared over the items that exist. Deleting an item removes it from the live
-   picks and leaves it in every saved version, so a whole-object comparison
-   called the active version modified the moment any item was deleted - the
-   (수정 있음) that versionApplicable's own rule already says is not true. */
+// Compared over living sections only: a deleted section leaves the live picks but stays
+// in saved versions, and must not mark the active version modified.
 function picksEqual(a, b, living) {
     const left = a ?? {};
     const right = b ?? {};
@@ -268,50 +182,31 @@ function picksEqual(a, b, living) {
     return true;
 }
 
-// What the icon label shows. Three states: no version selected, the selected
-// version, and the selected version with the current combination changed away
-// from it. The changed state must be visible, because silently
-// treating it as the saved version is how a user's combination disappears.
+// The icon label: no version, the active version's name, or that name marked modified,
+// so a changed combination never passes for the saved one.
 export function describeSelection(persona) {
     if (!persona) return NO_VERSION_LABEL;
-    // v?.id like every other reader: a hand-edited null entry survives migrate,
-    // and this runs on every paint of the icon.
-    const version = (persona.versions ?? []).find(v => v?.id === persona.activeVersionId);
+    // v?.id because a hand-edited null entry survives migrate.
+    const version = findVersion(persona, persona.activeVersionId);
     if (!version) return NO_VERSION_LABEL;
     const name = version.name ?? '';
-    // A version whose picks name a variant that was later deleted is not special
-    // here. Either the live picks moved to a surviving variant, in which case they
-    // differ and the label says so, or they still name the same dead id and the
-    // combination really is the saved one. The section that then drops out of the
-    // prompt is reported separately, from compose().missing.
+    // A pick of a since-deleted variant needs no special case here; compose().missing
+    // reports the section it drops.
     return picksEqual(version.picks, persona.activePicks, livingSections(persona)) ? name : name + MODIFIED_SUFFIX;
 }
 
-// An unrecognised key, including undefined on a settings object saved before this
-// feature existed, reads the same as the explicit default rather than throwing or
-// showing a blank control. The names themselves are STRINGS.quick.sortNames. Own
-// properties only, for the same reason pickPersonaCommand checks: sortBy is
-// whatever settings.json holds, and a value like 'constructor' must fall back
-// rather than print something from the prototype.
+// Unknown keys, including undefined from settings saved before sorting existed, fall back
+// to the name sort. Own properties only: 'constructor' must not reach the prototype.
 export function sortLabel(sortBy) {
     const names = STRINGS.quick.sortNames;
     if (typeof sortBy === 'string' && Object.hasOwn(names, sortBy)) return names[sortBy];
     return names.name;
 }
 
-// The chip row and persona list, built in one pass so the panel never
-// has to reimplement 21.4's fallback itself. personas is SillyTavern's own
-// avatarId -> name map (power_user.personas); root is our extension's data and is
-// only read here, never written, so calling this can never create a personas entry
-// (21.1's central rule). name1 is accepted for the same reason ctx.js's
-// resolveAvatar takes it alongside personas, even though today's sort and filter
-// logic does not need it.
-//
-// The 21.4 fallback (an active label that no longer exists, or one whose living
-// members are now empty, falls back to showing everything) is only computed here.
-// Persisting the correction back to settings.activeLabelId is the caller's job,
-// because only the caller knows whether writing is allowed right now.
-export function buildRosterView({ personas, name1 } = {}, root, collator) {
+// The chip row and persona list. personas is ST's avatar -> name map; root is only read, so
+// this never creates an entry. A missing or memberless active label falls back to showing
+// all; the caller persists that, since only it knows whether writing is allowed.
+export function buildRosterView({ personas } = {}, root, collator) {
     const stPersonas = personas ?? {};
     const settings = root?.settings ?? {};
     const chips = livingLabels(root?.labels, stPersonas);
@@ -333,22 +228,12 @@ export function buildRosterView({ personas, name1 } = {}, root, collator) {
     return { chips, entries, activeLabelId };
 }
 
-// What a persona row in the list adds about its versions, as
-// data, for two settings that are independent of each other: badge rides the name
-// line ("버전 3"), line is the version names on a row of their own underneath.
-// Either, both or neither, and the caller draws whatever is not null.
-//
-// A persona this extension has no entry for gets nothing at all, whichever
-// toggles are on. The list is SillyTavern's and most of it is not ours, so
-// hanging "버전 0" off thirty rows would bury the few that do carry our data.
-// An entry whose versions array is empty is the same case to the user, and reads
-// the same here.
+// A roster row's version info: badge (count beside the name) and line (names below), each
+// null when off. Personas without versions get neither, so ST's other personas stay clean.
 export function rosterVersionLine(persona, { count, names } = {}) {
     const versions = persona?.versions;
     if (!Array.isArray(versions) || versions.length === 0) return { badge: null, line: null };
     const badge = count ? STRINGS.quick.versionBadge(versions.length) : null;
-    // A blank name would print as a stray separator with nothing beside it, so it
-    // is skipped; if that leaves nothing at all there is no row to draw.
     const printable = names
         ? versions.map(version => String(version?.name ?? '').trim()).filter(name => name !== '')
         : [];
@@ -356,18 +241,9 @@ export function rosterVersionLine(persona, { count, names } = {}) {
     return { badge, line };
 }
 
-/* 언어별 이름 자동 적용 (user request). The decision, with no side effects: given
-   the language the chat is being held in, which name should this persona carry?
-
-   null means leave it alone, and there are four reasons for that answer:
-   no language decided, nothing registered for it, the persona already carries
-   it, or another persona already has that name. The last one matters most: two
-   personas sharing a name make the active one unknowable and every
-   write in this extension refuses from then on, so renaming INTO that state
-   automatically is the one outcome this feature must never produce.
-
-   The current name is read from the map by avatar rather than passed in, so a
-   caller holding a stale name cannot make this answer with it. */
+// The name this persona should carry in the chat's language, or null to leave it. Never one
+// another persona has: duplicate names make the active persona unknowable and block every
+// write. The current name is read from personas by avatar, never from a possibly stale caller.
 export function pickAutoName({ persona, lang, avatar, personas } = {}) {
     if (!lang || !avatar) return null;
     const wanted = persona?.names?.[lang];
@@ -383,13 +259,8 @@ export function pickAutoName({ persona, lang, avatar, personas } = {}) {
     return name;
 }
 
-/* What the language vote reads (search-pure.js contextLanguage), gathered from a
-   SillyTavern context. Pure: it only reads the object it is handed.
-
-   The character card comes from characters[characterId]; in a group chat, from
-   every member the group lists, since the conversation is held with all of
-   them. A card SillyTavern has loaded shallow (no description yet) still has
-   its name, and the name still votes. */
+// What search-pure.js contextLanguage votes on, read from a SillyTavern context. In a group
+// chat every member's card counts; a shallow-loaded card (no description yet) votes by name.
 export function languageContextOf(ctx) {
     const chat = Array.isArray(ctx?.chat) ? ctx.chat : [];
     const { user, reply, greeting } = chatSources(chat);
@@ -425,14 +296,8 @@ export function conversationLanguage(ctx) {
     return contextLanguage(languageContextOf(ctx)).lang;
 }
 
-/* 채팅 속 동명이인 (user request 2026-08-27). Renaming the ACTIVE persona changes
-   {{user}}, and {{user}} is what the model reads as the user's name. If the chat
-   already has somebody called that (the character, or a name on a past message),
-   the model now has two of them and no way to tell which is which.
-
-   Answers the colliding name, or null. The name only, never a rewrite of
-   anything: this extension does not touch a single character of chat text, and
-   the risk here is a collision, not a substitution. */
+// The chat name a rename of the active persona would collide with, or null: {{user}} would
+// match the character or a recent speaker. Reports only; chat text is never rewritten.
 export function nameCollides({ name, characterName, chat, scan = 40 } = {}) {
     const wanted = String(name ?? '').trim();
     if (!wanted) return null;
@@ -442,9 +307,7 @@ export function nameCollides({ name, characterName, chat, scan = 40 } = {}) {
     for (let i = chat.length - 1, seen = 0; i >= 0 && seen < scan; i--, seen++) {
         const message = chat[i];
         if (!message || message.is_system) continue;
-        // A past message of the user's own carries the name the persona had THEN.
-        // Matching it is not a collision: it is the same person under an older
-        // name, which is exactly what a per-language name is.
+        // The user's own past messages carry the persona's older names; not a collision.
         if (message.is_user) continue;
         const sender = String(message.name ?? '').trim();
         if (sender && sender === wanted) return sender;

@@ -1,15 +1,6 @@
-// The extension settings screen.
-//
-// Attached to #extensions_settings2 as an inline drawer, next to every other
-// extension's. The drawer toggle is ours rather than SillyTavern's delegated
-// .inline-drawer-toggle handler: that handler has never been measured on this
-// build, and a settings screen that cannot be opened at all is a worse outcome
-// than one that opens without the slide animation. The surrounding classes are
-// still SillyTavern's, so the header sits in line with its neighbours.
-//
-// Same rule as the other two screens: no handler here closes over a context, a
-// state snapshot or a node. Everything is looked up again when it runs, which is
-// why refreshSettings queries the panel rather than keeping the fields it built.
+// The extension settings screen, an inline drawer beside the other extensions' settings. It
+// toggles itself rather than through ST's .inline-drawer-toggle handler (see buildPanel).
+// No handler closes over a context, state or node; everything is looked up when it runs.
 import { MODULE_NAME, makeId, pruneEmpty, HEADING_FORMATS, TILE_SHAPES, ADOPT_MODES } from './store.js';
 import { getRoot, getState, readUsageBytes, refresh } from './state.js';
 import { freshContext, getPrecisePath, avatarBlockReport } from './ctx.js';
@@ -19,11 +10,9 @@ import { notify, askConfirm, scheduleAutoName, cancelAutoName } from './quickbar
 import { el, track, runCleanups, blockDrawerClose, isComposingKey } from './dom.js';
 import { invalidateManagerCaches } from './manager.js';
 import { clampSetting, SETTING_RANGES, TILE_COLUMN_CHOICES, serializeRoot, parseImportedRoot } from './manager-pure.js';
-// Every sentence the user reads in this drawer comes from there.
 import { STRINGS } from './strings.js';
 
-// index.js removes this id on teardown as a belt and braces measure, so the two
-// have to agree on it.
+// index.js also removes this id on teardown, so the two must agree on it.
 const PANEL_ID = `${MODULE_NAME}_settings`;
 const CONTENT_ID = `${PANEL_ID}_content`;
 const HOST_ID = 'extensions_settings2';
@@ -33,10 +22,8 @@ let cleanups = [];
 
 function save() {
     freshContext()?.saveSettingsDebounced?.();
-    // The quick bar reconciles its icon on this event and the manager redraws on
-    // it. SillyTavern's own SETTINGS_UPDATED only comes back after its debounce, so
-    // without this, flipping 입력창 아이콘 표시 looks like it did nothing for as long
-    // as that takes. Dispatching costs one synchronous pass over three listeners.
+    // The quick bar and manager redraw on pm:changed right away; ST's own SETTINGS_UPDATED
+    // only arrives after its save debounce.
     if (typeof document !== 'undefined') document.dispatchEvent(new CustomEvent('pm:changed'));
 }
 
@@ -44,12 +31,8 @@ function panel() {
     return typeof document === 'undefined' ? null : document.getElementById(PANEL_ID);
 }
 
-/* The per-variant cap, applied to history that already exists.
-
-   history.js enforces this one at the moment a snapshot is taken, which is the
-   only moment it can grow, so there is no sweep of its own over there. Lowering
-   the number is the other moment it can be exceeded, and it happens here. Drops
-   from the FRONT, exactly as snapshot() does, so the oldest go first. */
+// Applies a lowered per-variant cap to existing history; history.js only enforces it when a
+// snapshot is taken. Drops from the front, like snapshot(), so the oldest go first.
 function trimPerVariant(root, settings, now = Date.now()) {
     const cap = Number(settings?.historyPerVariant ?? 0);
     if (!Number.isFinite(cap) || cap < 0) return 0;
@@ -64,23 +47,15 @@ function trimPerVariant(root, settings, now = Date.now()) {
             if (cap === 0) delete history[variantId];
             else list.splice(0, list.length - cap);
         }
-        /* The rule history.js states where its own two sweeps obey it: history
-           that vanishes without a line is indistinguishable from data loss. This
-           sweep arrived without one, which made it the only way to delete stored
-           history and leave the 변경 기록 list saying nothing happened.
-
-           Logged as 이력 정리 with its own detail. It used to borrow the
-           history-expired kind, which reads 이력 기간 만료 on screen: a line
-           naming a cause (age) for a deletion made for another (count). */
+        // Deleted history always gets a log line, or it reads as data loss.
         if (mine) addLog(persona, 'history-evicted', STRINGS.manager.logDetails.trimmed(mine), now);
         dropped += mine;
     }
     return dropped;
 }
 
-/* Whether a new value for one of the three history caps can DESTROY what is
-   already stored. Raising a cap never can, and 0 means "never expire" for the age
-   cap, so there 0 is the loosest value rather than the tightest. */
+// Whether a new history cap value can delete stored history. For historyMaxDays 0 means
+// never expire, so there 0 is the loosest value, not the tightest.
 const HISTORY_CAPS = new Set(['historyMaxBytes', 'historyMaxDays', 'historyPerVariant']);
 
 function tightensCap(key, previous, next) {
@@ -94,8 +69,6 @@ function tightensCap(key, previous, next) {
 
 /* Field builders */
 
-// A caption over a group of rows. The drawer is twenty rows long, and without
-// these a user looking for the history caps had to read every row to find them.
 function sectionHead(text) {
     return el('div', 'pm-settings-section', text);
 }
@@ -118,10 +91,7 @@ function toggleField(key, labelText, hint) {
         const root = getRoot();
         if (!root || root.readOnly) { syncFields(); return; }
         root.settings[key] = input.checked;
-        // 언어별 이름 자동 적용 reads the chat, and the chat is already on screen
-        // when this is switched on. Waiting for the next message meant the switch
-        // looked like it had done nothing for as long as the user sat reading.
-        // The quick panel's own copy of this toggle has always done both.
+        // Auto naming acts on the chat already on screen instead of waiting for a message.
         if (key === 'autoLocalName') {
             if (input.checked) scheduleAutoName();
             else cancelAutoName();
@@ -132,11 +102,7 @@ function toggleField(key, labelText, hint) {
     return rowOf(labelText, input, hint);
 }
 
-// A number field that clamps on every way out of it. SETTING_RANGES states the
-// ranges and clampSetting owns them, so a value pasted in, typed past the end or
-// left empty comes back inside the range rather than being written through: a NaN
-// stored here reads back as "no cap at all", which is the one outcome the history
-// caps exist to prevent.
+// A number field; whatever is typed, pasted or left empty is stored through clampSetting.
 function numberField(key, labelText, hint) {
     const range = SETTING_RANGES[key];
     const input = el('input', 'pm-settings-number');
@@ -152,22 +118,14 @@ function numberField(key, labelText, hint) {
         const value = clampSetting(key, input.value);
         const previous = root.settings[key];
         if (value === previous) { input.value = String(value); return; }
-        /* A lowered cap that only applies to snapshots taken from now on is a
-           control that does nothing for the person who went looking for it: the
-           reason to lower it is the history that is already there. But it is also
-           a delete, and it used to happen on the change event with no question and
-           no trace - including when the box was merely EMPTIED, because an empty
-           box clamps to the shipped default and the shipped default is lower than
-           what most people raise these to. So the question is asked first, and
-           what went is said afterwards. */
+        // A tighter cap applies to existing history at once, so it is a delete: confirm first
+        // (even emptying the box clamps to a lower default) and report what went.
         const destructive = tightensCap(key, previous, value);
         if (destructive && !(await askConfirm(STRINGS.settings.confirmTightenCap))) {
-            // Nothing written. The field goes back to what is still stored.
             syncFields();
             return;
         }
-        // Re-read: the question above is an await, and an import can replace the
-        // whole root while it is on screen.
+        // Re-read after the await: an import can replace the whole root meanwhile.
         const after = getRoot();
         if (!after || after.readOnly) { syncFields(); return; }
         after.settings[key] = value;
@@ -178,139 +136,46 @@ function numberField(key, labelText, hint) {
                 + trimPerVariant(after, after.settings, now)
                 + enforceGlobalBudget(after, after.settings, now);
         }
-        // Written back into the field so the user sees what was actually stored
-        // rather than the out of range number they typed.
+        // Show the stored, clamped value rather than what was typed.
         input.value = String(value);
         save();
         if (dropped) notify('info', STRINGS.settings.historyTrimmed(dropped));
-        // The usage figure sits directly above these fields and has just stopped
-        // being true. refreshSettings recomputes it; syncFields alone does not.
+        // Dropped history changes the usage figure, which only refreshSettings recomputes.
         if (dropped) refreshSettings();
         else syncFields();
     };
     input.addEventListener('change', apply);
-    // There is nothing to compose in a numeric field on most
-    // keyboards, but the guard is on every keydown this extension listens to, so
-    // that the rule has no exceptions to remember.
+    // IME guard on every keydown, numeric fields included, so the rule has no exceptions.
     input.addEventListener('keydown', e => {
         if (isComposingKey(e)) return;
-        // blur only, and never apply() beside it. apply() stops at an await on
-        // the confirmation, control comes back here, and the blur that followed
-        // fired change and started a SECOND apply against a root the first one
-        // had not written yet: two questions about the same edit, both live, and
-        // cancelling one did not undo confirming the other. The blur alone raises
-        // change exactly once, which is the path this field already takes when
-        // the user taps elsewhere.
+        // Blur only, never apply() too: apply() awaits a confirmation, and the blur's change
+        // event would start a second one. The blur alone fires change exactly once.
         if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
     });
     return rowOf(labelText, input, hint);
 }
 
-// The tile column count: a fixed choice list, because a free
-// number would invite widths no phone can draw (1 or 40 columns).
-function tileColumnsField() {
+// A setting picked from a fixed list of [value, label]; parse turns the option value into
+// the stored one. Fixed lists keep values a screen cannot draw out of settings.
+function selectField(key, choices, labelText, hint, parse = value => value) {
     const select = el('select', 'pm-settings-select');
-    select.dataset.pmKey = 'rosterTileColumns';
-    for (const value of TILE_COLUMN_CHOICES) {
-        const option = el('option', null, value === 0 ? STRINGS.settings.tileColumnsAuto : String(value));
+    select.dataset.pmKey = key;
+    for (const [value, label] of choices) {
+        const option = el('option', null, label);
         option.value = String(value);
         select.append(option);
     }
     select.addEventListener('change', () => {
         const root = getRoot();
-        if (!root || root.readOnly) { syncFields(); return; }
-        root.settings.rosterTileColumns = Number(select.value) || 0;
+        if (!root || root.readOnly || !choices.some(([value]) => String(value) === select.value)) { syncFields(); return; }
+        root.settings[key] = parse(select.value);
         save();
         syncFields();
     });
-    return rowOf(STRINGS.settings.rosterTileColumns, select, STRINGS.settings.rosterTileColumnsHint);
+    return rowOf(labelText, select, hint);
 }
 
-function styleField() {
-    const select = el('select', 'pm-settings-select');
-    select.dataset.pmKey = 'assetStyle';
-    for (const [value, label] of [
-        ['plain', STRINGS.settings.assetStylePlain],
-        ['bordered', STRINGS.settings.assetStyleBordered],
-        ['polaroid', STRINGS.settings.assetStylePolaroid],
-    ]) {
-        const option = el('option', null, label);
-        option.value = value;
-        select.append(option);
-    }
-    select.addEventListener('change', () => {
-        const root = getRoot();
-        if (!root || root.readOnly) { syncFields(); return; }
-        root.settings.assetStyle = select.value;
-        save();
-        syncFields();
-    });
-    return rowOf(STRINGS.settings.assetStyle, select, STRINGS.settings.assetStyleHint);
-}
-
-// Only what a NEWLY adopted persona starts with: the format itself
-// lives on each persona, and the manager's 편집 tab is where an existing one is
-// changed. A global switch here would silently do nothing for every persona the
-// user already has, which is the shape of control that reads as broken.
-// The roster tile shape (user request). Same three-option select shape as the
-// asset style and the heading format, so the drawer keeps one control vocabulary.
-function tileShapeField() {
-    const select = el('select', 'pm-settings-select');
-    select.dataset.pmKey = 'rosterTileShape';
-    for (const value of TILE_SHAPES) {
-        const option = el('option', null, STRINGS.settings.tileShapeNames[value]);
-        option.value = value;
-        select.append(option);
-    }
-    select.addEventListener('change', () => {
-        const root = getRoot();
-        if (!root || root.readOnly) { syncFields(); return; }
-        if (!TILE_SHAPES.includes(select.value)) { syncFields(); return; }
-        root.settings.rosterTileShape = select.value;
-        save();
-        syncFields();
-    });
-    return rowOf(STRINGS.settings.rosterTileShape, select, STRINGS.settings.rosterTileShapeHint);
-}
-
-// How 관리 시작 takes a description in (state.js seedDescription).
-function adoptModeField() {
-    const select = el('select', 'pm-settings-select');
-    select.dataset.pmKey = 'adoptSplitMode';
-    for (const value of ADOPT_MODES) {
-        const option = el('option', null, STRINGS.settings.adoptModeNames[value]);
-        option.value = value;
-        select.append(option);
-    }
-    select.addEventListener('change', () => {
-        const root = getRoot();
-        if (!root || root.readOnly) { syncFields(); return; }
-        if (!ADOPT_MODES.includes(select.value)) { syncFields(); return; }
-        root.settings.adoptSplitMode = select.value;
-        save();
-        syncFields();
-    });
-    return rowOf(STRINGS.settings.splitOnAdopt, select, STRINGS.settings.splitOnAdoptHint);
-}
-
-function headingFormatField() {
-    const select = el('select', 'pm-settings-select');
-    select.dataset.pmKey = 'defaultHeadingFormat';
-    for (const value of HEADING_FORMATS) {
-        const option = el('option', null, STRINGS.manager.headingFormatNames[value]);
-        option.value = value;
-        select.append(option);
-    }
-    select.addEventListener('change', () => {
-        const root = getRoot();
-        if (!root || root.readOnly) { syncFields(); return; }
-        if (!HEADING_FORMATS.includes(select.value)) { syncFields(); return; }
-        root.settings.defaultHeadingFormat = select.value;
-        save();
-        syncFields();
-    });
-    return rowOf(STRINGS.settings.defaultHeadingFormat, select, STRINGS.settings.defaultHeadingFormatHint);
-}
+const named = (values, names) => values.map(value => [value, names[value]]);
 
 function templateField() {
     const box = el('div', 'pm-settings-row');
@@ -319,18 +184,13 @@ function templateField() {
     area.rows = 4;
     area.dataset.pmKey = 'assetPromptTemplate';
     area.setAttribute('aria-label', STRINGS.settings.assetTemplate);
-    // change fires when the field is left, which is the moment the user is done
-    // with it. An input handler would ask SillyTavern to save on every keystroke.
+    // On change, not input, so ST is not asked to save on every keystroke.
     area.addEventListener('change', () => {
         const root = getRoot();
         if (!root || root.readOnly) { syncFields(); return; }
         root.settings.assetPromptTemplate = area.value;
         save();
     });
-    // There is deliberately no keydown handler here. Enter has to insert a newline
-    // in this field, so there is nothing for a hangul composition commit (mobile
-    // rule 5) to fire by accident; a guard that guards nothing only suggests there
-    // is a control here that there is not.
     box.append(area);
     box.append(el('div', 'pm-settings-hint', STRINGS.settings.assetTemplateHint));
     return box;
@@ -342,15 +202,12 @@ function buttonOf(label, onClick, writes) {
     const btn = el('button', 'pm-manager-btn', label);
     btn.type = 'button';
     if (writes) btn.dataset.pmWrites = '1';
-    // Click only.
     btn.addEventListener('click', onClick);
     return btn;
 }
 
-// The import button, with the file picker it needs behind it. The
-// input is in the tree rather than made on demand so syncFields can take it dead
-// along with every other control that writes, and .pm-settings .pm-hidden hides it:
-// a bare file input is a control the phone draws as a second unexplained button.
+// The import button and its hidden file input, kept in the tree so syncFields disables it
+// along with every other writing control.
 function appendImportControl(actions) {
     const input = el('input', 'pm-hidden');
     input.type = 'file';
@@ -359,91 +216,65 @@ function appendImportControl(actions) {
     input.setAttribute('aria-label', STRINGS.settings.importFileAria);
     input.addEventListener('change', () => {
         const file = input.files?.[0] ?? null;
-        // Cleared before the read so the same file can be picked again after a
-        // refusal: an input still holding the previous choice fires no change event.
+        // Cleared so the same file can be picked again: an unchanged choice fires no change.
         input.value = '';
         if (file) doImportSettings(file);
     });
-    // Both straight into the row: the button is a flex item like every other one,
-    // and the input beside it is display none, so it takes no space at all.
     actions.append(buttonOf(STRINGS.settings.importSettings, () => input.click(), true), input);
 }
 
 function doPrune() {
     const root = getRoot();
     if (!root || root.readOnly) { notify('error', STRINGS.settings.pruneReadOnly); return; }
-    // An entry with no sections, no variants, no history and
-    // no assets is a shell nobody asked for, and shells are what filled this user's
-    // settings.json once already.
     const removed = pruneEmpty(root);
-    // The shared cache still holds the persona objects that were just deleted, and
-    // the quick panel draws from it: without this the rows stay, their versions
-    // stay tappable, and applying one composes an orphan into the live description
-    // and reports success. Before save(), which dispatches pm:changed and redraws.
+    // Rebuild the shared cache before save() redraws via pm:changed, or the quick panel keeps
+    // offering the deleted personas.
     refresh();
     save();
     refreshSettings();
     notify('info', removed.length ? STRINGS.settings.pruneDone(removed.length) : STRINGS.settings.pruneNothing);
 }
 
-async function doClearHistory() {
-    const root = getRoot();
-    if (!root || root.readOnly) { notify('error', STRINGS.settings.clearHistoryReadOnly); return; }
-    if (!(await askConfirm(STRINGS.settings.confirmClearHistory))) return;
-    // Read again on the other side of the question: the root object may have been
-    // replaced by a settings reload while the popup was up.
+// Confirms, then runs clear(persona, now) on every record; clear returns how many entries
+// it dropped. The root is re-read after the await: a settings reload can replace it.
+async function clearEveryPersona(question, clear, done, nothing) {
+    const writable = root => root && !root.readOnly;
+    if (!writable(getRoot())) { notify('error', STRINGS.settings.clearHistoryReadOnly); return; }
+    if (!(await askConfirm(question))) return;
     const after = getRoot();
-    if (!after || after.readOnly) { notify('error', STRINGS.settings.clearHistoryReadOnly); return; }
+    if (!writable(after)) { notify('error', STRINGS.settings.clearHistoryReadOnly); return; }
     const now = Date.now();
     let cleared = 0;
     for (const persona of Object.values(after.personas ?? {})) {
-        if (!persona || typeof persona !== 'object') continue;
-        let had = 0;
-        for (const list of Object.values(persona.history ?? {})) had += Array.isArray(list) ? list.length : 0;
-        if (!had) continue;
-        persona.history = {};
-        cleared += had;
-        // Only the personas that actually lost something get a line. Logging on the
-        // rest would make every untouched entry non-empty and put it out of reach
-        // of the pruner for good.
-        addLog(persona, 'history-clear', STRINGS.settings.clearHistoryLog(had), now);
+        if (persona && typeof persona === 'object') cleared += clear(persona, now);
     }
     save();
     refreshSettings();
-    notify('info', cleared ? STRINGS.settings.clearHistoryDone(cleared) : STRINGS.settings.clearHistoryNothing);
+    notify('info', cleared ? done(cleared) : nothing);
 }
 
-/* The sibling of doClearHistory, for the list it cannot reach.
+function doClearHistory() {
+    return clearEveryPersona(STRINGS.settings.confirmClearHistory, (persona, now) => {
+        let had = 0;
+        for (const list of Object.values(persona.history ?? {})) had += Array.isArray(list) ? list.length : 0;
+        if (!had) return 0;
+        persona.history = {};
+        // Logged only where something was lost: a log line makes a persona non-empty, which
+        // keeps the pruner off it.
+        addLog(persona, 'history-clear', STRINGS.settings.clearHistoryLog(had), now);
+        return had;
+    }, STRINGS.settings.clearHistoryDone, STRINGS.settings.clearHistoryNothing);
+}
 
-   enforceGlobalBudget evicts snapshots and nothing else, and historyBytes counts
-   snapshots and nothing else, so the change log grew under both of them: the
-   usage figure went red over bytes no control in the extension could remove. The
-   manager clears one persona's log from its 변경 기록 tab; with thirty personas
-   that is thirty trips. This is that button, once, for all of them.
-
-   No log line is written about the clearing. doClearHistory writes one because
-   the log survives it; here the line would be the only thing left in the list
-   the user just asked to empty, and it would also make every persona non-empty
-   and put the whole roster out of the pruner's reach. */
-async function doClearLogs() {
-    const root = getRoot();
-    if (!root || root.readOnly) { notify('error', STRINGS.settings.clearHistoryReadOnly); return; }
-    if (!(await askConfirm(STRINGS.settings.confirmClearLogs))) return;
-    // Read again on the other side of the question, the same as doClearHistory:
-    // an import can replace the whole root while the popup is up.
-    const after = getRoot();
-    if (!after || after.readOnly) { notify('error', STRINGS.settings.clearHistoryReadOnly); return; }
-    let cleared = 0;
-    for (const persona of Object.values(after.personas ?? {})) {
-        if (!persona || typeof persona !== 'object') continue;
+// Clears every persona's change log, which no history budget touches. No log line about it:
+// it would be all that is left of the list, and would keep the pruner off every persona.
+function doClearLogs() {
+    return clearEveryPersona(STRINGS.settings.confirmClearLogs, persona => {
         const had = (persona.log ?? []).length;
-        if (!had) continue;
+        if (!had) return 0;
         persona.log = [];
-        cleared += had;
-    }
-    save();
-    refreshSettings();
-    notify('info', cleared ? STRINGS.settings.clearLogsDone(cleared) : STRINGS.settings.clearLogsNothing);
+        return had;
+    }, STRINGS.settings.clearLogsDone, STRINGS.settings.clearLogsNothing);
 }
 
 function openManagerScreen() {
@@ -454,10 +285,8 @@ function openManagerScreen() {
 
 /* Export and import */
 
-// Hands the browser a file. This runs in the SillyTavern page, not in a sandboxed
-// frame, so a download an anchor starts is a download the user gets; the anchor is
-// taken back out immediately, because a link left in the drawer is a control the
-// user can tap again with a URL that is about to be revoked.
+// Downloads text as a file through a temporary anchor, removed at once because its URL is
+// about to be revoked.
 function downloadJson(filename, text) {
     if (typeof Blob !== 'function' || typeof URL?.createObjectURL !== 'function') {
         notify('error', STRINGS.settings.noDownload);
@@ -467,17 +296,13 @@ function downloadJson(filename, text) {
     const link = el('a');
     link.href = url;
     link.download = filename;
-    // The outside-tap block applies to this synthetic click too: without the block
-    // it bubbles to document, SillyTavern reads it as a tap outside a drawer, and
-    // the extensions drawer the user is standing in closes on the spot. Parked
-    // inside our own panel when it exists, which is blocked as a whole anyway.
+    // Blocked, or this synthetic click bubbles to document and ST closes the extensions drawer
+    // as if tapped outside.
     blockDrawerClose(link);
     (panel() ?? document.body).append(link);
     link.click();
     link.remove();
-    // Revoked on the next turn rather than on this line: Chromium starts the
-    // download asynchronously, and a URL revoked in the same task can lose that
-    // race. Only the string outlives this call, and only until the timer runs.
+    // Revoked a task later: Chromium starts the download asynchronously and could lose the race.
     setTimeout(() => { try { URL.revokeObjectURL(url); } catch { /* already gone */ } }, 0);
     return true;
 }
@@ -489,21 +314,12 @@ function stamp() {
     return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
 }
 
-// The optional regex export. Our renderer resolves {{pimg::이름}} against
-// whichever persona is active when a message is drawn, and a static regex cannot
-// ask that, so the export is pinned to ONE folder: the active persona's at the
-// moment of the export. The screen says so.
-//
-// One script per file, because a regex cannot look up a file's extension: the
-// tags this extension writes carry the folder and no extension
-// ({{pimg::folder/name}}, manager-pure.js insertTagText), and the model is told
-// to write the bare name. A single script that spliced the captured name into a
-// path produced /characters/<folder>/<name> with no extension, which is a 404,
-// and missed the folder-qualified form entirely. SillyTavern's regex import takes
-// an array (extensions/regex/index.js onRegexImportFileChange).
+// Export for SillyTavern's regex extension (its import takes an array). A static regex cannot
+// follow the active persona, so it is pinned to one folder, with one script per file because
+// tags carry no extension ({{pimg::folder/name}} or the bare name).
 const escapeRegex = text => String(text).replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 
-export function regexScripts(folderKey, files, style, makeIdFn) {
+function regexScripts(folderKey, files, style, makeIdFn) {
     return files.map(({ label, path }) => {
         const bare = String(path).split('?')[0];
         const ext = /\.[a-z0-9]+$/i.exec(bare)?.[0] ?? '';
@@ -517,8 +333,7 @@ export function regexScripts(folderKey, files, style, makeIdFn) {
             trimStrings: [],
             placement: [1, 2],
             disabled: false,
-            // Display only, exactly like our renderer: the stored message keeps the
-            // tag, so the next turn the model sees its own text.
+            // Display only, like our renderer: the stored message keeps the tag the model wrote.
             markdownOnly: true,
             promptOnly: false,
             runOnEdit: true,
@@ -535,8 +350,7 @@ function doExportRegex() {
     const s = getState();
     const avatar = s?.avatar ?? null;
     if (!avatar) { notify('error', STRINGS.settings.noActivePersona); return; }
-    // resolveFolderKey only reads, so asking here cannot create an entry for a
-    // persona the user never adopted.
+    // resolveFolderKey only reads, so this never creates an entry for an unadopted persona.
     const key = resolveFolderKey(root, avatar);
     const files = withoutBackups([...(s.assetPaths ?? new Map())].map(([label, path]) => ({ label, path })));
     if (!files.length) { notify('warning', STRINGS.settings.regexNoFiles(key)); return; }
@@ -548,9 +362,8 @@ function doExportRegex() {
 function doExportSettings() {
     const root = getRoot();
     if (!root) { notify('error', STRINGS.settings.noRoot); return; }
-    // A root a newer build owns is shown through a normalised copy, which turns
-    // shapes this build does not know into empty ones. The backup is the stored
-    // object itself, untouched, or it would quietly lose what it exists to keep.
+    // A read-only root is shown through a normalised copy that drops unknown shapes, so the
+    // backup is the stored object itself.
     const stored = root.readOnly ? freshContext()?.extensionSettings?.[MODULE_NAME] : null;
     if (!downloadJson(`persona-manager-${stamp()}.json`, serializeRoot(stored ?? root))) return;
     notify('info', STRINGS.settings.settingsExported);
@@ -567,22 +380,19 @@ async function doImportSettings(file) {
         notify('error', STRINGS.settings.importReadFailed(String(e?.message ?? e)));
         return;
     }
-    // Judged before the question is asked, so the user is never walked through a
-    // confirmation that ends in a refusal.
+    // Validated before asking, so a confirmation never ends in a refusal.
     const parsed = parseImportedRoot(text);
     if (!parsed.ok) { notify('error', parsed.message); return; }
     if (!(await askConfirm(STRINGS.settings.confirmImport))) return;
-    // Read again on the other side of the question: the root object may have been
-    // replaced by a settings reload while the popup was up.
+    // Re-read after the await, as in doClearHistory.
     const ctx = freshContext();
     if (!ctx) { notify('error', STRINGS.settings.importNoContext); return; }
     const after = getRoot();
     if (!after || after.readOnly) { notify('error', STRINGS.settings.importNotApplied); return; }
     ctx.extensionSettings[MODULE_NAME] = parsed.root;
     ctx.saveSettingsDebounced?.();
-    // Everything anyone was holding describes the tree that just went away, so the
-    // shared cache is rebuilt, the manager's own caches (its asset listing and the
-    // unsaved drafts) are dropped, and every open screen is told to redraw.
+    // Every cache described the old tree: rebuild the shared one, drop the manager's (asset
+    // listing, drafts) and redraw every screen.
     refresh();
     invalidateManagerCaches();
     save();
@@ -592,10 +402,7 @@ async function doImportSettings(file) {
 
 /* Refresh */
 
-// Reads every value back out of settings and puts the fields in step with it.
-// The panel is queried rather than remembered: a node kept in module state would
-// outlive the screen that built it, which is the rule the other two screens state
-// at their top.
+// Puts every field in step with the stored settings.
 function syncFields() {
     const box = panel();
     if (!box) return;
@@ -604,16 +411,13 @@ function syncFields() {
     const readOnly = !!root?.readOnly;
 
     for (const node of box.querySelectorAll('[data-pm-key]')) {
-        // Never overwrite the field the user is standing in. A refresh triggered by
-        // a sibling control would otherwise replace a half typed template.
+        // Skip the focused field, or a sibling's refresh would clobber half-typed text.
         if (node === document.activeElement) continue;
         const key = node.dataset.pmKey;
         if (node.type === 'checkbox') node.checked = !!settings[key];
         else node.value = String(settings[key] ?? '');
     }
-    // A root a newer build owns is opened read only rather than
-    // rewritten, so every control that writes goes dead and the reason is on
-    // screen. 관리자 열기 and 사용량 새로고침 write nothing and stay available.
+    // A read-only root disables every writing control; the banner says why.
     for (const node of box.querySelectorAll('[data-pm-key], [data-pm-writes]')) {
         node.disabled = readOnly;
         node.classList.toggle('pm-disabled', readOnly);
@@ -621,14 +425,9 @@ function syncFields() {
     box.querySelector('.pm-settings-readonly')?.classList.toggle('pm-hidden', !readOnly);
 }
 
-/* 페르소나 식별 줄 (device: Termux, 콘솔 없음).
-
-   Two lines. The first says which route named the active persona and therefore
-   whether two same-named personas can be edited; the second is evidence, and it
-   only appears when the answer is one that could be improved. When the screen
-   route came up empty, the classes SillyTavern puts on its own avatar tiles are
-   the one fact needed to teach it the right marker, and a screenshot of this row
-   carries that fact without a console. */
+// The identification line: which route named the active persona, which decides whether
+// same-named personas are editable. An indirect route adds ST's avatar tile classes, so a
+// screenshot carries what fixing it needs on a phone without a console.
 function refreshIdentify() {
     const box = panel();
     const line = box?.querySelector('.pm-settings-identify');
@@ -643,7 +442,6 @@ function refreshIdentify() {
 
     const evidence = box.querySelector('.pm-settings-identify-why');
     if (!evidence) return;
-    // Only where it can still be acted on: a direct answer needs no evidence.
     if (direct) { evidence.textContent = ''; evidence.classList.add('pm-hidden'); return; }
     const report = avatarBlockReport(typeof document === 'undefined' ? null : document);
     evidence.textContent = report.found && report.count
@@ -652,15 +450,9 @@ function refreshIdentify() {
     evidence.classList.remove('pm-hidden');
 }
 
-// The usage number belongs on this screen only, and this is the
-// only place that asks for it. It stringifies the whole tree, so it runs when the
-// drawer is opened, when the user asks again, and after the two buttons that
-// change how much is stored. Never on an event.
-/* The usage line serializes and encodes the whole root, which was measured at
-   6.6ms for 1.8MB on the desktop and is several MB on the phone. It ran inside
-   the tap that opens the drawer, so the drawer did not open until it was done.
-   The number now follows a frame later; the line keeps its last value meanwhile,
-   and a burst of refreshes (a prune followed by its save) computes once. */
+// The usage figure stringifies the whole root, so it is computed on drawer open, on request
+// and after buttons that change storage, never per event; deferred so the opening tap is not
+// blocked, and a burst of refreshes computes once.
 let usageTimer = 0;
 
 function refreshSettings() {
@@ -680,9 +472,7 @@ function paintUsage() {
     const warnBytes = getRoot()?.settings?.warnBytes;
     const warn = typeof warnBytes === 'number' && bytes > warnBytes;
     usage.textContent = STRINGS.settings.usageBytes((bytes / 1024).toFixed(1));
-    // The warning carries a theme colour AND a weight change, because colour alone
-    // is not a signal everyone can read: the same rule that governs how the
-    // selected row is shown.
+    // The warn class adds weight as well as colour: colour alone is not a signal everyone reads.
     usage.classList.toggle('pm-settings-warn', warn);
 }
 
@@ -692,32 +482,17 @@ function buildPanel() {
     const box = el('div', 'inline-drawer pm-settings');
     box.id = PANEL_ID;
 
-    // The drawer gets the same grid language as the two panels: the header is a
-    // filled block with the type knocked out, the grain sits under it, and the
-    // repeated-word band names the screen. Reported as "확장 설정 부분에는 디자인
-    // 적용 안됨": it had only inherited the rules, never the shapes.
-    // pm-mass is NOT here. It is added while the drawer is open and taken off when
-    // it closes (toggleDrawer below). Collapsed, this row sits in SillyTavern's own
-    // extension list among a dozen plain rows, and a filled ink block there reads as
-    // one extension shouting rather than as this one's design. Reported from the
-    // device as 통일성을 해쳐 보기 좋지 않음.
+    // Same look as the two panels (filled header, grain, word band), but pm-mass is only added
+    // while open: collapsed, this row should look like ST's other extension rows.
     const header = el('div', 'inline-drawer-header pm-settings-header');
     header.append(el('b', null, STRINGS.settings.title));
-    // SillyTavern's own drawer chevron, by its own class names. Every other
-    // extension in that list draws this exact element, and ours was drawing a
-    // text ▼ instead: the one thing in the row that did not match its neighbours
-    // (device report, 2026-08-27). fa-solid comes from SillyTavern's own
-    // FontAwesome, which is already loaded or none of the other rows would have
-    // an icon either.
+    // ST's own drawer chevron, as every other extension row draws it; fa-solid comes from
+    // ST's already loaded FontAwesome.
     const caret = el('div', 'inline-drawer-icon fa-solid fa-circle-chevron-down down');
     header.append(caret);
 
-    // The content carries NO SillyTavern class at all, and is collapsed and
-    // expanded by an INLINE display. Both halves are lessons from the device
-    // ("안 열림" persisted through 0.3.1): a class of ST's gives every build's
-    // stylesheet and drawer script a handle on our content, and whichever of
-    // display rules or slideToggle grabs it, the drawer reads as dead. With our
-    // own class only and an inline style, nothing outside this file owns it.
+    // No ST class on the content and an inline display: an ST class lets a build's stylesheet
+    // or slideToggle grab it and leave the drawer looking dead.
     const content = el('div', 'pm-settings-content pm-grain');
     content.id = CONTENT_ID;
     content.style.display = 'none';
@@ -730,88 +505,75 @@ function buildPanel() {
         caret.classList.toggle('fa-circle-chevron-up', !collapsed);
         caret.classList.toggle('up', !collapsed);
         header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-        // The panel's own look belongs to the panel. Closed, this is one row in
-        // SillyTavern's list and looks like the rest of them.
         header.classList.toggle('pm-mass', !collapsed);
-        // The usage number is read when this screen is opened and
-        // when the user asks for it again, never on a timer and never per event.
         if (!collapsed) refreshSettings();
     };
-    // Click only, never touchstart. The propagation stops HERE,
-    // not only at the box: ST's own drawer handling is delegated at the
-    // document, and a click that bubbles past us can reach a delegate that
-    // toggles the same drawer a second time, folding it shut in the same tap
-    // (the second suspect behind the dead drawer).
+    // Click only, never touchstart. Stopped here, not only at the box: ST's drawer delegate on
+    // document would toggle the drawer again and fold it shut in the same tap.
     header.addEventListener('click', e => { e.stopPropagation(); toggleDrawer(); });
-    // A div with role=button is only a button if it can be reached and fired the
-    // way one is. Without these the drawer is unopenable from a keyboard, which is
-    // how the icon in the send form is reached too (see buildButton in quickbar.js).
+    // Focusable and keyboard-operable, as role=button promises.
     header.tabIndex = 0;
     header.addEventListener('keydown', e => {
-        // A hangul composition commits with an Enter whose keyCode is
-        // 229, and firing on that opens the drawer while the user is still typing.
+        // An IME commit's Enter (keyCode 229) must not toggle the drawer.
         if (isComposingKey(e)) return;
-        // stopPropagation for the reason buildButton gives: SillyTavern's document
-        // keydown also turns Enter into a click, and the drawer toggled twice.
+        // ST's document keydown also turns Enter into a click, which would toggle twice.
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggleDrawer(); }
     });
     header.setAttribute('role', 'button');
     header.setAttribute('aria-expanded', 'false');
-    // Names what the header opens, so a screen reader can say where the state it
-    // just announced applies.
     header.setAttribute('aria-controls', CONTENT_ID);
 
     const readOnlyBanner = el('div', 'pm-manager-banner pm-manager-warn pm-settings-readonly pm-hidden');
     readOnlyBanner.append(el('div', 'pm-manager-banner-text', STRINGS.settings.readOnlyBanner));
     content.append(readOnlyBanner);
-    // The band names the screen, once, in the manager's display voice.
     const band = el('div', 'pm-band');
     band.append(el('span', 'pm-band-word', STRINGS.settings.bandWord));
     content.append(band);
 
     const sections = STRINGS.settings.sections;
-    /* 표시: what the extension puts on SillyTavern's own screens. 입력창 아이콘
-       표시 is named for what it does: it was labelled 확장 사용, which promises a
-       master switch this extension deliberately does not have (see store.js).
-       Turning the extension off is SillyTavern's extension manager's job. */
+    // showQuickBar only hides the icon: there is deliberately no master switch, as disabling
+    // the extension is ST's extension manager's job.
     content.append(sectionHead(sections.display));
     content.append(toggleField('showQuickBar', STRINGS.settings.showQuickBar, STRINGS.settings.showQuickBarHint));
-    // Two switches, not one three way choice. Either can be on by itself, and
-    // both off is the shipped default.
+    // Two independent switches rather than one three-way choice.
     content.append(toggleField('rosterShowVersionCount', STRINGS.settings.rosterShowVersionCount, STRINGS.settings.rosterShowVersionCountHint));
     content.append(toggleField('rosterShowVersionNames', STRINGS.settings.rosterShowVersionNames, STRINGS.settings.rosterShowVersionNamesHint));
-    content.append(styleField());
+    content.append(selectField('assetStyle', [
+        ['plain', STRINGS.settings.assetStylePlain],
+        ['bordered', STRINGS.settings.assetStyleBordered],
+        ['polaroid', STRINGS.settings.assetStylePolaroid],
+    ], STRINGS.settings.assetStyle, STRINGS.settings.assetStyleHint));
 
-    /* 목록: how the persona list is laid out. 열 수 and 줄 수 are one setting in
-       two fields (either left at 0 falls back to the page size), so they sit
-       together. */
+    // Columns and rows act as one setting: either at 0 falls back to the page size.
     content.append(sectionHead(sections.list));
-    content.append(tileColumnsField());
+    content.append(selectField('rosterTileColumns',
+        TILE_COLUMN_CHOICES.map(value => [value, value === 0 ? STRINGS.settings.tileColumnsAuto : String(value)]),
+        STRINGS.settings.rosterTileColumns, STRINGS.settings.rosterTileColumnsHint, value => Number(value) || 0));
     content.append(numberField('rosterTileRows', STRINGS.settings.rosterTileRows, STRINGS.settings.rosterTileRowsHint));
-    content.append(tileShapeField());
+    content.append(selectField('rosterTileShape', named(TILE_SHAPES, STRINGS.settings.tileShapeNames),
+        STRINGS.settings.rosterTileShape, STRINGS.settings.rosterTileShapeHint));
     content.append(numberField('pageSizeRoster', STRINGS.settings.pageSizeRoster, STRINGS.settings.pageSizeHint));
     content.append(numberField('pageSizeAssets', STRINGS.settings.pageSizeAssets, ''));
     content.append(numberField('pageSizeVersions', STRINGS.settings.pageSizeVersions, ''));
 
-    /* 이력: the four caps on stored history. */
     content.append(sectionHead(sections.history));
     content.append(numberField('historyPerVariant', STRINGS.settings.historyPerVariant, STRINGS.settings.historyPerVariantHint));
     content.append(numberField('historyMaxBytes', STRINGS.settings.historyMaxBytes, STRINGS.settings.historyMaxBytesHint));
     content.append(numberField('historyMaxDays', STRINGS.settings.historyMaxDays, STRINGS.settings.historyMaxDaysHint));
     content.append(numberField('historyCoalesceMinutes', STRINGS.settings.historyCoalesceMinutes, STRINGS.settings.historyCoalesceMinutesHint));
 
-    /* 설명문: what happens to the text itself. */
     content.append(sectionHead(sections.text));
     content.append(toggleField('autoLocalName', STRINGS.settings.autoLocalName, STRINGS.settings.autoLocalNameHint));
-    content.append(adoptModeField());
-    content.append(headingFormatField());
+    // How adopting a persona takes in its description (state.js seedDescription).
+    content.append(selectField('adoptSplitMode', named(ADOPT_MODES, STRINGS.settings.adoptModeNames),
+        STRINGS.settings.splitOnAdopt, STRINGS.settings.splitOnAdoptHint));
+    content.append(selectField('defaultHeadingFormat', named(HEADING_FORMATS, STRINGS.manager.headingFormatNames),
+        STRINGS.settings.defaultHeadingFormat, STRINGS.settings.defaultHeadingFormatHint));
 
-    /* 에셋: the two macros. */
     content.append(sectionHead(sections.assets));
     content.append(toggleField('injectAssetMacros', STRINGS.settings.injectAssetMacros, STRINGS.settings.injectAssetMacrosHint));
     content.append(templateField());
 
-    /* 진단과 데이터. */
     content.append(sectionHead(sections.data));
     content.append(el('div', 'pm-settings-identify', STRINGS.settings.identify));
     content.append(el('div', 'pm-settings-identify-why pm-hidden'));
@@ -824,9 +586,7 @@ function buildPanel() {
     actions.append(buttonOf(STRINGS.settings.pruneEmpty, () => doPrune(), true));
     actions.append(buttonOf(STRINGS.settings.clearHistory, () => doClearHistory(), true));
     actions.append(buttonOf(STRINGS.settings.clearLogs, () => doClearLogs(), true));
-    // The three owed controls. Exporting writes nothing here, so both
-    // export buttons stay available on a read only root; importing replaces
-    // everything, so it goes dead with the rest.
+    // Exports write nothing, so they stay enabled on a read-only root; import does not.
     actions.append(buttonOf(STRINGS.settings.exportRegex, () => doExportRegex(), false));
     actions.append(buttonOf(STRINGS.settings.exportSettings, () => doExportSettings(), false));
     appendImportControl(actions);
@@ -836,40 +596,26 @@ function buildPanel() {
     content.append(el('div', 'pm-settings-hint', STRINGS.settings.importHint));
 
     box.append(header, content);
-    // The outside-tap block, applied here for the same reason as everywhere else: our
-    // clicks are ours, and SillyTavern's drawer machinery must not read them as a
-    // tap that landed outside one of its own panels.
+    // So ST's drawer code never reads our clicks as taps outside its panels.
     blockDrawerClose(box);
     return box;
 }
 
 export function mountSettings() {
     if (mounted || typeof document === 'undefined') return;
-    // ST lays its Extensions panel out as two columns, #extensions_settings and
-    // #extensions_settings2, and not every build has both. A missing second
-    // column made this screen silently not exist, which from the outside is
-    // indistinguishable from "the drawer will not open" (device report). Fall
-    // back through the known hosts before giving up.
+    // Not every ST build has both extension columns (#extensions_settings and
+    // #extensions_settings2), so fall back through the known hosts.
     const host = document.getElementById(HOST_ID)
         ?? document.getElementById('extensions_settings')
         ?? document.querySelector('.extensions_settings');
-    // Not an error worth a toast: the settings drawer is built by SillyTavern and
-    // may simply not exist yet on a build that lays its screens out differently.
+    // A console warning, not a toast: a build with another layout may lack the host.
     if (!host) { console.warn(`[${MODULE_NAME}] #${HOST_ID} not found, settings screen skipped`); return; }
     document.getElementById(PANEL_ID)?.remove();
     host.append(buildPanel());
     mounted = true;
-    // The root can turn read only, and showQuickBar can be flipped from the quick
-    // panel, so the screen follows the same state changes the others do. Fields
-    // only, never the usage number: that one stringifies the whole tree, and this
-    // event fires on every persona switch and every settings save. It also skips
-    // whichever field has the focus, so it cannot interrupt typing.
+    // Settings also change elsewhere (read-only state, the quick panel). Fields only: the usage
+    // figure is too costly for an event that fires on every switch and save.
     track(cleanups, document, 'pm:changed', () => syncFields());
-    // Deliberately nothing else. Mounting used to end with refreshSettings(), which
-    // stringifies the whole tree (5.2ms measured on this desktop, for a 2.7MB
-    // settings.json) at boot, to fill in a drawer that starts collapsed and that
-    // most sessions never open. The drawer computes it when it opens, and every
-    // pm:changed syncs the fields, so nothing is left stale by not doing it here.
 }
 
 export function unmountSettings() {
