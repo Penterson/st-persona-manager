@@ -42,14 +42,17 @@ export function snapshot(persona, variantId, previousText, now, settings, { forc
     return true;
 }
 
+// A snapshot's share of the budget: its text plus a fixed allowance for the record around it.
+const encoder = new TextEncoder();
+const entryBytes = entry => encoder.encode(String(entry?.text ?? '')).length + 24;
+
 export function historyBytes(root) {
-    const encoder = new TextEncoder();
     let total = 0;
     for (const persona of Object.values(root.personas ?? {})) {
         if (!persona || typeof persona !== 'object') continue;
         for (const list of Object.values(persona.history ?? {})) {
             if (!Array.isArray(list)) continue;
-            for (const entry of list) total += encoder.encode(entry?.text ?? '').length + 24;
+            for (const entry of list) total += entryBytes(entry);
         }
     }
     return total;
@@ -101,7 +104,6 @@ export function enforceGlobalBudget(root, settings, now = Date.now()) {
     }
     all.sort((a, b) => a.at - b.at);
 
-    const encoder = new TextEncoder();
     // Per-persona counts, so each log reports its own loss, not the global total.
     const lost = new Map();
     let evicted = 0;
@@ -110,7 +112,7 @@ export function enforceGlobalBudget(root, settings, now = Date.now()) {
         const list = item.persona.history[item.variantId];
         if (!list || !list.length) continue;
         const [gone] = list.splice(0, 1);
-        total -= encoder.encode(String(gone?.text ?? '')).length + 24;
+        total -= entryBytes(gone);
         evicted++;
         lost.set(item.persona, (lost.get(item.persona) ?? 0) + 1);
         if (!list.length) delete item.persona.history[item.variantId];

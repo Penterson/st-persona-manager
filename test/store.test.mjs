@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    migrate, emptyRoot, makeDefaultPersona, isEmptyPersona, pruneEmpty, textSignature,
+    migrate, makeDefaultPersona, isEmptyPersona, pruneEmpty, textSignature,
     DEFAULT_SETTINGS, DEFAULT_SECTION_NAMES, SCHEMA_VERSION, makeId, ensurePersona, usageBytes,
 } from '../modules/store.js';
 import { STRINGS } from '../modules/strings.js';
@@ -98,7 +98,7 @@ test('isEmptyPersona: untouched shell is empty, any content is not', () => {
 });
 
 test('pruneEmpty removes only shells', () => {
-    const root = emptyRoot();
+    const root = migrate({});
     ensurePersona(root, 'a', ids);
     const b = ensurePersona(root, 'b', ids);
     b.log.push({ at: 1, kind: 'import', detail: '' });

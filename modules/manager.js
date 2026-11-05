@@ -1,15 +1,16 @@
-// The manager screen: sections, variants, versions, history, assets and labels for one
-// persona. Opened by pm:open-manager on document; the quick panel, which sends it,
-// expects detail.handled to be set. Testable logic lives in manager-pure.js.
+// The manager screen: items, choices, versions, history, assets and groups for one persona.
+// Opened by pm:open-manager, whose sender expects detail.handled to be set. Testable logic
+// lives in manager-pure.js.
 //
 // Handlers outlive the draw that made them, so none closes over a context, a getState()
-// snapshot or a node; each reads again when it runs, or one persona's text can land in
-// another.
+// snapshot or a node; each reads again when it runs.
 //
-// Writes go to targetAvatar via saveAndComposeFor(target), which decides from its own
-// live context whether the target is the active persona, and so whether SillyTavern's
-// prompt field is written. That lets the user edit a persona they are not playing.
-import { MODULE_NAME, makeId, appendSection, getPersona, findVersion, liveVariant, ensurePersona, HEADING_FORMATS } from './store.js';
+// Writes go to targetAvatar through saveAndComposeFor, which decides from its own live context
+// whether SillyTavern's prompt field is written, so a persona not being played can be edited.
+import {
+    MODULE_NAME, makeId, appendSection, getPersona, findVersion, liveVariant, ensurePersona, HEADING_FORMATS,
+    VIEW_MODES, pickInEveryVersion,
+} from './store.js';
 import {
     getState, getRoot, adoptFor, saveAndComposeFor, refreshAssets, KEEP_DESCRIPTION_KINDS,
 } from './state.js';
@@ -26,17 +27,18 @@ import {
 } from './framing.js';
 import {
     isTextEntry, pickApplicable, versionApplicable, versionAlreadyApplied, quoteArg, waitFor, nameCollides, rosterWritable,
-    CREATE_WAIT_TURNS, conversationLanguage,
+    CREATE_WAIT_TURNS, conversationLanguage, pickPersonaCommand, NAME_LANGUAGES,
 } from './quickbar-pure.js';
 import {
-    closePanel, openPanel, isPanelOpen, notify, askConfirm, askChoice, askText,
-    thumbnailUrl, markedText, pagerRow, applyShapeClass,
+    closePanel, openPanel, isPanelOpen, notify, askConfirm, askChoice, askText, askName,
+    thumbnailUrl, markedText, pagerRow, applyShapeClass, listUi, searchRow, rankByQuery, filterChips,
     applyPersonaName, personaImageChanged, runBoundImageWrite,
     scheduleAutoName, cancelAutoName, releaseToasts,
 } from './quickbar.js';
 import {
-    el, track, runCleanups, blockDrawerClose, isComposingKey, makeRowActivatable,
-    checkMark, emptyBlock, bannerOf as sharedBanner, afterGesture, frameTask, button, disable, imagePool,
+    el, track, runCleanups, blockDrawerClose, makeRowActivatable, checkMark, emptyBlock, bannerOf as sharedBanner,
+    frameTask, button, disable, imagePool, selectOf, checkRow, newGroupRow, showHost, openHost, closeHost,
+    trackViewport, typingHold, fieldSnapshot, restoreField, focusMarked,
 } from './dom.js';
 import { rankOf, textContains, detectLanguage, pageOf } from './search-pure.js';
 import {
@@ -53,12 +55,10 @@ import {
     addTag, removeTag, missingDefaultSections, fillDefaultSections,
     planFullTextSave, readSelectOptions, parseDepth, copyPersonaOnto,
     setLocalName, localName, countSize,
-    boundAsset, bindingIsExact, bindAsset, versionImageState, versionsBindingAsset, pictureSettled, pickInEveryVersion,
+    boundAsset, bindingIsExact, bindAsset, versionImageState, versionsBindingAsset, pictureSettled,
     renameVersionIn, duplicateVersionIn, overwriteVersionPicks, dropVersionFrom, moveVersion, addVersion,
     applyVersionPicks,
 } from './manager-pure.js';
-// Every sentence the user reads comes from STRINGS. Stored log kinds, data keys and
-// class names here are not copy and keep their spelling.
 import { STRINGS } from './strings.js';
 
 const HOST_ID = 'pm-manager-host';
@@ -83,8 +83,8 @@ let closeAsked = false;
 let lastScreen = null;
 const scrollByScreen = new Map();
 
-// The screen a draw shows, for scroll restore: the picker, or a persona's tab with
-// the body editor, the revise screen or the full text open over it.
+// The screen a draw shows, for scroll restore: the picker, or a persona's tab with the body
+// editor, the revise screen or the full text open over it.
 function screenKey() {
     if (pickerOpen) return 'picker';
     const over = openVariant ? ['editor', openVariant.sectionId, openVariant.variantId]
@@ -92,24 +92,22 @@ function screenKey() {
     return JSON.stringify([targetAvatar, managerTab, ...over]);
 }
 const drawTask = frameTask(() => drawManager());
-let drawDeferred = false;
+const drawHold = typingHold(scheduleDraw);
 let pickerOpen = false;
 // History tab selection: a variant id and an index in storage order, as restore() takes.
 let historyVariant = null;
 let historyIndex = null;
 let historyMode = 'diff';
-// The one row showing its other actions, as a rowKey string. The next tab draw
-// clears it if that row is gone.
+// The one row showing its other actions, as a rowKey string; cleared once that row is gone.
 let expandedRow = null;
-// The asset listing for targetAvatar. state.js keeps one only for the active persona
-// (it feeds the macros), which is the wrong folder for any other target.
+// The asset listing for targetAvatar (state.js keeps only the active persona's).
 let assetState = { avatar: null, list: [], error: null, loading: false };
 // The set of empty sections the user has already been told about. See commit.
 let lastMissing = null;
-// Revise screen: reviseBlocks are the original blocks, reviseTexts the working copies.
-// Each reviseSteps entry holds the block index and the whole previous string, so undo
-// is one assignment. reviseSelection keeps the last valid drag as offsets because
-// tapping the popup collapses the selection before the click lands.
+// Revise screen: reviseBlocks are the original blocks, reviseTexts the working copies. Each
+// reviseSteps entry holds the block index and the whole previous string, so undo is one
+// assignment. reviseSelection keeps the last drag as offsets, since tapping the popup
+// collapses the selection before the click lands.
 let reviseActive = false;
 let reviseBlocks = null;
 let reviseTexts = null;
@@ -119,64 +117,50 @@ let reviseEditing = null;
 let revisePopupHide = 0;
 let revisePopupFrame = 0;
 let reviseScrollToBox = false;
-// Full-text screen: fullBlocks, taken on open, pins each textarea to the body it was
-// drawn from; fullTexts are working copies re-read from the fields on every draw so a
-// rebuild cannot roll typing back.
+// Full-text screen: fullBlocks pins each textarea to the body it was drawn from; fullTexts
+// are working copies re-read from the fields on every draw.
 let fullActive = false;
 let fullBlocks = null;
 let fullTexts = null;
-// 'items': one box per item. 'raw': the composed text as SillyTavern receives it, read
-// only; the working copies stay the item boxes', so switching back loses nothing.
+// 'items': one box per item. 'raw': the composed text as SillyTavern receives it, read only.
 let fullView = 'items';
-// Folded blocks at the top of the compose tab. Not expandedRow keys, which the next
-// tab draw clears.
+// Folded blocks at the top of the compose tab.
 let placementOpen = false;
 let namesOpen = false;
 let personaOpen = false;
-// What a picker row tap does: 'target' moves this screen's target, 'copy' copies the
-// current composition onto that row. Reset when the picker closes.
+// What a picker row tap does: 'target' moves this screen's target, 'copy' copies onto it.
 let pickerMode = 'target';
-// SillyTavern's position and role options as {value, label}, read off its selects and
-// dropped at the top of every draw so a rename or reload cannot leave a stale list.
+// SillyTavern's position and role options, read off its selects; dropped at every draw.
 let enumCache = null;
-// Debounce for the size lines: SillyTavern's token count has an unpredictable cost,
-// so it does not run per keystroke.
+// Debounce for the size lines: SillyTavern's token count does not run per keystroke.
 let sizeTimer = 0;
 // Search state per searchable list, keyed by the containers' data-pm-list ids.
-const emptyListUi = () => ({ open: false, query: '', page: 1, lang: null, tags: [] });
-let listUi = {
-    picker: emptyListUi(),
-    compose: emptyListUi(),
-    versions: emptyListUi(),
-    assets: emptyListUi(),
-    groups: emptyListUi(),
+const lists = {
+    picker: listUi(),
+    compose: listUi(),
+    versions: listUi(),
+    assets: listUi(),
+    groups: listUi(),
 };
-function resetListUi() {
-    // In place: the search and pager handlers hold these objects, and replacing them
-    // would let a tap before the next draw write into an orphan.
-    for (const ui of Object.values(listUi)) Object.assign(ui, emptyListUi());
+// In place: search and pager handlers hold these objects.
+function resetLists() {
+    for (const ui of Object.values(lists)) Object.assign(ui, listUi());
 }
-// Whether the quick panel was open when this screen opened (read before closePanel()).
-// Only then is it reopened on close; from the settings drawer it would cover the drawer.
+// Whether the quick panel was open when this screen opened; only then is it reopened on close.
 let fromQuickPanel = false;
 
-// Every redraw goes through here: at most one per frame. drawManager also holds it
-// while a text field in the panel has focus.
+// Every redraw goes through here: at most one per frame, held while a field has focus.
 function scheduleDraw() {
     drawTask.schedule();
 }
 
 /* Shell */
 
-// One geometry write per frame: visualViewport fires scroll continuously while the
-// keyboard pans the page.
+// One geometry write per frame: visualViewport fires scroll continuously while the keyboard
+// pans the page.
 const sizeTask = frameTask(() => sizeToViewport());
-function scheduleSize() {
-    sizeTask.schedule();
-}
 
-// Last written geometry. An unchanged value is not rewritten: every style write
-// invalidates layout, and Android fires visualViewport events per frame during a fling.
+// Last written geometry, so an unchanged value is not rewritten (each write invalidates layout).
 let sizedHeight = null;
 let sizedTop = null;
 
@@ -188,8 +172,7 @@ function forgetSizing() {
 function sizeToViewport() {
     const panel = document.getElementById(PANEL_ID);
     if (!panel) return;
-    // visualViewport, not vh: vh ignores the on-screen keyboard and would put the save
-    // button under it.
+    // visualViewport, not vh: vh ignores the on-screen keyboard.
     const vv = globalThis.visualViewport;
     const height = vv?.height ?? globalThis.innerHeight ?? 0;
     if (!height) return;
@@ -197,12 +180,10 @@ function sizeToViewport() {
     if (px !== sizedHeight) {
         sizedHeight = px;
         panel.style.height = `${px}px`;
-        // Cap for the history tab's text boxes: 40% of the measured height, since a vh
-        // cap would ignore the keyboard too.
+        // Cap for the history tab's text boxes, measured for the same reason.
         panel.style.setProperty('--pm-history-cap', `${Math.round(height * 0.4)}px`);
     }
-    // Zero on Android while the keyboard is up (the visual viewport shrinks), non-zero
-    // when the page is pinch zoomed or a focused field is panned into view.
+    // Non-zero when the page is pinch zoomed or a focused field is panned into view.
     const top = Math.max(0, Math.round(vv?.offsetTop ?? 0));
     if (top !== sizedTop) {
         sizedTop = top;
@@ -213,8 +194,7 @@ function sizeToViewport() {
 function openManager(tab) {
     const wanted = TAB_KEYS.includes(tab) ? tab : 'compose';
     if (document.getElementById(HOST_ID)) { managerTab = wanted; scheduleDraw(); return; }
-    // The quick panel is a modal dialog too, and two in the top layer leave the user
-    // tapping the wrong one. Whether it was up is read before closing it.
+    // Two modal dialogs would leave the user tapping the wrong one, so the panel closes.
     fromQuickPanel = isPanelOpen();
     closePanel();
 
@@ -224,7 +204,7 @@ function openManager(tab) {
     openVariant = null;
     editorDirty = false;
     closeAsked = false;
-    drawDeferred = false;
+    drawHold.held = false;
     pickerOpen = false;
     historyVariant = null;
     historyIndex = null;
@@ -238,84 +218,45 @@ function openManager(tab) {
     resetFullText();
     targetAvatar = getState()?.avatar ?? null;
 
-    // pm-grain sits on the panel, not the scrolling content, so it composites once.
+    // The grain sits on the panel, not the scrolling content, so it composites once.
     const panel = el('div', 'pm-panel pm-manager-panel pm-grain');
     panel.id = PANEL_ID;
     panel.setAttribute('role', 'dialog');
     panel.setAttribute('aria-label', STRINGS.manager.screenAria);
-
-    // Every overlay rides a modal dialog: some themes put a transform on an ancestor,
-    // which breaks position: fixed, and the top layer ignores ancestor transforms.
-    const host = document.createElement('dialog');
-    host.id = HOST_ID;
-    host.className = 'pm-manager-host';
-    host.tabIndex = -1;
-    blockDrawerClose(host);
     blockDrawerClose(panel);
-    // ESC and the Android back gesture fire cancel; requestClose asks about unsaved work.
-    host.addEventListener('cancel', e => { e.preventDefault(); requestClose(); });
-    // Chromium's close watcher lets a second back gesture close the dialog natively when
-    // no tap happened since the last prevented cancel, so a close we did not start runs
-    // our teardown (a host left behind blocks reopening until reload).
+
+    // ESC and the Android back gesture ask about unsaved work first (requestClose).
+    const host = openHost(HOST_ID, 'pm-manager-host', [panel], requestClose, screenCleanups);
+    /* Chromium's close watcher lets a second back gesture close the dialog natively, so a close
+       we did not start runs our teardown (a host left behind blocks reopening). A close by
+       quickbar.js dropHost, for a non-dialog SillyTavern popup, is not one. */
     host.addEventListener('close', () => {
         if (document.getElementById(HOST_ID) !== host) return;
-        // quickbar.js dropHost closes this host so a non-dialog SillyTavern popup can be
-        // answered, then raises it again; the screen must survive that.
         if (host.dataset.pmDropped === '1') return;
         // Working copies the draft store does not keep: reopen and ask first.
         if (hasWorkingCopies()) {
-            try { host.showModal(); } catch { host.setAttribute('open', ''); }
+            showHost(host);
             void requestClose();
             return;
         }
         stashDraft();
         closeManager(false);
     });
-    host.append(panel);
-    document.body.append(host);
-    let modal = false;
-    if (typeof host.showModal === 'function') {
-        try { host.showModal(); modal = true; } catch { host.setAttribute('open', ''); }
-    } else {
-        host.setAttribute('open', '');
-    }
-    try { host.focus(); } catch { /* focus is best effort */ }
     drawManager();
     sizeToViewport();
-
-    if (globalThis.visualViewport) {
-        track(screenCleanups, globalThis.visualViewport, 'resize', scheduleSize);
-        // Android fires scroll, not resize, when the visual viewport pans to keep a
-        // focused field above the keyboard.
-        track(screenCleanups, globalThis.visualViewport, 'scroll', scheduleSize);
-    }
-    // The revise screen's edit popup follows the selection. selectionchange has no
-    // per-node target, so it listens for the screen's life and no-ops elsewhere.
+    trackViewport(screenCleanups, () => sizeTask.schedule());
+    // The revise screen's edit popup follows the selection, which has no per-node event.
     track(screenCleanups, document, 'selectionchange', onReviseSelectionChange);
-    // Fallback for no showModal, where no cancel event comes. Only while focus is in our
-    // host, so the ESC that dismisses a SillyTavern popup over this screen does not also
-    // close it.
-    if (!modal) {
-        track(screenCleanups, document, 'keydown', e => {
-            if (isComposingKey(e)) return;
-            if (e.key !== 'Escape') return;
-            const open = document.getElementById(HOST_ID);
-            if (!open || !open.contains(document.activeElement)) return;
-            requestClose();
-        });
-    }
 }
 
-// One close question at a time. The flag comes down even if the popup throws: left
-// up, every close path would return early and the screen could not be closed.
+// One close question at a time; the flag comes down even if the popup throws.
 async function askOnce(message) {
     closeAsked = true;
     try { return await askConfirm(message); } finally { closeAsked = false; }
 }
 
-// Asks, one question per dirty screen, before the revise steps or full-text bodies
-// are dropped; neither survives leaving the persona or the screen. Answers whether
-// to go on.
+// Asks, one question per dirty screen, before revise steps or full-text bodies are dropped.
+// Answers whether to go on.
 async function confirmDropWorking() {
     if (closeAsked) return false;
     const revising = reviseDirtyCount();
@@ -332,8 +273,7 @@ function hasWorkingCopies() {
 
 async function requestClose() {
     if (closeAsked) return;
-    // A picked replacement image not yet applied. Not asked once uploading: closing
-    // does not stop an upload.
+    // A picked replacement image not yet applied (closing does not stop an upload).
     if (framing?.mode === 'upload' && !framingBusy) {
         const ok = await askOnce(STRINGS.manager.framingConfirmLeave);
         if (!ok || !document.getElementById(HOST_ID)) return;
@@ -342,8 +282,8 @@ async function requestClose() {
     const fullDirty = fullDirtyCount();
     if (editorDirty || revising > 0 || fullDirty > 0) {
         stashDraft();
-        // The editor's text is stashed above and survives; the revise and full-text copies
-        // do not, so they are what to ask about, the one on the current tab first.
+        // The editor's text survives in the draft store; the other copies are asked about,
+        // the current tab's first.
         const onVersions = managerTab === 'versions';
         const first = onVersions ? revising : fullDirty;
         const second = onVersions ? fullDirty : revising;
@@ -354,7 +294,6 @@ async function requestClose() {
                 : STRINGS.manager.confirmCloseDirty;
         const ok = await askOnce(message);
         if (!ok || !document.getElementById(HOST_ID)) return;
-        // Both can be dirty and closeManager drops both, so the second gets its own question.
         if (first > 0 && second > 0) {
             const okSecond = await askOnce(askSecond(second));
             if (!okSecond || !document.getElementById(HOST_ID)) return;
@@ -363,21 +302,15 @@ async function requestClose() {
     closeManager();
 }
 
-// Closing steps back to the quick panel when that is where the user came from,
-// unless the panel is turned off or there is no persona. The insert-then-close path
-// passes false (see insertIntoSendBox).
+// Steps back to the quick panel when that is where the user came from, unless the panel is
+// off or there is no persona.
 function closeManager(reopenPanel = true) {
     const returnToPanel = reopenPanel && fromQuickPanel;
     fromQuickPanel = false;
     runCleanups(screenCleanups);
-    // Before the host goes: it holds SillyTavern's toast container while open, and
-    // removing it with the container inside would take every toast down with it.
+    // Before the host goes, which may hold SillyTavern's toast container.
     releaseToasts();
-    const host = document.getElementById(HOST_ID);
-    if (host) {
-        try { if (typeof host.close === 'function') host.close(); } catch { /* already closed */ }
-        host.remove();
-    }
+    closeHost(HOST_ID);
     targetAvatar = null;
     openVariant = null;
     editorDirty = false;
@@ -390,31 +323,28 @@ function closeManager(reopenPanel = true) {
     dropFraming();
     gestureHeld = false;
     drawWaitingOnGesture = false;
-    drawDeferred = false;
+    drawHold.held = false;
     pickerOpen = false;
     historyVariant = null;
     historyIndex = null;
     expandedRow = null;
     lastMissing = null;
-    // Two full description bodies, so it does not get to outlive the screen.
     diffMemo = null;
     languageMemo.clear();
     clearDragState();
     assetState = { avatar: null, list: [], error: null, loading: false };
-    // Unlike drafts, revise steps and full-text copies do not survive a close;
-    // requestClose has already asked about them.
+    // Unlike drafts, which survive a close on purpose, revise steps and full-text copies go
+    // (requestClose has asked about them).
     resetRevise();
     resetFullText();
     pickerMode = 'target';
-    // A focus request nobody consumed dies with the screen it was made on.
     focusSearch = null;
     clearListFrames();
     placementOpen = false;
     namesOpen = false;
     personaOpen = false;
     enumCache = null;
-    resetListUi();
-    // Drafts survive a close on purpose; unmountManager clears them.
+    resetLists();
     // A stale frame would make the schedulers skip every later draw.
     drawTask.cancel();
     sizeTask.cancel();
@@ -438,18 +368,16 @@ function targetState() {
         avatar: targetAvatar,
         persona: targetAvatar ? getPersona(root, targetAvatar) : null,
         readOnly: !!root.readOnly,
-        // False once deleted in SillyTavern behind this screen: a write would be refused
-        // at commit, after the record had already changed.
+        // False once deleted in SillyTavern behind this screen.
         listed: !targetAvatar || Object.hasOwn(freshContext()?.powerUserSettings?.personas ?? {}, targetAvatar),
-        // Two personas share a name and no precise path, so the active one is unknowable
-        // and saveAndComposeFor refuses. Shared state, not about the target.
+        // The active persona is unknowable, so saveAndComposeFor refuses (not about the target).
         ambiguous: !!getState()?.ambiguous,
     };
 }
 
-// Every write starts and resumes here. Across an await the picker may move the target
-// or the entry may be pruned, so writes pass the avatar they started on and re-read
-// state. Unlike the quick panel's guard this never closes the screen.
+// Every write starts and resumes here. Across an await the target may move or the entry be
+// pruned, so writes pass the avatar they started on. Unlike the quick panel's guard this never
+// closes the screen.
 function guardTarget(expected) {
     if (expected !== undefined && expected !== targetAvatar) {
         notify('error', STRINGS.manager.targetMovedNotSaved);
@@ -461,8 +389,26 @@ function guardTarget(expected) {
     return s;
 }
 
-// saveAndComposeFor answers every refusal with null; this tells the user which one,
-// because a silent refusal is the failure this project exists to avoid.
+// Asks, then acts on the target as it stands after the answer, if the screen still edits the
+// persona the question was about. A null or false answer cancels.
+async function afterAsking(ask, act) {
+    const s = guardTarget();
+    if (!s) return;
+    const startAvatar = targetAvatar;
+    const answer = await ask(s);
+    if (answer === null || answer === false) return;
+    const after = guardTarget(startAvatar);
+    if (after) return act(after, answer, startAvatar);
+}
+
+// Whether a write must stop because the data is read-only or the active persona unknowable.
+function refusedWrite(s) {
+    if (!s.readOnly && !s.ambiguous) return false;
+    notify('error', writeReason(s));
+    return true;
+}
+
+// saveAndComposeFor answers every refusal with null; this tells the user which one.
 function refusalMessage(avatar) {
     const root = getRoot();
     if (!root) return STRINGS.manager.refusalNoRoot;
@@ -474,8 +420,7 @@ function refusalMessage(avatar) {
     return STRINGS.common.cannotSaveNow;
 }
 
-// store.js always builds these containers, but a hand-edited settings.json may lack
-// one, and a throw would take the whole screen down.
+// A hand-edited settings.json may lack a container, and a throw would take the screen down.
 function ensureShape(persona) {
     if (!Array.isArray(persona.sections)) persona.sections = [];
     if (!persona.variants || typeof persona.variants !== 'object') persona.variants = {};
@@ -486,13 +431,12 @@ function ensureShape(persona) {
 
 /* Writes */
 
-// detail is shown to the user, so it carries names, never ids. kind is null when the
-// helper already logged (removeSection, deleteVariant, restore); write overrides what
-// the kind implies. version-apply forces the write: with an outside edit pending,
-// state.js leaves SillyTavern's text alone if the composition is unchanged.
+// detail is shown to the user, so it carries names, never ids. kind is null when the helper
+// already logged; write overrides what the kind implies. version-apply forces the write, as
+// in the quick panel's commit.
 function commit(kind, detail, expectedAvatar, { write } = {}) {
     const avatar = expectedAvatar ?? targetAvatar;
-    // Read before the save, logged only after it: a refused write has nothing to record.
+    // Read before the save, logged only after it.
     const persona = getPersona(getRoot(), avatar);
     const result = saveAndComposeFor(avatar, {
         write: write ?? !KEEP_DESCRIPTION_KINDS.has(kind),
@@ -505,14 +449,11 @@ function commit(kind, detail, expectedAvatar, { write } = {}) {
         freshContext()?.saveSettingsDebounced?.();
     }
     if (result.keptOutside) notify('warning', STRINGS.common.outsideKept(result.keptOutside.section));
-    // Only the stored copy was written (see state.js); the prompt keeps the old text
-    // until the persona is selected again.
+    // Only the stored copy was written; the prompt keeps the old text until reselected.
     if (result.activeUnknown && !result.kept) notify('warning', STRINGS.common.savedActiveUnknown);
-    // No PERSONA_UPDATED fires for a kept description, so the icon and an open quick
-    // panel hear about it from here.
+    // A kept description emits no PERSONA_UPDATED, so the icon hears it from here.
     if (result.kept) document.dispatchEvent(new CustomEvent('pm:changed'));
-    // Empty sections: the banner names them permanently; the toast fires only when the
-    // set changes, so a section left empty on purpose does not toast on every tap.
+    // The banner names empty items; the toast fires only when the set changes.
     const signature = missingSignature(result.missing);
     if (signature !== lastMissing) {
         if (result.missing?.length) notify('warning', STRINGS.common.emptyItems(result.missing.length));
@@ -524,32 +465,22 @@ function commit(kind, detail, expectedAvatar, { write } = {}) {
 
 /* Writes: sections */
 
-async function addSection() {
-    const s = guardTarget();
-    if (!s) return;
-    const startAvatar = targetAvatar;
-    const name = await askText(STRINGS.manager.newItemName, '');
-    if (!name || !name.trim()) return;
-    const after = guardTarget(startAvatar);
-    if (!after) return;
-    const persona = ensureShape(after.persona);
-    const { sectionId, variantId } = appendSection(persona, { name: name.trim() }, freshContext()?.uuidv4, '', Date.now());
-    pickInEveryVersion(persona, sectionId, variantId);
-    commit('section-add', name.trim(), startAvatar);
+function addSection() {
+    return afterAsking(() => askName(STRINGS.manager.newItemName, ''), (after, name, startAvatar) => {
+        const persona = ensureShape(after.persona);
+        const { sectionId, variantId } = appendSection(persona, { name }, freshContext()?.uuidv4, '', Date.now());
+        pickInEveryVersion(persona, sectionId, variantId);
+        commit('section-add', name, startAvatar);
+    });
 }
 
-async function renameSection(sectionId, current) {
-    const s = guardTarget();
-    if (!s) return;
-    const startAvatar = targetAvatar;
-    const name = await askText(STRINGS.manager.itemName, current);
-    if (!name || !name.trim()) return;
-    const after = guardTarget(startAvatar);
-    if (!after) return;
-    const section = (after.persona.sections ?? []).find(entry => entry.id === sectionId);
-    if (!section) { notify('error', STRINGS.manager.itemGone); scheduleDraw(); return; }
-    section.name = name.trim();
-    commit('section-rename', name.trim(), startAvatar);
+function renameSection(sectionId, current) {
+    return afterAsking(() => askName(STRINGS.manager.itemName, current), (after, name, startAvatar) => {
+        const section = (after.persona.sections ?? []).find(entry => entry.id === sectionId);
+        if (!section) { notify('error', STRINGS.manager.itemGone); scheduleDraw(); return; }
+        section.name = name;
+        commit('section-rename', name, startAvatar);
+    });
 }
 
 function shiftSection(sectionId, delta) {
@@ -560,26 +491,20 @@ function shiftSection(sectionId, delta) {
     commit('section-move', name, s.avatar);
 }
 
-async function dropSection(sectionId, name) {
-    const s = guardTarget();
-    if (!s) return;
-    const startAvatar = targetAvatar;
-    // Checked before the question, so a confirmation never ends in a refusal.
-    if (!canDeleteSection(s.persona, sectionId)) {
-        notify('error', STRINGS.manager.lastItemKept);
-        return;
-    }
-    if (!(await askConfirm(STRINGS.manager.confirmDropItem(name)))) return;
-    const after = guardTarget(startAvatar);
-    if (!after) return;
-    const gone = removeSection(after.persona, sectionId, Date.now());
-    if (!gone) { notify('error', STRINGS.manager.lastItemKept); scheduleDraw(); return; }
-    if (openVariant?.sectionId === sectionId) { openVariant = null; editorDirty = false; }
-    // The history tab may be on one of the removed bodies.
-    if (gone.variantIds.includes(historyVariant)) { historyVariant = null; historyIndex = null; }
-    // Drafts of removed bodies would be unreachable text until teardown.
-    for (const variantId of gone.variantIds) takeDraft(startAvatar, sectionId, variantId);
-    commit(null, gone.name, startAvatar);
+function dropSection(sectionId, name) {
+    return afterAsking(s => {
+        // Checked before the question, so a confirmation never ends in a refusal.
+        if (!canDeleteSection(s.persona, sectionId)) { notify('error', STRINGS.manager.lastItemKept); return false; }
+        return askConfirm(STRINGS.manager.confirmDropItem(name));
+    }, (after, _, startAvatar) => {
+        const gone = removeSection(after.persona, sectionId, Date.now());
+        if (!gone) { notify('error', STRINGS.manager.lastItemKept); scheduleDraw(); return; }
+        if (openVariant?.sectionId === sectionId) { openVariant = null; editorDirty = false; }
+        if (gone.variantIds.includes(historyVariant)) { historyVariant = null; historyIndex = null; }
+        // Drafts of removed bodies would be unreachable text until teardown.
+        for (const variantId of gone.variantIds) takeDraft(startAvatar, sectionId, variantId);
+        commit(null, gone.name, startAvatar);
+    });
 }
 
 /* Writes: variants */
@@ -587,8 +512,8 @@ async function dropSection(sectionId, name) {
 function pickVariant(sectionId, variantId) {
     const s = guardTarget();
     if (!s) return;
-    // The native Android picker stays open across a redraw, so a change event can come
-    // from a detached select; it is dropped silently.
+    // The native Android picker stays open across a redraw, so a change can come from a
+    // detached select; it is dropped silently.
     if (!pickApplicable(s.persona, sectionId, variantId)) return;
     s.persona.activePicks = { ...(s.persona.activePicks ?? {}), [sectionId]: variantId };
     const section = (s.persona.sections ?? []).find(entry => entry?.id === sectionId);
@@ -596,33 +521,22 @@ function pickVariant(sectionId, variantId) {
     commit('pick', `${section?.name ?? ''}: ${variant?.label ?? ''}`, s.avatar);
 }
 
-async function addVariant(sectionId) {
-    const s = guardTarget();
-    if (!s) return;
-    const startAvatar = targetAvatar;
-    const label = await askText(STRINGS.manager.newChoiceName, '');
-    if (!label || !label.trim()) return;
-    const after = guardTarget(startAvatar);
-    if (!after) return;
-    const persona = ensureShape(after.persona);
-    if (!Array.isArray(persona.variants[sectionId])) { notify('error', STRINGS.manager.itemGone); scheduleDraw(); return; }
-    const variant = { id: makeId(freshContext()?.uuidv4), label: label.trim(), text: '', updatedAt: Date.now() };
-    persona.variants[sectionId].push(variant);
-    commit('variant-add', label.trim(), startAvatar);
+function addVariant(sectionId) {
+    return afterAsking(() => askName(STRINGS.manager.newChoiceName, ''), (after, label, startAvatar) => {
+        const persona = ensureShape(after.persona);
+        if (!Array.isArray(persona.variants[sectionId])) { notify('error', STRINGS.manager.itemGone); scheduleDraw(); return; }
+        persona.variants[sectionId].push({ id: makeId(freshContext()?.uuidv4), label, text: '', updatedAt: Date.now() });
+        commit('variant-add', label, startAvatar);
+    });
 }
 
-async function renameVariant(sectionId, variantId, current) {
-    const s = guardTarget();
-    if (!s) return;
-    const startAvatar = targetAvatar;
-    const label = await askText(STRINGS.manager.choiceName, current);
-    if (!label || !label.trim()) return;
-    const after = guardTarget(startAvatar);
-    if (!after) return;
-    const variant = (after.persona.variants?.[sectionId] ?? []).find(entry => entry.id === variantId);
-    if (!variant) { notify('error', STRINGS.manager.choiceGone); scheduleDraw(); return; }
-    variant.label = label.trim();
-    commit('variant-rename', label.trim(), startAvatar);
+function renameVariant(sectionId, variantId, current) {
+    return afterAsking(() => askName(STRINGS.manager.choiceName, current), (after, label, startAvatar) => {
+        const variant = (after.persona.variants?.[sectionId] ?? []).find(entry => entry.id === variantId);
+        if (!variant) { notify('error', STRINGS.manager.choiceGone); scheduleDraw(); return; }
+        variant.label = label;
+        commit('variant-rename', label, startAvatar);
+    });
 }
 
 function duplicateVariant(sectionId, variantId) {
@@ -642,28 +556,24 @@ function duplicateVariant(sectionId, variantId) {
     commit('variant-duplicate', copy.label, s.avatar);
 }
 
-async function dropVariant(sectionId, variantId, label) {
-    const s = guardTarget();
-    if (!s) return;
-    const startAvatar = targetAvatar;
-    const list = s.persona.variants?.[sectionId] ?? [];
-    if (list.length <= 1) { notify('error', STRINGS.manager.lastChoiceKept); return; }
-    if (!(await askConfirm(STRINGS.manager.confirmDropChoice(label)))) return;
-    const after = guardTarget(startAvatar);
-    if (!after) return;
-    const result = deleteVariant(after.persona, sectionId, variantId, Date.now());
-    if (!result) { notify('error', STRINGS.manager.choiceUndeletable); scheduleDraw(); return; }
-    if (openVariant?.variantId === variantId) { openVariant = null; editorDirty = false; }
-    takeDraft(startAvatar, sectionId, variantId);
-    if (historyVariant === variantId) { historyVariant = null; historyIndex = null; }
-    // The pick moved without a tap, so say so (deleteVariant logs it too).
-    if (result.movedTo) notify('info', STRINGS.manager.pickMovedToFirst);
-    commit(null, result.label, startAvatar);
+function dropVariant(sectionId, variantId, label) {
+    return afterAsking(s => {
+        if ((s.persona.variants?.[sectionId] ?? []).length <= 1) { notify('error', STRINGS.manager.lastChoiceKept); return false; }
+        return askConfirm(STRINGS.manager.confirmDropChoice(label));
+    }, (after, _, startAvatar) => {
+        const result = deleteVariant(after.persona, sectionId, variantId, Date.now());
+        if (!result) { notify('error', STRINGS.manager.choiceUndeletable); scheduleDraw(); return; }
+        if (openVariant?.variantId === variantId) { openVariant = null; editorDirty = false; }
+        takeDraft(startAvatar, sectionId, variantId);
+        if (historyVariant === variantId) { historyVariant = null; historyIndex = null; }
+        // The pick moved without a tap, so say so.
+        if (result.movedTo) notify('info', STRINGS.manager.pickMovedToFirst);
+        commit(null, result.label, startAvatar);
+    });
 }
 
-// snapshot(), clearing historyIndex when the per-variant cap drops from the front:
-// the index is a position, so it would silently point at a different snapshot.
-// Answers whether a snapshot was kept (none is when the history count is 0).
+// snapshot(), clearing historyIndex when the per-variant cap drops from the front: the index
+// is a position and would point at a different snapshot. Answers whether one was kept.
 function snapshotKeepingIndex(persona, variantId, previous, now, settings, options) {
     const first = persona.history?.[variantId]?.[0];
     const kept = snapshot(persona, variantId, previous, now, settings, options);
@@ -695,8 +605,7 @@ function saveVariantText(sectionId, variantId, text) {
     snapshotKeepingIndex(s.persona, variantId, previous, now, s.settings);
     variant.text = text;
     variant.updatedAt = now;
-    // The per-variant cap does not bound the total in settings.json, and a snapshot is
-    // the only moment the total grows.
+    // A snapshot is the only moment the total grows, so the global caps apply here.
     trimHistory(s.root, s.settings, now);
     editorDirty = false;
     // A leftover draft would be restored over the saved text on next open.
@@ -714,8 +623,7 @@ async function applyVersion(versionId) {
         notify('error', STRINGS.common.versionNotApplicable);
         return;
     }
-    // Checked so a repeat tap over an outside edit is not skipped as already applied
-    // (the write itself keeps the outside text as a choice).
+    // A repeat tap over an outside edit is not skipped as already applied.
     const ctx = freshContext();
     const diverged = ctx ? hasDiverged(ctx, s.avatar, s.persona) : false;
     // A repeat tap on the applied version writes nothing and queues no second upload.
@@ -728,36 +636,25 @@ async function applyVersion(versionId) {
         return;
     }
     const version = findVersion(after.persona, versionId);
-    // A refused write did not apply the version, so the picture must not follow: it would
-    // mismatch the prompt and use up the one backup taken before the first overwrite.
+    // The picture follows only an accepted write, as in the quick panel.
     if (!applyVersionPicks(after.persona, version, () => commit('version-apply', version.name ?? '', startAvatar))) return;
     // Not awaited: a version whose picture fails to move is still applied.
     void runBoundImage(startAvatar, versionId, false);
 }
 
-async function saveAsVersion() {
-    const s = guardTarget();
-    if (!s) return;
-    const startAvatar = targetAvatar;
-    const name = await askText(STRINGS.common.newVersionName, '');
-    if (!name || !name.trim()) return;
-    const after = guardTarget(startAvatar);
-    if (!after) return;
-    const version = addVersion(ensureShape(after.persona), name.trim(), freshContext()?.uuidv4, Date.now());
-    commit('version-create', version.name, startAvatar);
+function saveAsVersion() {
+    return afterAsking(() => askName(STRINGS.common.newVersionName, ''), (after, name, startAvatar) => {
+        const version = addVersion(ensureShape(after.persona), name, freshContext()?.uuidv4, Date.now());
+        commit('version-create', version.name, startAvatar);
+    });
 }
 
-async function renameVersion(versionId, current) {
-    const s = guardTarget();
-    if (!s) return;
-    const startAvatar = targetAvatar;
-    const name = await askText(STRINGS.manager.versionName, current);
-    if (!name || !name.trim()) return;
-    const after = guardTarget(startAvatar);
-    if (!after) return;
-    const version = renameVersionIn(after.persona, versionId, name, Date.now());
-    if (!version) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
-    commit('version-rename', version.name, startAvatar);
+function renameVersion(versionId, current) {
+    return afterAsking(() => askName(STRINGS.manager.versionName, current), (after, name, startAvatar) => {
+        const version = renameVersionIn(after.persona, versionId, name, Date.now());
+        if (!version) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
+        commit('version-rename', version.name, startAvatar);
+    });
 }
 
 function duplicateVersion(versionId) {
@@ -771,8 +668,8 @@ function duplicateVersion(versionId) {
     commit('version-duplicate', copy.name, s.avatar);
 }
 
-// After a duplicate or move the row under the finger is another version's, so its
-// apply button ignores taps this long (TOOL_SETTLE_MS in quickbar.js).
+// After a duplicate or move the row under the finger is another version's, so its apply
+// button ignores taps this long (TOOL_SETTLE_MS in quickbar.js).
 const VERSION_TOOL_SETTLE_MS = 500;
 let versionToolAt = 0;
 
@@ -786,18 +683,13 @@ function shiftVersion(versionId, delta) {
     commit('version-move', version?.name ?? '', s.avatar);
 }
 
-// Rewrites a version's picks from the live ones. Nothing is snapshotted: history
-// covers variant text, and a version holds none.
-async function overwriteVersion(versionId, name) {
-    const s = guardTarget();
-    if (!s) return;
-    const startAvatar = targetAvatar;
-    if (!(await askConfirm(STRINGS.manager.confirmOverwriteVersion(name)))) return;
-    const after = guardTarget(startAvatar);
-    if (!after) return;
-    const version = overwriteVersionPicks(after.persona, versionId, Date.now());
-    if (!version) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
-    commit('version-overwrite', version.name ?? '', startAvatar);
+// Rewrites a version's picks from the live ones.
+function overwriteVersion(versionId, name) {
+    return afterAsking(() => askConfirm(STRINGS.manager.confirmOverwriteVersion(name)), (after, _, startAvatar) => {
+        const version = overwriteVersionPicks(after.persona, versionId, Date.now());
+        if (!version) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
+        commit('version-overwrite', version.name ?? '', startAvatar);
+    });
 }
 
 // Fills one slot of a version in place, e.g. a dead slot shown as empty.
@@ -813,49 +705,40 @@ function setVersionPick(versionId, sectionId, variantId) {
     commit('version-repick', version.name ?? '', s.avatar);
 }
 
-async function dropVersion(versionId, name) {
-    const s = guardTarget();
-    if (!s) return;
-    const startAvatar = targetAvatar;
-    if (!(await askConfirm(STRINGS.manager.confirmDropVersion(name)))) return;
-    const after = guardTarget(startAvatar);
-    if (!after) return;
-    if (!dropVersionFrom(after.persona, versionId)) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
-    commit('version-delete', name, startAvatar);
+function dropVersion(versionId, name) {
+    return afterAsking(() => askConfirm(STRINGS.manager.confirmDropVersion(name)), (after, _, startAvatar) => {
+        if (!dropVersionFrom(after.persona, versionId)) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
+        commit('version-delete', name, startAvatar);
+    });
 }
 
 /* Writes: history */
 
-async function restoreSnapshot(variantId, index) {
+function restoreSnapshot(variantId, index) {
     // The selection may have been cleared since the draw; restore() would throw on null.
     if (!Number.isInteger(index)) return;
-    const s = guardTarget();
-    if (!s) return;
-    const startAvatar = targetAvatar;
-    if (!(await askConfirm(STRINGS.manager.confirmRestore))) return;
-    const after = guardTarget(startAvatar);
-    if (!after) return;
-    const now = Date.now();
-    try {
-        restore(after.persona, variantId, index, now, after.settings);
-    } catch {
-        // An eviction may have trimmed the list while the question was up.
-        notify('error', STRINGS.manager.snapshotGone);
+    return afterAsking(() => askConfirm(STRINGS.manager.confirmRestore), (after, _, startAvatar) => {
+        const now = Date.now();
+        try {
+            restore(after.persona, variantId, index, now, after.settings);
+        } catch {
+            // An eviction may have trimmed the list while the question was up.
+            notify('error', STRINGS.manager.snapshotGone);
+            historyIndex = null;
+            scheduleDraw();
+            return;
+        }
+        // Restoring snapshots the current text, so the caps apply; the selection clears either
+        // way, as its snapshot is now the live text.
+        expireOldHistory(after.root, after.settings, now);
+        enforceGlobalBudget(after.root, after.settings, now);
         historyIndex = null;
-        scheduleDraw();
-        return;
-    }
-    // Restoring snapshots the current text, so the caps apply; the selection clears
-    // either way, as its snapshot is now the live text.
-    expireOldHistory(after.root, after.settings, now);
-    enforceGlobalBudget(after.root, after.settings, now);
-    historyIndex = null;
-    // The editor may be open on the restored body.
-    if (openVariant?.variantId === variantId) { openVariant = null; editorDirty = false; }
-    // And a draft would be restored over the restored text (as in saveVariantText).
-    const found = findVariant(after.persona, variantId);
-    if (found) takeDraft(startAvatar, found.section.id, variantId);
-    commit(null, '', startAvatar);
+        if (openVariant?.variantId === variantId) { openVariant = null; editorDirty = false; }
+        // A draft would be restored over the restored text.
+        const found = findVariant(after.persona, variantId);
+        if (found) takeDraft(startAvatar, found.section.id, variantId);
+        commit(null, '', startAvatar);
+    });
 }
 
 /* Writes: assets */
@@ -864,14 +747,13 @@ async function loadAssets(avatar) {
     const root = getRoot();
     if (!root || !avatar) return;
     assetState = { avatar, list: [], error: null, loading: true };
-    // resolveFolderKey stores nothing, so listing works for a persona not yet adopted;
-    // claimFolderKey stores and is only used on upload, where the entry exists.
+    // resolveFolderKey stores nothing, so listing works for a persona not yet adopted.
     const key = resolveFolderKey(root, avatar);
     try {
         const ctx = freshContext();
         if (!ctx) throw new Error(STRINGS.manager.noContext);
         const list = await listAssets(ctx, key);
-        // The screen may have moved to another persona meanwhile; do not show these there.
+        // The screen may have moved to another persona meanwhile.
         if (assetState.avatar !== avatar) return;
         assetState = { avatar, list, error: null, loading: false };
     } catch (e) {
@@ -887,7 +769,7 @@ async function uploadAssets(files) {
     if (!s) return;
     if (s.readOnly || s.ambiguous) { notify('error', refusalMessage(targetAvatar)); return; }
     const startAvatar = targetAvatar;
-    // Claimed once for the whole batch; claiming needs the entry, which guardTarget proved.
+    // Claimed once for the whole batch; guardTarget proved the entry exists.
     const key = claimFolderKey(s.root, startAvatar, () => freshContext()?.saveSettingsDebounced?.());
     let ok = 0;
     // Shared by this selection's files (see uploadAsset).
@@ -919,8 +801,7 @@ async function dropAsset(label) {
     if (!s) return;
     if (s.readOnly || s.ambiguous) { notify('error', refusalMessage(targetAvatar)); return; }
     const startAvatar = targetAvatar;
-    // The question names the versions showing this file, since they lose their picture.
-    // The listing is passed so 0.2.0's lowercased labels count too.
+    // The question names the versions showing this file, old lowercased labels included.
     const bound = versionsBindingAsset(s.persona, label, assetLabels());
     const boundIds = new Set(bound.map(version => version.id));
     const question = bound.length
@@ -935,11 +816,10 @@ async function dropAsset(label) {
         const ctx = freshContext();
         if (!ctx) throw new Error(STRINGS.manager.noContext);
         await deleteAsset(ctx, key, label);
-        // A backup record naming a deleted file keeps the backup guard closed, and every
-        // later overwrite would keep nothing.
+        // A backup record naming a deleted file would keep every later overwrite from backing up.
         const persona = getPersona(root, startAvatar);
         if (persona?.avatarBackup?.label === label) persona.avatarBackup = null;
-        // Bound versions keep naming the file, now exactly: a loose match would move on to
+        // Bound versions keep naming the file, now exactly, or a loose match would move on to
         // another file under the same server label (pose.png to pose-1.png).
         for (const version of persona?.versions ?? []) {
             if (!version || !boundIds.has(version.id)) continue;
@@ -958,14 +838,12 @@ async function dropAsset(label) {
     await refreshAssetViews(startAvatar);
 }
 
-// Ours draws this tab; state.js's feeds {{persona_assets}} for the active persona and
-// is refetched only when that is the same persona.
+// Ours draws this tab; state.js's feeds the macros and is refetched only for the active persona.
 async function refreshAssetViews(avatar) {
     await loadAssets(avatar);
     if (getState()?.avatar !== avatar) return;
     await refreshAssets();
-    // Again: the failure banner also reads state.js's listing, which arrived after
-    // loadAssets drew.
+    // Again: the failure banner also reads state.js's listing.
     scheduleDraw();
     // index.js re-points chat pictures whose file was just replaced.
     document.dispatchEvent(new CustomEvent('pm:assets-changed'));
@@ -976,7 +854,6 @@ function toggleVersionAsset(versionId, filename) {
     if (!s) return;
     const version = findVersion(s.persona, versionId);
     if (!version) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
-    // The full file list lets the selection express all files (see toggleAssetSelection).
     toggleAssetSelection(version, filename, assetLabels());
     version.updatedAt = Date.now();
     commit('asset-select', version.name ?? '', s.avatar);
@@ -984,10 +861,8 @@ function toggleVersionAsset(versionId, filename) {
 
 /* Writes: labels */
 
-// Label writes are not about the target persona, so they check rosterWritable instead
-// of going through guardTarget.
-// The label tab already disables its buttons by rosterWritable, but the state can
-// turn under a handler waiting on a popup, so refusals still get named.
+// Group writes are not about the target persona, so they check rosterWritable. The tab disables
+// its buttons by it, but the state can turn under a handler waiting on a popup.
 function rosterRefusal() {
     const s = getState();
     if (!s) return STRINGS.manager.groupRefusalNoState;
@@ -1049,21 +924,15 @@ function toggleLabelMembership(labelId, avatarId) {
 
 /* Target selection */
 
-async function selectTarget(avatar) {
-    if (avatar === targetAvatar) { pickerOpen = false; scheduleDraw(); return; }
-    // The revise and full-text working copies belong to the persona being left;
-    // carried over, a save would write them onto the new one.
-    if (!(await confirmDropWorking())) return;
-    if (avatar === targetAvatar) { pickerOpen = false; scheduleDraw(); return; }
+// The screen state that belongs to one persona, reset for another: working copies, folds,
+// search and selections.
+function moveTarget(avatar) {
     resetFullText();
     placementOpen = false;
     namesOpen = false;
     personaOpen = false;
     resetRevise();
-    // Search, filters and pages describe the persona being left.
-    resetListUi();
-    // Before the target moves, so the draft is stored under the persona being left.
-    stashDraft();
+    resetLists();
     targetAvatar = avatar;
     openVariant = null;
     editorDirty = false;
@@ -1072,18 +941,26 @@ async function selectTarget(avatar) {
     historyIndex = null;
     expandedRow = null;
     lastMissing = null;
+}
+
+async function selectTarget(avatar) {
+    if (avatar === targetAvatar) { pickerOpen = false; scheduleDraw(); return; }
+    // Working copies carried over would be saved onto the new persona.
+    if (!(await confirmDropWorking())) return;
+    if (avatar === targetAvatar) { pickerOpen = false; scheduleDraw(); return; }
+    // Before the target moves, so the draft is stored under the persona being left.
+    stashDraft();
+    moveTarget(avatar);
     scheduleDraw();
 }
 
-// An entry is created only on request, never by viewing a persona. adoptFor seeds it
-// from the existing description verbatim, or split by its titles (classify.js).
+// An entry is created only on request, never by viewing a persona.
 async function adoptTarget() {
     const avatar = targetAvatar;
     if (!avatar) return;
     if (!(await askConfirm(STRINGS.manager.confirmAdopt))) return;
     if (avatar !== targetAvatar) { notify('error', STRINGS.manager.targetMovedNotAdopted); return; }
-    // adoptFor returns the existing record for a managed persona, whose items are not
-    // a split.
+    // An existing record's items are not a split to announce.
     const existed = !!getPersona(getRoot(), avatar);
     const persona = adoptFor(avatar);
     if (!persona) { notify('error', refusalMessage(avatar)); return; }
@@ -1094,21 +971,18 @@ async function adoptTarget() {
 
 /* Drafts */
 
-// Read from the document, not a captured node: the tap's blur releases the deferred
-// redraw, which can land before the click and detach the node the editor was built with.
+// Read from the document, not a captured node: the redraw a blur releases can detach it.
 function readEditorText() {
     const area = document.getElementById(PANEL_ID)?.querySelector('.pm-manager-editor-text');
     return area ? area.value : null;
 }
 
-// Every path that takes the editor off screen without saving stashes the text under
-// its body; it comes back when that body is opened again.
+// Every path that takes the editor off screen unsaved stashes the text under its body.
 function stashDraft() {
     if (!editorDirty || !openVariant || !targetAvatar) return;
     const text = readEditorText();
     if (text === null) return;
-    // Typed and taken back: nothing to keep, and a kept draft would make the resplit
-    // refuse over an edit no badge shows.
+    // Typed and taken back: nothing to keep.
     const stored = getPersona(getRoot(), targetAvatar)?.variants?.[openVariant.sectionId]
         ?.find(variant => variant?.id === openVariant.variantId)?.text ?? '';
     if (text === stored) { takeDraft(targetAvatar, openVariant.sectionId, openVariant.variantId); return; }
@@ -1117,11 +991,8 @@ function stashDraft() {
 
 /* Content */
 
-// reason explains a disabled button. actionsRow also draws it as text, because touch
-// screens never show a title tooltip.
+// reason explains a disabled button; actionsRow also draws it, as touch screens show no tooltip.
 function actionButton(label, onClick, enabled, title, reason) {
-    // Click only: acting on touchstart lets the synthesized click land on whatever the
-    // redraw just put under the finger.
     const btn = button('pm-manager-btn', label, onClick, enabled);
     const tip = (!enabled && reason) ? reason : title;
     if (tip) { btn.title = tip; btn.setAttribute('aria-label', `${label}: ${tip}`); }
@@ -1150,10 +1021,7 @@ function noteOf(text) {
 
 function emptyOf(text) { return emptyBlock(text); }
 
-/* Rows that keep their extra actions folded away */
-
-// Why writes are blocked, in the write path's own wording so a control cannot
-// promise what the guard would refuse. Empty when nothing blocks.
+// Why writes are blocked, in the write path's own wording; empty when nothing blocks.
 function writeReason(s) {
     if (!s) return STRINGS.manager.refusalNoRoot;
     if (s.readOnly) return STRINGS.manager.refusalReadOnly;
@@ -1164,14 +1032,12 @@ function writeReason(s) {
 
 /* Rows redrawn in place */
 
-// Each row registers how to rebuild itself, so a toggle rebuilds only the rows it
-// touches; a choice is rebuilt through its item. Anything else (a draw queued or
-// held, a field being typed in, a row from replaced data) takes the full draw.
+// Each row registers how to rebuild itself, so a toggle rebuilds only the rows it touches (a
+// choice through its item). A queued or held draw, a field being typed in or replaced data
+// takes the full draw.
 const rowNodes = new Map();
 
-// The picker's thumbnails, reused across redraws (as thumbPool in quickbar.js). A full
-// draw starts the pool afresh; a list-only repaint (a search keystroke) adds what its
-// own container held to whatever the draw left.
+// The picker's thumbnails, reused across redraws, as in the quick panel.
 const pickerThumbs = imagePool('img.pm-quickbar-rowimg, img.pm-quickbar-tileimg');
 
 function registerRow(key, node, build, { persona = null, parent = null } = {}) {
@@ -1179,7 +1045,7 @@ function registerRow(key, node, build, { persona = null, parent = null } = {}) {
 }
 
 function redrawRows(keys) {
-    if (drawTask.pending() || drawDeferred || gestureHeld || dragSectionId !== null) return false;
+    if (drawTask.pending() || drawHold.held || gestureHeld || dragSectionId !== null) return false;
     const wanted = new Set();
     for (const key of keys) {
         if (key === null || key === undefined) continue;
@@ -1220,20 +1086,22 @@ function toggleExpanded(key) {
     if (!redrawRows([before, expandedRow])) scheduleDraw();
 }
 
-// A row's name, as the button that opens its other actions. Not a row-level handler:
-// that would also fire for the row's primary action button. summary is an optional
-// second line, ellipsised to one row.
-function rowName(key, parts, summary) {
-    const open = expandedRow === key;
+// A row's name, as the button that unfolds it. Not a row-level handler, which would also fire
+// for the row's primary action. summary is an optional one-line second line.
+function rowNameButton(parts, summary, open, onClick) {
     const btn = el('button', 'pm-manager-rowname');
     btn.type = 'button';
     btn.setAttribute('aria-expanded', open ? 'true' : 'false');
     const top = el('div', 'pm-manager-rowtop');
-    for (const part of parts) top.append(part);
+    top.append(...parts);
     btn.append(top);
     if (summary) btn.append(el('div', 'pm-manager-rowsummary', summary));
-    btn.addEventListener('click', () => toggleExpanded(key));
+    btn.addEventListener('click', onClick);
     return btn;
+}
+
+function rowName(key, parts, summary) {
+    return rowNameButton(parts, summary, expandedRow === key, () => toggleExpanded(key));
 }
 
 function foldMark(open, onToggle) {
@@ -1247,20 +1115,11 @@ function moreButton(key) {
     return foldMark(expandedRow === key, () => toggleExpanded(key));
 }
 
-// A folding block above a tab's list, shaped like a row. Its open state is the tab's
-// own boolean (see placementOpen), not expandedRow.
+// A folding block above a tab's list, shaped like a row, with its own open flag.
 function foldBox(className, title, summary, open, onToggle) {
     const box = el('div', `${className}${open ? ' pm-manager-rowopen' : ''}`);
-    const btn = el('button', 'pm-manager-rowname');
-    btn.type = 'button';
-    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-    const top = el('div', 'pm-manager-rowtop');
-    top.append(el('span', 'pm-manager-name', title));
-    btn.append(top);
-    if (summary) btn.append(el('div', 'pm-manager-rowsummary', summary));
-    btn.addEventListener('click', onToggle);
     const head = rowHead();
-    head.append(btn);
+    head.append(rowNameButton([el('span', 'pm-manager-name', title)], summary, open, onToggle));
     head.append(foldMark(open, onToggle));
     box.append(head);
     return box;
@@ -1277,8 +1136,8 @@ function buttonStack(buttons, extraClass) {
     return box;
 }
 
-// The drawer under an open row. Destructive buttons go last in a block of their own
-// (spaced in style.css), so a near miss cannot delete.
+// The drawer under an open row. Destructive buttons go last in a block of their own, so a
+// near miss cannot delete.
 function expansionOf(buttons, dangerButtons) {
     const box = el('div', 'pm-manager-expand');
     if (buttons?.length) box.append(buttonStack(buttons));
@@ -1292,45 +1151,33 @@ function rowHead() {
 
 function bannerOf(className, message) { return sharedBanner('pm-manager', className, message); }
 
-// Fixed locale, as in strings.js: the browser default can put an English date beside
-// Korean captions.
+// Fixed locale: the browser default can put an English date beside Korean captions.
 function formatTime(at) {
     if (!at) return '';
     try { return new Date(at).toLocaleString('ko-KR'); } catch { return String(at); }
 }
 
-// A native select, for the Android picker. A pick naming a deleted variant is shown as
-// such; snapping to the first option would show a combination the prompt lacks.
+// A pick naming a deleted choice is shown as such; snapping to the first option would show a
+// combination the prompt lacks.
 function pickSelect(persona, section, writable) {
-    const select = el('select', 'pm-manager-select');
     const variants = persona.variants?.[section.id] ?? [];
     const picked = persona.activePicks?.[section.id] ?? '';
-    if (picked && !variants.some(variant => variant.id === picked)) {
-        const dead = el('option', null, STRINGS.common.deletedChoiceOption);
-        dead.value = picked;
-        select.append(dead);
-    }
-    for (const variant of variants) {
-        const option = el('option', null, variant.label ?? '');
-        option.value = variant.id;
-        select.append(option);
-    }
-    select.value = picked;
+    const options = variants.map(variant => [variant.id, variant.label ?? '']);
+    if (picked && !variants.some(variant => variant.id === picked)) options.unshift([picked, STRINGS.common.deletedChoiceOption]);
+    const select = selectOf('pm-manager-select', options, picked);
     select.disabled = !writable;
     select.setAttribute('aria-label', STRINGS.manager.activeChoiceAria(section.name ?? ''));
     select.addEventListener('change', () => pickVariant(section.id, select.value));
     return select;
 }
 
-// The unsaved draft worth a badge, or null: one that matches the stored text is not.
-// The editor applies the same rule, so the badge and its discard button agree.
+// The unsaved draft worth a badge, or null; the editor applies the same rule.
 function pendingDraft(sectionId, variant) {
     const draft = peekDraft(targetAvatar, sectionId, variant.id);
     return (draft !== null && draft !== (variant.text ?? '')) ? draft : null;
 }
 
-// The body the editor is open on, or null if it was deleted meanwhile (the list
-// comes back).
+// The body the editor is open on, or null if it was deleted meanwhile.
 function openBody(persona) {
     if (!openVariant) return null;
     const section = (persona?.sections ?? []).find(entry => entry.id === openVariant.sectionId);
@@ -1339,8 +1186,7 @@ function openBody(persona) {
     return variant ? { section, variant } : null;
 }
 
-// The body editor, replacing the item list while open. No keydown handler on purpose:
-// Enter inserts a newline, so a hangul IME commit cannot trigger anything.
+// The body editor, replacing the item list while open. No keydown handler: Enter is a newline.
 function variantEditor(section, variant, writable, reason) {
     const sectionId = section.id;
     const box = el('div', 'pm-manager-editorscreen');
@@ -1348,11 +1194,10 @@ function variantEditor(section, variant, writable, reason) {
         STRINGS.manager.editorHeading(section.name ?? '', variant.label ?? '')));
     const stored = variant.text ?? '';
     const draft = peekDraft(targetAvatar, sectionId, variant.id);
-    // A draft equal to the stored text is dropped silently; it changes nothing.
     if (draft !== null && draft === stored) takeDraft(targetAvatar, sectionId, variant.id);
     const restored = draft !== null && draft !== stored;
     if (restored) {
-        // Unsaved text again, so closing asks; derived from the draft, not kept separately.
+        // Unsaved text again, so closing asks.
         editorDirty = true;
         box.append(noteOf(STRINGS.manager.editorRestored));
     }
@@ -1363,8 +1208,7 @@ function variantEditor(section, variant, writable, reason) {
     area.setAttribute('aria-label', STRINGS.manager.editorAria(variant.label ?? ''));
     area.addEventListener('input', () => { editorDirty = true; scheduleSizeUpdate(); });
     box.append(area);
-    // Updated by sizeTimer rewriting this line, never by a redraw, which would pull the
-    // field out mid IME composition.
+    // Updated by sizeTimer, never by a redraw, which would pull the field out mid composition.
     box.append(el('div', 'pm-manager-size pm-size-editor', sizeTextOf(area.value)));
 
     const buttons = [
@@ -1389,8 +1233,7 @@ function variantEditor(section, variant, writable, reason) {
         editorDirty = false;
         scheduleDraw();
     }, true, STRINGS.manager.editorCloseTitle));
-    // Sticky is relative to the scroll container, .pm-scroll, which this screen is
-    // drawn inside.
+    // Sticky within .pm-scroll, which this screen is drawn inside.
     const foot = el('div', 'pm-manager-editorfoot');
     foot.append(actionsRow(buttons));
     box.append(foot);
@@ -1409,7 +1252,7 @@ function variantRow(persona, section, variant, writable, reason) {
     };
     const parts = [
         checkMark(persona.activePicks?.[section.id] === variant.id),
-        markedText('pm-manager-name', variant.label ?? '', listUi.compose.open ? listUi.compose.query : ''),
+        markedText('pm-manager-name', variant.label ?? '', lists.compose.open ? lists.compose.query : ''),
     ];
     if (pendingDraft(section.id, variant) !== null) {
         parts.push(el('span', 'pm-manager-count', STRINGS.manager.pendingDraft));
@@ -1446,21 +1289,18 @@ function sectionBlock(persona, section, index, writable, reason) {
     const open = expandedRow === key;
     const box = el('div', `pm-manager-section${open ? ' pm-manager-rowopen' : ''}`);
     const variants = persona.variants?.[section.id] ?? [];
-    // A closed item shows only its name and live pick. Its choice rows appear when it or
-    // one of its choices is open, or while searching, so a match is never hidden.
+    // A closed item shows only its name and live pick; its choices appear when it or one of
+    // them is open, or while searching.
     const choiceOpen = variants.some(variant => expandedRow === rowKey('choice', section.id, variant.id));
-    const searching = listUi.compose.open && listUi.compose.query.trim() !== '';
+    const searching = lists.compose.open && lists.compose.query.trim() !== '';
     const showChoices = open || choiceOpen || searching;
 
     const head = rowHead();
-    // Its own span: only an element can take the ellipsis that keeps a long name from
-    // pushing the buttons off screen.
     const headParts = [
-        markedText('pm-manager-name', section.name ?? '', listUi.compose.open ? listUi.compose.query : ''),
+        markedText('pm-manager-name', section.name ?? '', lists.compose.open ? lists.compose.query : ''),
         el('span', 'pm-manager-count', STRINGS.manager.choiceCount(variants.length)),
     ];
-    // Unsaved typing marks its choice row, and a closed item hides that row, so
-    // the mark moves up to the item.
+    // A closed item hides its choices, so their unsaved-typing mark moves up to it.
     if (!showChoices && variants.some(variant => pendingDraft(section.id, variant) !== null)) {
         headParts.push(el('span', 'pm-manager-count', STRINGS.manager.pendingDraft));
     }
@@ -1468,8 +1308,7 @@ function sectionBlock(persona, section, index, writable, reason) {
     head.append(dragHandle(section.id, writable, reason));
     head.append(moreButton(key));
     box.append(head);
-    // Read by dropTargetAt. An id, not a position: a search filters the list, so a
-    // rendered position is not an index into persona.sections.
+    // Read by dropTargetAt; an id, since a search filters the rendered rows.
     box.dataset.pmSection = section.id;
 
     if (open) {
@@ -1501,12 +1340,11 @@ function sectionBlock(persona, section, index, writable, reason) {
 
 /* List search, filters and paging */
 
-// The list whose search field the next draw focuses and scrolls to (the row can sit
-// below the fold). A list key, so another tab's draw cannot take it; consumed once.
+// The list whose search field the next draw focuses; consumed once.
 let focusSearch = null;
 
 function listSearchButton(key) {
-    const ui = listUi[key];
+    const ui = lists[key];
     const btn = button('pm-manager-btn', ui.open ? STRINGS.common.searchClose : STRINGS.common.search, () => {
         ui.open = !ui.open;
         if (!ui.open) { ui.query = ''; ui.lang = null; ui.tags = []; ui.page = 1; }
@@ -1517,44 +1355,20 @@ function listSearchButton(key) {
     return btn;
 }
 
-// Typing repaints only the list container below, never this field, so an IME
-// composition survives; full draws rebuild it from listUi.
 function listSearchRow(key) {
-    const ui = listUi[key];
-    const row = el('div', 'pm-search-row');
-    const input = el('input', 'pm-search-input');
-    input.type = 'search';
-    input.value = ui.query;
-    input.placeholder = STRINGS.common.search;
-    input.setAttribute('aria-label', STRINGS.common.search);
-    input.autocapitalize = 'none';
-    input.spellcheck = false;
+    const { row, input } = searchRow(lists[key], () => redrawManagerList(key));
     // Marked, not focused: the node is not in the document yet (see takeSearchFocus).
     if (focusSearch === key) input.dataset.pmFocus = '1';
-    input.addEventListener('input', () => {
-        ui.query = input.value;
-        ui.page = 1;
-        redrawManagerList(key);
-    });
-    row.append(input);
     return row;
 }
 
-// At the end of a draw, once the field has a size: focus it and bring it on screen.
+// At the end of a draw, once the field has a size.
 function takeSearchFocus() {
     focusSearch = null;
-    const panel = document.getElementById(PANEL_ID);
-    const input = panel?.querySelector('input[data-pm-focus]');
-    if (!input) return;
-    delete input.dataset.pmFocus;
-    // Centred: scrolled merely into view, it can end half hidden behind the sticky
-    // header or footer.
-    input.scrollIntoView?.({ block: 'center' });
-    input.focus?.({ preventScroll: true });
+    focusMarked(document.getElementById(PANEL_ID));
 }
 
-// One rebuild per frame per list, since keystrokes outpace frames. Keyed, because two
-// lists can be waiting at once.
+// One rebuild per frame per list, since keystrokes outpace frames.
 const listTasks = new Map();
 
 function redrawManagerList(key) {
@@ -1576,7 +1390,7 @@ function redrawManagerListNow(key) {
     if (key === 'picker') { fillPickerList(container, ctx); return; }
     const s = targetState();
     if (!s) return;
-    const writable = !s.ambiguous && !s.readOnly;
+    const writable = rosterWritable(s);
     const reason = writeReason(s);
     if (key === 'versions') fillVersionList(container, s, writable, reason);
     else if (key === 'assets') fillAssetList(container, s, writable, reason);
@@ -1584,16 +1398,14 @@ function redrawManagerListNow(key) {
     else if (key === 'groups') fillGroupList(container, s);
 }
 
-// A version's language, judged from the text its own picks compose. Memoised: the
-// versions tab asks it of every version on each search keystroke. The key holds
-// version.updatedAt (picks changed) and stamp, modifiedAt(persona) (a body changed).
+// A version's language, from the text its own picks compose. Memoised per version, picks
+// (updatedAt) and bodies (stamp: modifiedAt), since search asks on every keystroke.
 const languageMemo = new Map();
 
 function versionLanguage(persona, version, stamp) {
     if (typeof stamp !== 'number') return detectLanguage(composePicked(persona, version?.picks).text);
     const key = `${version?.id}|${version?.updatedAt}|${stamp}`;
     if (languageMemo.has(key)) return languageMemo.get(key);
-    // Bounded like search-pure's caches: an entry per version per edit grows all session.
     if (languageMemo.size > 500) languageMemo.clear();
     const answer = detectLanguage(composePicked(persona, version?.picks).text);
     languageMemo.set(key, answer);
@@ -1602,32 +1414,23 @@ function versionLanguage(persona, version, stamp) {
 
 /* Tags */
 
-async function addTagTo(kindLabel, getOwner) {
-    const s = guardTarget();
-    if (!s) return;
-    const startAvatar = targetAvatar;
-    const tag = await askText(STRINGS.manager.tagAddPrompt, '');
-    if (!tag || !tag.trim()) return;
-    const after = guardTarget(startAvatar);
-    if (!after) return;
-    const owner = getOwner(ensureShape(after.persona));
-    if (!owner) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
-    const stored = addTag(owner, tag);
-    if (!stored) { notify('info', STRINGS.manager.tagDuplicate); return; }
-    commit('tag-add', kindLabel ? `${kindLabel}: ${stored}` : stored, startAvatar);
+function addTagTo(kindLabel, getOwner) {
+    return afterAsking(() => askName(STRINGS.manager.tagAddPrompt, ''), (after, tag, startAvatar) => {
+        const owner = getOwner(ensureShape(after.persona));
+        if (!owner) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
+        const stored = addTag(owner, tag);
+        if (!stored) { notify('info', STRINGS.manager.tagDuplicate); return; }
+        commit('tag-add', kindLabel ? `${kindLabel}: ${stored}` : stored, startAvatar);
+    });
 }
 
-async function removeTagFrom(kindLabel, tag, getOwner) {
-    const s = guardTarget();
-    if (!s) return;
-    const startAvatar = targetAvatar;
-    if (!(await askConfirm(STRINGS.manager.confirmDropTag(tag)))) return;
-    const after = guardTarget(startAvatar);
-    if (!after) return;
-    const owner = getOwner(ensureShape(after.persona));
-    if (!owner) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
-    if (!removeTag(owner, tag)) { notify('info', STRINGS.manager.tagGone); scheduleDraw(); return; }
-    commit('tag-remove', kindLabel ? `${kindLabel}: ${tag}` : tag, startAvatar);
+function removeTagFrom(kindLabel, tag, getOwner) {
+    return afterAsking(() => askConfirm(STRINGS.manager.confirmDropTag(tag)), (after, _, startAvatar) => {
+        const owner = getOwner(ensureShape(after.persona));
+        if (!owner) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
+        if (!removeTag(owner, tag)) { notify('info', STRINGS.manager.tagGone); scheduleDraw(); return; }
+        commit('tag-remove', kindLabel ? `${kindLabel}: ${tag}` : tag, startAvatar);
+    });
 }
 
 // Filtering writes nothing, so a chip is always live; active is colour and aria-pressed.
@@ -1645,8 +1448,8 @@ function tagChipsRow(tags, writable, reason, kindLabel, getOwner) {
     return row;
 }
 
-// Names match through rankOf's full ladder; bodies only by textContains, because the
-// sparse and typo tiers match almost any long prose.
+// Names match through rankOf's full ladder; bodies only by textContains, since the sparse and
+// typo tiers match almost any long prose.
 function sectionMatchesQuery(persona, section, query) {
     if (rankOf(section.name ?? '', query) > 0) return true;
     for (const variant of persona.variants?.[section.id] ?? []) {
@@ -1672,37 +1475,33 @@ function fillComposeList(container, s, writable, reason) {
 
     if (!(persona.sections ?? []).length) { container.append(emptyOf(STRINGS.manager.noItems)); return; }
 
-    const query = listUi.compose.open ? listUi.compose.query.trim() : '';
+    const query = lists.compose.open ? lists.compose.query.trim() : '';
     let sections = persona.sections ?? [];
     if (query) sections = sections.filter(section => sectionMatchesQuery(persona, section, query));
     if (!sections.length) { container.append(emptyOf(STRINGS.common.searchNoHits)); return; }
     for (const section of sections) {
-        // Index in the full list: the move arrows reorder the real array, not the filtered view.
+        // Index in the full list, which the move arrows reorder.
         container.append(sectionBlock(persona, section, persona.sections.indexOf(section), writable, reason));
     }
 }
 
-async function doFillDefaults() {
-    const s = guardTarget();
-    if (!s) return;
-    const startAvatar = targetAvatar;
-    const missing = missingDefaultSections(s.persona);
-    if (!missing.length) { notify('info', STRINGS.manager.fillDefaultsNothing); return; }
-    if (!(await askConfirm(STRINGS.manager.confirmFillDefaults(missing.length)))) return;
-    const after = guardTarget(startAvatar);
-    if (!after) return;
-    const added = fillDefaultSections(ensureShape(after.persona), freshContext()?.uuidv4, Date.now());
-    // Filled while the question was up: nothing to save.
-    if (!added.length) { notify('info', STRINGS.manager.fillDefaultsNothing); scheduleDraw(); return; }
-    if (commit(null, '', startAvatar)) notify('info', STRINGS.manager.fillDefaultsDone(added.length));
+function doFillDefaults() {
+    return afterAsking(s => {
+        const missing = missingDefaultSections(s.persona);
+        if (!missing.length) { notify('info', STRINGS.manager.fillDefaultsNothing); return false; }
+        return askConfirm(STRINGS.manager.confirmFillDefaults(missing.length));
+    }, (after, _, startAvatar) => {
+        const added = fillDefaultSections(ensureShape(after.persona), freshContext()?.uuidv4, Date.now());
+        // Filled while the question was up: nothing to save.
+        if (!added.length) { notify('info', STRINGS.manager.fillDefaultsNothing); scheduleDraw(); return; }
+        if (commit(null, '', startAvatar)) notify('info', STRINGS.manager.fillDefaultsDone(added.length));
+    });
 }
 
-// Resplit by titles. Refused over unsaved typing: a stashed draft would be restored
-// over its body on next open, putting the old whole text back on top of the split.
+// Splits are refused over unsaved typing (editor, drafts, revise or full-text copies), which
+// would put the old whole text back on top of the split.
 function hasUnsavedBody(avatar, persona) {
     if (editorDirty) return true;
-    // The revise and full-text copies too: saved after the split, they would write the
-    // pre-split text back as new choices.
     if (reviseDirtyCount() > 0 || fullDirtyCount() > 0) return true;
     // Same rule as pendingDraft.
     return (persona.sections ?? []).some(section =>
@@ -1712,34 +1511,31 @@ function hasUnsavedBody(avatar, persona) {
         }));
 }
 
-async function doResplit() {
-    const s = guardTarget();
-    if (!s) return;
-    const startAvatar = targetAvatar;
-    if (hasUnsavedBody(startAvatar, s.persona)) { notify('warning', STRINGS.manager.resplitDraft); return; }
-    const plan = planResplit(s.persona);
-    if (!plan) { notify('info', STRINGS.manager.resplitNothing); return; }
-    if (!(await askConfirm(STRINGS.manager.confirmResplit(plan.targets, plan.created)))) return;
-    const after = guardTarget(startAvatar);
-    if (!after) return;
-    if (hasUnsavedBody(startAvatar, after.persona)) { notify('warning', STRINGS.manager.resplitDraft); return; }
-    const fresh = planResplit(ensureShape(after.persona));
-    if (!fresh) { notify('info', STRINGS.manager.resplitNothing); scheduleDraw(); return; }
-    const now = Date.now();
-    const uuid = freshContext()?.uuidv4;
-    let kept = false;
-    const changed = applyResplit(after.persona, fresh, uuid, now, after.settings?.defaultHeadingFormat,
-        (variantId, text) => { kept = snapshotKeepingIndex(after.persona, variantId, text, now, after.settings, { force: true }) || kept; });
-    trimHistory(after.root, after.settings, now);
-    if (commit('split-headings', STRINGS.manager.logDetails.resplit(changed.length), startAvatar)) {
-        // Mention history only if a snapshot was kept (none is with a history count of 0).
-        notify('success', kept ? STRINGS.manager.resplitDone(changed.length) : STRINGS.manager.resplitDoneNoHistory(changed.length));
-    }
+function doResplit() {
+    return afterAsking(s => {
+        if (hasUnsavedBody(targetAvatar, s.persona)) { notify('warning', STRINGS.manager.resplitDraft); return false; }
+        const plan = planResplit(s.persona);
+        if (!plan) { notify('info', STRINGS.manager.resplitNothing); return false; }
+        return askConfirm(STRINGS.manager.confirmResplit(plan.targets, plan.created));
+    }, (after, _, startAvatar) => {
+        if (hasUnsavedBody(startAvatar, after.persona)) { notify('warning', STRINGS.manager.resplitDraft); return; }
+        // Planned again on the persona as it stands now.
+        const fresh = planResplit(ensureShape(after.persona));
+        if (!fresh) { notify('info', STRINGS.manager.resplitNothing); scheduleDraw(); return; }
+        const now = Date.now();
+        let kept = false;
+        const changed = applyResplit(after.persona, fresh, freshContext()?.uuidv4, now, after.settings?.defaultHeadingFormat,
+            (variantId, text) => { kept = snapshotKeepingIndex(after.persona, variantId, text, now, after.settings, { force: true }) || kept; });
+        trimHistory(after.root, after.settings, now);
+        if (commit('split-headings', STRINGS.manager.logDetails.resplit(changed.length), startAvatar)) {
+            // History is mentioned only if a snapshot was kept.
+            notify('success', kept ? STRINGS.manager.resplitDone(changed.length) : STRINGS.manager.resplitDoneNoHistory(changed.length));
+        }
+    });
 }
 
-// Split by its own titles: for a managed persona whose whole text sits in one item
-// (adopted before state.js seedDescription did this). Only when that item's live
-// choice holds the only text, and composing the result gives the same text back.
+// Split by its own titles, for a managed persona whose whole text sits in one item's live
+// choice; only when composing the result gives the same text back.
 function ownSplitSource(persona) {
     const holders = (persona.sections ?? []).filter(section =>
         (persona.variants?.[section.id] ?? []).some(variant => String(variant?.text ?? '').trim()));
@@ -1751,60 +1547,58 @@ function ownSplitSource(persona) {
     return { section, variant: live };
 }
 
-async function doOwnSplit() {
-    const s = guardTarget();
-    if (!s) return;
-    const startAvatar = targetAvatar;
-    if (hasUnsavedBody(startAvatar, s.persona)) { notify('warning', STRINGS.manager.resplitDraft); return; }
-    const source = ownSplitSource(s.persona);
-    if (!source) { notify('warning', STRINGS.manager.ownSplitNotOnly); return; }
-    const body = source.variant.text;
-    const own = splitOwnSections(body);
-    if (!own) { notify('info', STRINGS.manager.ownSplitNothing); return; }
-    const trial = structuredClone(s.persona);
-    seedOwnSections(trial, own, freshContext()?.uuidv4);
-    if (!sameText(compose(trial).text, body)) { notify('warning', STRINGS.manager.ownSplitNotExact); return; }
-    const names = trial.sections.map(section => section.name).join(', ');
-    if (!(await askConfirm(STRINGS.manager.confirmOwnSplit(trial.sections.length, names)))) return;
-    const after = guardTarget(startAvatar);
-    if (!after) return;
-    if (hasUnsavedBody(startAvatar, after.persona)) { notify('warning', STRINGS.manager.resplitDraft); return; }
-    const again = ownSplitSource(after.persona);
-    if (!again || again.variant.text !== body) { notify('error', STRINGS.manager.ownSplitNotOnly); scheduleDraw(); return; }
-    const persona = ensureShape(after.persona);
-    const now = Date.now();
-    const oldVariantId = again.variant.id;
-    // Their history would linger under ids nothing can open, still counted against the cap.
-    const replaced = Object.values(persona.variants).flatMap(list => (Array.isArray(list) ? list : []).map(variant => variant?.id));
-    seedOwnSections(persona, own, freshContext()?.uuidv4, now);
-    // The old body's history moves to the first new item, with the whole old body on
-    // top, so history can put everything back.
-    const firstId = persona.activePicks[persona.sections[0].id];
-    const kept = Array.isArray(persona.history?.[oldVariantId]) ? persona.history[oldVariantId] : [];
-    if (!persona.history) persona.history = {};
-    for (const id of replaced) if (id && id !== firstId) delete persona.history[id];
-    if (kept.length) persona.history[firstId] = kept;
-    const snapped = snapshotKeepingIndex(persona, firstId, body, now, after.settings, { force: true });
-    // The history tab may point at a choice that no longer exists.
-    historyVariant = null;
-    historyIndex = null;
-    // Every saved version points at the new items; the old ones are gone.
-    for (const version of persona.versions ?? []) {
-        if (version && typeof version === 'object') version.picks = { ...persona.activePicks };
-    }
-    trimHistory(after.root, after.settings, now);
-    openVariant = null;
-    expandedRow = null;
-    if (commit('split-own', names, startAvatar)) {
-        notify('success', snapped || kept.length
-            ? STRINGS.manager.ownSplitDone(persona.sections.length)
-            : STRINGS.manager.ownSplitDoneNoHistory(persona.sections.length));
-    }
+function doOwnSplit() {
+    let body = '';
+    let own = null;
+    let names = '';
+    return afterAsking(s => {
+        if (hasUnsavedBody(targetAvatar, s.persona)) { notify('warning', STRINGS.manager.resplitDraft); return false; }
+        const source = ownSplitSource(s.persona);
+        if (!source) { notify('warning', STRINGS.manager.ownSplitNotOnly); return false; }
+        body = source.variant.text;
+        own = splitOwnSections(body);
+        if (!own) { notify('info', STRINGS.manager.ownSplitNothing); return false; }
+        const trial = structuredClone(s.persona);
+        seedOwnSections(trial, own, freshContext()?.uuidv4);
+        if (!sameText(compose(trial).text, body)) { notify('warning', STRINGS.manager.ownSplitNotExact); return false; }
+        names = trial.sections.map(section => section.name).join(', ');
+        return askConfirm(STRINGS.manager.confirmOwnSplit(trial.sections.length, names));
+    }, (after, _, startAvatar) => {
+        if (hasUnsavedBody(startAvatar, after.persona)) { notify('warning', STRINGS.manager.resplitDraft); return; }
+        const again = ownSplitSource(after.persona);
+        if (!again || again.variant.text !== body) { notify('error', STRINGS.manager.ownSplitNotOnly); scheduleDraw(); return; }
+        const persona = ensureShape(after.persona);
+        const now = Date.now();
+        const oldVariantId = again.variant.id;
+        // Their history would linger under ids nothing can open, still counted against the cap.
+        const replaced = Object.values(persona.variants).flatMap(list => (Array.isArray(list) ? list : []).map(variant => variant?.id));
+        seedOwnSections(persona, own, freshContext()?.uuidv4, now);
+        // The old body's history moves to the first new item, the whole old body on top.
+        const firstId = persona.activePicks[persona.sections[0].id];
+        const kept = Array.isArray(persona.history?.[oldVariantId]) ? persona.history[oldVariantId] : [];
+        if (!persona.history) persona.history = {};
+        for (const id of replaced) if (id && id !== firstId) delete persona.history[id];
+        if (kept.length) persona.history[firstId] = kept;
+        const snapped = snapshotKeepingIndex(persona, firstId, body, now, after.settings, { force: true });
+        historyVariant = null;
+        historyIndex = null;
+        // Every saved version points at the new items; the old ones are gone.
+        for (const version of persona.versions ?? []) {
+            if (version && typeof version === 'object') version.picks = { ...persona.activePicks };
+        }
+        trimHistory(after.root, after.settings, now);
+        openVariant = null;
+        expandedRow = null;
+        if (commit('split-own', names, startAvatar)) {
+            notify('success', snapped || kept.length
+                ? STRINGS.manager.ownSplitDone(persona.sections.length)
+                : STRINGS.manager.ownSplitDoneNoHistory(persona.sections.length));
+        }
+    });
 }
 
-/* Size. Tokens come from SillyTavern's own counter, whose name is unverified: the
-   line omits tokens unless the probe answers a number. The probe result is a fact
-   about the build, so it is kept for the session. */
+/* Size. Tokens come from SillyTavern's own counter, whose name is unverified, so the line omits
+   them unless a probe answers a number; the probe's result is kept for the session. */
 let tokenProbe = null;
 
 function tokenCounter() {
@@ -1821,8 +1615,7 @@ function tokenCounter() {
     return text => freshContext()?.getTokenCount?.(text);
 }
 
-// One-slot memo keyed by the body (like diffPartsFor's): draws happen for reasons
-// unrelated to the body, and each would re-run the tokenizer for the same line.
+// One-slot memo keyed by the body: most draws are for unrelated reasons.
 let sizeMemoText = null;
 let sizeMemoLine = '';
 
@@ -1837,8 +1630,7 @@ function sizeTextOf(text) {
     return sizeMemoLine;
 }
 
-// Trailing, and long enough that a sentence typed at speed costs one count of the
-// whole body (see sizeTimer).
+// Trailing, so a sentence typed at speed costs one count of the whole body.
 const SIZE_LINE_DELAY_MS = 500;
 
 function scheduleSizeUpdate() {
@@ -1859,9 +1651,8 @@ function refreshSizeLines() {
     if (s?.persona) fullLine.textContent = sizeTextOf(composeFrom(s.persona, fullBlocks, fullTexts));
 }
 
-/* Full text: the whole description in prompt order, each body editable in place.
-   Unlike the revise screen, which only adds choices and a version, it overwrites
-   bodies, so each is snapshotted into history first. */
+/* Full text: the whole description in prompt order, each body editable in place. Unlike the
+   revise screen it overwrites bodies, so each is snapshotted into history first. */
 
 function resetFullText() {
     fullActive = false;
@@ -1871,8 +1662,7 @@ function resetFullText() {
     if (sizeTimer) { clearTimeout(sizeTimer); sizeTimer = 0; }
 }
 
-// Live fields into the working copies, before every draw and every read, so a
-// rebuild never loses typing.
+// Live fields into the working copies, before every draw and every read.
 function harvestFullTexts() {
     if (!fullActive || !Array.isArray(fullTexts)) return;
     const panel = document.getElementById(PANEL_ID);
@@ -1910,7 +1700,6 @@ function openFullText() {
 }
 
 async function leaveFullText() {
-    // The same one-question-at-a-time flag requestClose uses.
     if (closeAsked) return;
     const dirty = fullDirtyCount();
     if (dirty > 0) {
@@ -1933,7 +1722,6 @@ function saveFullText() {
     const now = Date.now();
     for (const write of plan.writes) {
         const variant = (s.persona.variants?.[write.sectionId] ?? []).find(entry => entry.id === write.variantId);
-        // Cannot happen right after planning; checked so a throw cannot take half a save.
         if (!variant) continue;
         snapshotKeepingIndex(s.persona, write.variantId, write.before, now, s.settings);
         variant.text = write.after;
@@ -1944,9 +1732,8 @@ function saveFullText() {
     trimHistory(s.root, s.settings, now);
     if (!commit(null, '', startAvatar)) return;
     notify('info', STRINGS.manager.fullTextSaved(plan.writes.length));
-    // The written bodies become the new baseline, so the dirty count stops asking.
-    // Each block keeps the choice it was drawn from: rebuilding from the persona would
-    // re-point it at the choice active now and write typing into the wrong choice.
+    // The written bodies become the new baseline. Each block keeps the choice it was drawn
+    // from, or typing could land in the choice active now.
     const written = new Map(plan.writes.map(write => [write.variantId, write.after]));
     if (written.size) {
         fullBlocks = fullBlocks.map(block => (written.has(block.variantId)
@@ -1958,8 +1745,7 @@ function saveFullText() {
     }
 }
 
-// Each body under the heading it is printed with; without a heading the caption
-// names the item and choice instead (a note says which is shown).
+// Each body under the heading it is printed with, or a caption naming the item and choice.
 function fullTextScreen(s, writable, reason) {
     const wrap = el('div', 'pm-full');
     wrap.append(noteOf(STRINGS.manager.fullTextGuide));
@@ -1967,7 +1753,6 @@ function fullTextScreen(s, writable, reason) {
     const blocks = fullBlocks ?? [];
     const line = el('div', 'pm-manager-size pm-size-full', sizeTextOf(composeFrom(persona, blocks, fullTexts)));
     wrap.append(line);
-    // The pressed view is filled (pm-manager-primary), as in the history tab's toggles.
     const toggles = el('div', 'pm-manager-actions');
     for (const [key, text] of [['items', STRINGS.manager.fullViewItems], ['raw', STRINGS.manager.fullViewRaw]]) {
         const active = fullView === key;
@@ -1984,8 +1769,7 @@ function fullTextScreen(s, writable, reason) {
     wrap.append(toggles);
     const format = persona.headingFormat;
     if (fullView === 'raw') {
-        // The text a save would send now, headings included. Read only, since the joined
-        // text cannot tell which item an edit belongs to.
+        // Read only: the joined text cannot tell which item an edit belongs to.
         wrap.append(noteOf(STRINGS.manager.fullViewRawGuide));
         const { box, inner } = textBox('pm-full-raw');
         inner.textContent = composeFrom(persona, blocks, fullTexts) || STRINGS.manager.previewEmpty;
@@ -2010,7 +1794,6 @@ function fullTextScreen(s, writable, reason) {
         area.dataset.pmBlock = String(index);
         const value = fullTexts?.[index] ?? block.text;
         area.value = value;
-        // Sized to its content so the screen stays scannable.
         area.rows = Math.min(20, Math.max(4, value.split('\n').length + Math.floor(value.length / 44)));
         area.disabled = !writable;
         area.setAttribute('aria-label', STRINGS.manager.fullTextAria(block.sectionName));
@@ -2026,20 +1809,16 @@ function fullTextScreen(s, writable, reason) {
     return wrap;
 }
 
-/* Prompt placement: position, depth, role and lorebook on SillyTavern's persona
-   descriptor. Position and role are SillyTavern enums, so no number is hardcoded:
-   options come from its own selects, and with none readable the control says so. */
-// The role select is persona_depth_role; persona_description_role was an early guess.
+/* Prompt placement: SillyTavern's own descriptor fields. Position and role are its enums, so
+   options come from its own selects, never hardcoded numbers. */
 const PLACEMENT_SELECTS = Object.freeze({
     position: { ids: ['persona_description_position'], match: /position/i },
     role: { ids: ['persona_depth_role', 'persona_description_role'], match: /role/i },
 });
 
-// Only the option list: the select's value belongs to SillyTavern's selected persona,
-// not necessarily this screen's target (readPlacement reads that).
+// Only the option list: the select's value belongs to SillyTavern's selected persona, not
+// necessarily this target. Cached per draw.
 function enumOptions(field) {
-    // Cached per draw (enumCache): several controls ask, and the fallback below is a
-    // document-wide query.
     if (enumCache && Object.hasOwn(enumCache, field)) return enumCache[field];
     const answer = readEnumOptions(field);
     if (!enumCache) enumCache = {};
@@ -2055,7 +1834,7 @@ function readEnumOptions(field) {
         const byId = readSelectOptions(document.getElementById(id));
         if (byId) return byId;
     }
-    // Fallback shape scan, so a renamed id in SillyTavern does not silently remove the control.
+    // A renamed id must not silently remove the control.
     for (const select of document.querySelectorAll('select[id*="persona"]')) {
         if (!spec.match.test(select.id ?? '')) continue;
         const options = readSelectOptions(select);
@@ -2067,22 +1846,17 @@ function readEnumOptions(field) {
 function placementLabel(field, value) {
     if (value === null || value === undefined || value === '') return STRINGS.manager.placementUnset;
     const found = (enumOptions(field) ?? []).find(option => option.value === value);
-    // An unknown stored value is shown raw rather than given a guessed label.
     return found ? found.label : STRINGS.manager.placementRaw(value);
 }
 
-// Every placement write. Not commit(): these are SillyTavern's fields, so there is
-// nothing to recompose and the description must not be rewritten.
+// Every placement write. Not commit(): these are SillyTavern's fields, and the description
+// must not be rewritten.
 function applyPlacement(patch, kind, detail) {
     const s = guardTarget();
-    if (!s) return false;
-    // The controls are already disabled in these states; this stops any path that gets
-    // here anyway.
-    if (s.readOnly || s.ambiguous) { notify('error', writeReason(s)); return false; }
+    if (!s || refusedWrite(s)) return false;
     const ctx = freshContext();
     if (!ctx) { notify('error', STRINGS.manager.noContext); return false; }
-    // Also the active persona (not necessarily the target): SillyTavern's singular
-    // prompt keys belong to it.
+    // SillyTavern's singular prompt keys belong to the active persona, not the target.
     if (!writePlacement(ctx, s.avatar, patch, getState()?.avatar ?? null)) {
         notify('error', STRINGS.manager.placementFailed);
         scheduleDraw();
@@ -2104,8 +1878,7 @@ function pickPlacementEnum(field, raw) {
     }
 }
 
-// Read from SillyTavern's own depth input (max=9999) rather than hardcoded; no
-// ceiling when the input cannot be found.
+// SillyTavern's own depth input's max, or no ceiling.
 function measuredDepthMax() {
     const input = typeof document === 'undefined' ? null : document.getElementById('persona_depth_value');
     const max = Number(input?.max);
@@ -2128,8 +1901,7 @@ async function editDepth(current) {
     }
 }
 
-// The world info book names, if readable; every candidate is shape-checked. Null
-// falls back to typing the name, which is what the field stores either way.
+// The world info book names, if readable; null falls back to typing the name.
 function worldNames() {
     const ctx = freshContext();
     for (const candidate of [ctx?.world_names, globalThis.world_names]) {
@@ -2137,12 +1909,11 @@ function worldNames() {
         const names = candidate.filter(name => typeof name === 'string' && name.trim());
         if (names.length === candidate.length) return names;
     }
-    // Usually neither exists; the names are the option text of SillyTavern's #world_info
-    // and #world_editor_select. Rows without a value are placeholders.
+    // Usually the option text of SillyTavern's world selects; rows without a value are placeholders.
     if (typeof document === 'undefined') return null;
     let best = null;
     for (const select of document.querySelectorAll('select[id*="world" i]')) {
-        // Sort order and strategy selects share the prefix; the book list is the longest.
+        // Other selects share the prefix; the book list is the longest.
         const names = [...(select.options ?? [])]
             .filter(option => String(option.value ?? '').trim() !== '')
             .map(option => String(option.textContent ?? '').trim())
@@ -2177,7 +1948,6 @@ async function editLorebook(current) {
 
 // Label, value and edit button on one line, for the placement fields that are not enums.
 function valueRow(label, value, buttonLabel, onClick, enabled, reason) {
-    // Tight, so a long lorebook name cannot push the button onto a line of its own.
     const row = el('div', 'pm-row pm-manager-valuerow pm-manager-tightrow');
     row.append(el('span', 'pm-manager-picklabel', label));
     row.append(el('span', 'pm-manager-value', value));
@@ -2199,23 +1969,15 @@ function enumRow(field, label, aria, current, writable) {
     }
     const row = el('div', 'pm-row pm-manager-valuerow');
     row.append(el('span', 'pm-manager-picklabel', label));
-    const select = el('select', 'pm-manager-select');
-    // An unknown stored value keeps its own entry rather than snapping to the first,
-    // as in pickSelect.
+    const entries = options.map(option => [option.value, option.label]);
+    // An unknown stored value keeps its own entry rather than snapping to the first.
     if (current !== null && current !== undefined && !options.some(option => option.value === current)) {
-        const stray = el('option', null, STRINGS.manager.placementRaw(current));
-        stray.value = String(current);
-        select.append(stray);
+        entries.unshift([current, STRINGS.manager.placementRaw(current)]);
     }
-    for (const option of options) {
-        const node = el('option', null, option.label);
-        node.value = String(option.value);
-        select.append(node);
-    }
-    select.value = current === null || current === undefined ? '' : String(current);
+    const select = selectOf('pm-manager-select', entries, current === null || current === undefined ? '' : String(current),
+        value => pickPlacementEnum(field, value));
     select.disabled = !writable;
     select.setAttribute('aria-label', aria);
-    select.addEventListener('change', () => pickPlacementEnum(field, select.value));
     row.append(select);
     return row;
 }
@@ -2249,56 +2011,46 @@ function placementBox(s, writable, reason) {
         STRINGS.manager.connectValue, () => editLorebook(placement.lorebook), writable, reason));
     box.append(noteOf(STRINGS.manager.placementHint));
     if (enumOptions('position')) box.append(noteOf(STRINGS.manager.placementSource));
-    // The reason once for the block: value rows do not draw it, and a title is never
-    // seen on a touch screen.
+    // The reason once for the block: value rows do not draw it.
     if (!writable && reason) box.append(el('div', 'pm-manager-hint', reason));
     return box;
 }
 
-/* Names per language. They live on our record only: SillyTavern identifies personas
-   by its personas map, so writing there renames the persona everywhere. */
-const NAME_LANGUAGES = Object.freeze(['ko', 'ja', 'zh', 'en']);
+/* Names per language. They live on our record only: SillyTavern identifies personas by its
+   personas map, so writing there renames the persona everywhere. */
 
-async function editLocalName(lang) {
-    const s = guardTarget();
-    if (!s) return;
-    if (s.readOnly || s.ambiguous) { notify('error', writeReason(s)); return; }
-    const startAvatar = targetAvatar;
+function editLocalName(lang) {
     const langName = STRINGS.common.languageNames[lang] ?? lang;
-    const answer = await askText(STRINGS.manager.localNamePrompt(langName), localName(s.persona, lang, ''));
-    if (answer === null) return;
-    const after = guardTarget(startAvatar);
-    if (!after) return;
-    if (!setLocalName(ensureShape(after.persona), lang, answer)) {
-        notify('info', STRINGS.manager.nothingChanged);
-        return;
-    }
-    const stored = localName(after.persona, lang, '');
-    addLog(after.persona, 'name-local', `${langName}: ${stored || STRINGS.manager.placementUnset}`, Date.now());
-    freshContext()?.saveSettingsDebounced?.();
-    notify('info', stored ? STRINGS.manager.localNameSaved : STRINGS.manager.localNameRemoved);
-    scheduleDraw();
+    // An empty answer deletes the name.
+    return afterAsking(s => (refusedWrite(s) ? false : askText(STRINGS.manager.localNamePrompt(langName), localName(s.persona, lang, ''))), (after, answer) => {
+        if (!setLocalName(ensureShape(after.persona), lang, answer)) {
+            notify('info', STRINGS.manager.nothingChanged);
+            return;
+        }
+        const stored = localName(after.persona, lang, '');
+        addLog(after.persona, 'name-local', `${langName}: ${stored || STRINGS.manager.placementUnset}`, Date.now());
+        freshContext()?.saveSettingsDebounced?.();
+        notify('info', stored ? STRINGS.manager.localNameSaved : STRINGS.manager.localNameRemoved);
+        scheduleDraw();
+    });
 }
 
-// Applying renames the persona in SillyTavern (its personas map, plus name1 for the
-// chat). A button, never automatic on a language guess: the roster, the chat lock and
-// other extensions identify a persona by that name.
+// Applying renames the persona in SillyTavern, by a button, never on a language guess: the
+// roster, the chat lock and other extensions identify a persona by that name.
 async function applyLocalName(lang, toChat) {
     const name = localName(guardTarget()?.persona, lang, '');
     if (!name) { notify('info', STRINGS.manager.localNameNone); return; }
     await applyNameWithScope(name, toChat, `${STRINGS.common.languageNames[lang] ?? lang}: ${name}`);
 }
 
-// The one rename write. toChat false writes only SillyTavern's personas map; true also
-// re-selects the persona, carrying the name into name1 ({{user}} and the sender line
-// of new messages). Past chat text is never rewritten.
+// The one rename write. toChat false writes only SillyTavern's personas map; true also carries
+// the name into name1 ({{user}} and new messages). Past chat text is never rewritten.
 async function applyNameWithScope(name, toChat, detail) {
     const s = guardTarget();
-    if (!s) return;
-    if (s.readOnly || s.ambiguous) { notify('error', writeReason(s)); return; }
+    if (!s || refusedWrite(s)) return;
     const startAvatar = targetAvatar;
-    // Whether the persona is active can change after the draw and across the await
-    // below, so the scope is re-checked (rule at identifiedDirectly).
+    // Whether the persona is active can change across the await, so the scope is re-checked
+    // (rule at identifiedDirectly).
     const scopeIsLegal = () => {
         const isActive = (getState()?.avatar ?? null) === startAvatar;
         if (toChat && !isActive) { notify('error', STRINGS.manager.applyChatOnlyActive); scheduleDraw(); return false; }
@@ -2318,8 +2070,7 @@ async function applyNameWithScope(name, toChat, detail) {
         notify('error', STRINGS.manager.localNameTaken);
         return;
     }
-    // Chat scope only: a chat already using this name would end up with two of it.
-    // Warned in the confirmation, not refused.
+    // Chat scope only: a chat already using this name is warned about, not refused.
     const clash = toChat ? nameCollides({ name, characterName: ctx?.name2, chat: ctx?.chat }) : null;
     const question = !toChat
         ? STRINGS.manager.confirmApplyNameList(current, name)
@@ -2329,8 +2080,6 @@ async function applyNameWithScope(name, toChat, detail) {
     if (!(await askConfirm(question))) return;
     const after = guardTarget(startAvatar);
     if (!after) return;
-    // guardTarget cannot tell whether this persona is still active; a switch during the
-    // confirmation would let a chat rename end in switching personas.
     if (!scopeIsLegal()) return;
     const result = await applyPersonaName(startAvatar, name, { toChat });
     if (!result.ok) {
@@ -2352,8 +2101,7 @@ async function applyNameWithScope(name, toChat, detail) {
 // The same rename with a typed name instead of one from the language list.
 async function renameTargetPersona(toChat) {
     const s = guardTarget();
-    if (!s) return;
-    if (s.readOnly || s.ambiguous) { notify('error', writeReason(s)); return; }
+    if (!s || refusedWrite(s)) return;
     const startAvatar = targetAvatar;
     const personas = freshContext()?.powerUserSettings?.personas ?? {};
     if (!Object.hasOwn(personas, startAvatar)) { notify('error', STRINGS.manager.refusalUnknownPersona); return; }
@@ -2365,12 +2113,11 @@ async function renameTargetPersona(toChat) {
     await applyNameWithScope(name, toChat, name);
 }
 
-/* The persona itself: name, picture, and new personas made from it. All three write
-   SillyTavern's record rather than ours, so each asks first. */
-// Name scopes: the list (SillyTavern's personas map) or the chat (also name1, so
-// {{user}}). Chat needs the persona active, or it would switch to it. List-only on the
-// active persona needs it identified directly: otherwise ctx.js matches
-// personas[avatar] === name1, and a mismatch makes every write refuse.
+/* The persona itself: name, picture, and new personas made from it. All write SillyTavern's
+   record rather than ours, so each asks first. Name scopes: the list (SillyTavern's personas
+   map) or the chat (also name1). Chat needs the persona active, or it would switch to it.
+   List-only on the active persona needs it identified directly: otherwise ctx.js matches
+   personas[avatar] === name1, and a mismatch makes every write refuse. */
 function identifiedDirectly() {
     const source = getState()?.source;
     return source === 'precise' || source === 'dom';
@@ -2404,13 +2151,11 @@ function personaBox(ctx, s, writable, reason) {
     const nameRow = el('div', 'pm-row pm-manager-valuerow pm-manager-tightrow');
     nameRow.append(el('span', 'pm-manager-picklabel', STRINGS.manager.renamePersona));
     nameRow.append(el('span', 'pm-manager-value', name));
-    // Both ask for the new name first and differ only in reach; a disabled one shows why.
     nameRow.append(scopePair(nameScopeButtons(name, writable, reason,
         () => renameTargetPersona(false), () => renameTargetPersona(true))));
     box.append(nameRow);
 
-    // The file input lives in the tree, like the asset uploader's, so it is disabled
-    // along with everything else.
+    // The file input lives in the tree, so it is disabled with everything else.
     const imageRow = el('div', 'pm-row pm-manager-valuerow');
     const input = el('input', 'pm-manager-file pm-hidden');
     input.type = 'file';
@@ -2419,8 +2164,7 @@ function personaBox(ctx, s, writable, reason) {
     input.setAttribute('aria-label', STRINGS.manager.changeImageAria);
     input.addEventListener('change', () => {
         const file = input.files?.[0] ?? null;
-        // Cleared before the upload so the same file can be picked again after a
-        // failure; an input still holding it fires no change event.
+        // Cleared so the same file can be picked again: an unchanged choice fires no change.
         input.value = '';
         if (file) changeTargetImage(file);
     });
@@ -2436,12 +2180,10 @@ function personaBox(ctx, s, writable, reason) {
     imageRow.append(el('span', 'pm-manager-value', ''));
     imageRow.append(actionButton(STRINGS.manager.imageButton, () => input.click(), writable,
         STRINGS.manager.changeImage, reason));
-    // Restores the backup a bound version took; disabled with its own reason when none exists.
     const kept = s.persona?.avatarBackup?.label ?? null;
     imageRow.append(actionButton(STRINGS.manager.imageRestore, () => restoreTargetImage(), writable && !!kept,
         '', kept ? reason : STRINGS.manager.imageNoBackup));
     box.append(imageRow, input);
-    // A picture picked for replacement is framed here before it is written.
     if (framing?.mode === 'upload' && framing.avatar === s.avatar) box.append(framingEditor(writable, reason));
 
     box.append(actionsRow([
@@ -2480,9 +2222,7 @@ function localNamesBox(ctx, s, writable, reason) {
     if (!namesOpen) return box;
     const base = ctx?.powerUserSettings?.personas?.[s.avatar] ?? '';
     if (base) box.append(noteOf(STRINGS.manager.localNameBase(base)));
-    // The check marks the name in effect (SillyTavern's name for this persona), as in
-    // quickbar.js namesGroup. Empty names never match, since all four languages are
-    // listed here. Only our side is trimmed, as the panel does, so both screens agree.
+    // The check marks the name in effect (SillyTavern's), trimmed as the quick panel does.
     const appliedName = String(base ?? '');
     const isApplied = lang => {
         const name = String(stored[lang] ?? '').trim();
@@ -2492,8 +2232,8 @@ function localNamesBox(ctx, s, writable, reason) {
     for (const lang of NAME_LANGUAGES) {
         const row = el('div', 'pm-row pm-manager-valuerow pm-manager-tightrow');
         row.append(checkMark(isApplied(lang)));
-        // Language and name are one button that edits our record: a third button would not
-        // fit, and a row role would nest the row's other buttons.
+        // Language and name are one button: a third would not fit, and a row role would nest
+        // the row's other buttons.
         const edit = el('button', 'pm-manager-rowname pm-manager-nameedit');
         edit.type = 'button';
         edit.disabled = !writable;
@@ -2508,7 +2248,6 @@ function localNamesBox(ctx, s, writable, reason) {
             () => applyLocalName(lang, false), () => applyLocalName(lang, true))));
         box.append(row);
     }
-    // Says what the language rows' check means, since the auto-apply row uses one too.
     box.append(noteOf(STRINGS.manager.localNameAppliedHint));
     // Always drawn: without it, an automatic rule that did not fire looks broken.
     box.append(noteOf(`${STRINGS.manager.localNameCurrent}: ${current
@@ -2516,8 +2255,7 @@ function localNamesBox(ctx, s, writable, reason) {
         : STRINGS.manager.localNameNoChat}`));
     const auto = getRoot()?.settings?.autoLocalName === true;
     const autoRow = el('div', 'pm-row pm-manager-valuerow');
-    // The state is a check mark: on/off words would be nominalised verbs, which the copy
-    // rules (test/wording.test.mjs) refuse.
+    // A check mark, as on/off words would break the copy rules (test/wording.test.mjs).
     autoRow.append(checkMark(auto));
     autoRow.append(el('span', 'pm-manager-picklabel', STRINGS.manager.autoNameRow));
     autoRow.append(el('span', 'pm-manager-value', ''));
@@ -2525,7 +2263,6 @@ function localNamesBox(ctx, s, writable, reason) {
         () => toggleAutoName(), writable, '', reason));
     box.append(autoRow);
     // Why the automatic rule is idle: its name is already someone else's in this chat.
-    // A name already in force is skipped first, as pickAutoName does.
     const wanted = current ? String(stored[current] ?? '').trim() : '';
     const clash = (wanted && wanted !== appliedName)
         ? nameCollides({ name: wanted, characterName: ctx?.name2, chat: ctx?.chat })
@@ -2540,47 +2277,44 @@ function localNamesBox(ctx, s, writable, reason) {
 }
 
 /* Persona image: SillyTavern's own avatar file, not one of our assets. */
-// Puts back the picture kept before the first bound version overwrote the avatar. The
-// record stays: a later apply must not back up the restored original a second time.
-async function restoreTargetImage() {
-    const s = guardTarget();
-    if (!s) return;
-    if (s.readOnly || s.ambiguous) { notify('error', writeReason(s)); return; }
-    const startAvatar = targetAvatar;
-    const label = s.persona?.avatarBackup?.label;
-    if (!label) { notify('info', STRINGS.manager.imageNoBackup); return; }
-    if (!(await askConfirm(STRINGS.manager.confirmRestoreImage))) return;
-    const after = guardTarget(startAvatar);
-    if (!after) return;
-    const root = getRoot();
-    const ctx = freshContext();
-    if (!root || !ctx) { notify('error', STRINGS.manager.noContext); return; }
-    const result = await restoreAvatarBackup({ ctx, root, avatarId: startAvatar, label });
-    if (result.ok) personaImageChanged(startAvatar);
-    scheduleDraw();
-    if (!result.ok) {
-        if (result.error === 'missing') { notify('error', STRINGS.manager.imageAssetMissing(result.detail)); return; }
-        notify('error', STRINGS.manager.imageApplyFailed(result.detail ?? result.error));
-        return;
-    }
-    // The avatar no longer shows any bound label, so the skip-rewrite cache is cleared.
-    const live = getPersona(getRoot(), startAvatar);
-    if (live) {
-        live.avatarWritten = null;
-        addLog(live, 'image-restore', label, Date.now());
-        freshContext()?.saveSettingsDebounced?.();
-    }
-    notify('info', STRINGS.manager.imageRestored);
+// Puts back the picture kept before the first bound version overwrote the avatar. The record
+// stays: a later apply must not back up the restored original a second time.
+function restoreTargetImage() {
+    let label = null;
+    return afterAsking(s => {
+        if (refusedWrite(s)) return false;
+        label = s.persona?.avatarBackup?.label;
+        if (!label) { notify('info', STRINGS.manager.imageNoBackup); return false; }
+        return askConfirm(STRINGS.manager.confirmRestoreImage);
+    }, async (_after, _, startAvatar) => {
+        const root = getRoot();
+        const ctx = freshContext();
+        if (!root || !ctx) { notify('error', STRINGS.manager.noContext); return; }
+        const result = await restoreAvatarBackup({ ctx, root, avatarId: startAvatar, label });
+        if (result.ok) personaImageChanged(startAvatar);
+        scheduleDraw();
+        if (!result.ok) {
+            if (result.error === 'missing') { notify('error', STRINGS.manager.imageAssetMissing(result.detail)); return; }
+            notify('error', STRINGS.manager.imageApplyFailed(result.detail ?? result.error));
+            return;
+        }
+        // The avatar no longer shows any bound label, so the skip-rewrite cache is cleared.
+        const live = getPersona(getRoot(), startAvatar);
+        if (live) {
+            live.avatarWritten = null;
+            addLog(live, 'image-restore', label, Date.now());
+            freshContext()?.saveSettingsDebounced?.();
+        }
+        notify('info', STRINGS.manager.imageRestored);
+    });
 }
 
-// The picked file opens in the framing editor (the avatar's 2:3 frame) first. A file
-// the browser cannot measure skips the editor and goes up whole after a confirmation.
+// The picked file opens in the framing editor first; one the browser cannot measure goes up
+// whole after a confirmation.
 async function changeTargetImage(file) {
     const s = guardTarget();
-    if (!s) return;
-    if (s.readOnly || s.ambiguous) { notify('error', writeReason(s)); return; }
-    // One upload at a time: a second editor would open while the first upload still
-    // lands on the avatar.
+    if (!s || refusedWrite(s)) return;
+    // One upload at a time.
     if (framingBusy) { notify('info', STRINGS.manager.framingUploading); return; }
     const startAvatar = targetAvatar;
     const size = await imageSize(file);
@@ -2609,9 +2343,8 @@ async function changeTargetImage(file) {
 
 // crop is in pixels, as the endpoint takes it, or null for the whole picture.
 async function uploadTargetImage(startAvatar, file, crop) {
-    // avatarWritten caches which asset label is on the avatar, and applyBoundImage skips
-    // writing a match. Cleared inside the write queue so a version apply queued behind
-    // this upload sees it cleared.
+    // avatarWritten names the asset on the avatar, so it is cleared, inside the write queue,
+    // for a version apply queued behind this upload.
     const result = await replacePersonaAvatar(freshContext(), startAvatar, file, crop, () => {
         const live = getPersona(getRoot(), startAvatar);
         if (live && live.avatarWritten !== null) {
@@ -2625,8 +2358,7 @@ async function uploadTargetImage(startAvatar, file, crop) {
         return true;
     }
     scheduleDraw();
-    // Without that endpoint, hand the file to SillyTavern's own file input, whose crop
-    // dialog finishes the job.
+    // Without that endpoint, SillyTavern's own file input and crop dialog finish the job.
     if (result.status === 404) {
         const missing = feedPersonaImage(document, startAvatar, file);
         if (missing) { notify('error', STRINGS.manager.changeImageNoControl(missing)); return false; }
@@ -2637,17 +2369,14 @@ async function uploadTargetImage(startAvatar, file, crop) {
     return false;
 }
 
-/* Per-version persona image. The write lives in assets.js; a failed picture never
-   rolls back the applied version, so each branch below reports and stops. */
-// loadAssets sets the avatar before it awaits, so an in-flight listing names the right
-// persona with an empty list; everything reading the list asks this first.
+/* Per-version persona image. A failed picture never rolls back the applied version. */
+// loadAssets sets the avatar before it awaits, so readers of the list ask this first.
 function listingReady(avatarId) {
     return assetState.avatar === avatarId && !assetState.error && !assetState.loading;
 }
 
 async function runBoundImage(avatarId, versionId, force) {
-    // This screen's listing when ready, saving a round trip; null makes applyBoundImage
-    // fetch its own.
+    // This screen's listing when ready, saving a round trip.
     const known = listingReady(avatarId) ? assetState.list : null;
     const result = await runBoundImageWrite(avatarId, versionId, force, known);
     if (!result || result.skipped) return;
@@ -2694,8 +2423,7 @@ function clearBoundAsset(versionId) {
     if (bindAsset(version, null, Date.now())) commit('image-bind', version.name ?? '', targetAvatar);
 }
 
-// The picture block on an open version row. expandedRow holds one key, so this draws
-// at most one image.
+// The picture block on an open version row (at most one is open).
 function versionImageBlock(version, writable, reason) {
     const box = el('div', 'pm-manager-assetsel');
     const listingOk = listingReady(targetAvatar);
@@ -2717,7 +2445,7 @@ function versionImageBlock(version, writable, reason) {
         const path = findAsset(assetState.list, view.label)?.path;
         if (path) {
             const img = el('img', 'pm-manager-targetimg');
-            // The sprite path serves the full-size file; the drawn size keeps the preview cheap.
+            // The full-size file at a small drawn size.
             img.width = 96;
             img.height = 96;
             img.decoding = 'async';
@@ -2727,8 +2455,7 @@ function versionImageBlock(version, writable, reason) {
             box.append(img);
         }
     }
-    // Why the picture buttons are disabled. 'unknown' covers a failed listing as well as
-    // a loading one, and a failure must not read as loading.
+    // Why the picture buttons are disabled; a failed listing must not read as loading.
     const listingError = assetState.avatar === targetAvatar ? assetState.error : null;
     const deadReason = view.state === 'ok' ? reason
         : view.state === 'none' ? STRINGS.manager.versionImageNoBinding
@@ -2747,10 +2474,9 @@ function versionImageBlock(version, writable, reason) {
     return box;
 }
 
-/* Framing editor. 'version' mode stores a crop on a version's bound asset; 'upload'
-   mode writes a just-picked file to the avatar with it. The frame is the avatar's 2:3
-   shape; the dashed square is what list and chat icons show. Module state, so a
-   redraw rebuilds the editor where it was; dropFraming revokes the object URL. */
+/* Framing editor. 'version' mode stores a crop on a version's bound asset; 'upload' mode
+   writes a just-picked file to the avatar with it. Module state, so a redraw rebuilds the
+   editor where it was; dropFraming revokes the object URL. */
 const FRAME_WIDTH = 240;
 let framing = null;
 // True while the editor's upload is in flight, so a second tap cannot send it twice.
@@ -2785,8 +2511,7 @@ function openFraming(versionId) {
     const path = findAsset(assetState.list, label, bindingIsExact(version))?.path;
     if (!version || !label || !path) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
     const avatar = targetAvatar;
-    // The crop is a fraction of the picture's size. The path carries the listing's
-    // freshness token, so a file replaced under the same name is measured fresh.
+    // Measured fresh: the path carries the listing's freshness token.
     const probe = new Image();
     probe.onload = () => {
         if (targetAvatar !== avatar || !probe.naturalWidth) return;
@@ -2830,8 +2555,7 @@ function framingEditor(writable, reason) {
         img.style.width = `${placed.width}px`;
         img.style.height = `${placed.height}px`;
         img.style.transform = `translate(${placed.left}px, ${placed.top}px)`;
-        // Written even while the slider has focus (a touched slider keeps it), or a wheel
-        // zoom leaves it stale and the next nudge jumps.
+        // Written even while the slider has focus, or a wheel zoom leaves it stale.
         zoom.value = String(state.view.zoom);
     };
     // Pointer moves arrive faster than frames on a phone; one style write per frame.
@@ -2844,8 +2568,7 @@ function framingEditor(writable, reason) {
 
     zoom.addEventListener('input', () => setView({ ...state.view, zoom: Number(zoom.value) }));
 
-    // One finger drags, two pinch, a wheel zooms. Moves become view changes in the
-    // picture's own fractions, independent of the drawn frame size.
+    // One finger drags, two pinch, a wheel zooms, in the picture's own fractions.
     const pointers = new Map();
     const spread = () => {
         const [a, b] = [...pointers.values()];
@@ -2860,8 +2583,7 @@ function framingEditor(writable, reason) {
         frame.addEventListener('pointerdown', e => {
             gestureHeld = true;
             pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-            // Keeps moves coming outside the frame. Throws for a pointer no longer down, which
-            // must not drop the drag already recorded.
+            // Keeps moves coming outside the frame; throws for a pointer no longer down.
             try { frame.setPointerCapture?.(e.pointerId); } catch { /* moves still arrive inside the frame */ }
             last = { mid: middle(), spread: pointers.size > 1 ? spread() : 0 };
             e.preventDefault();
@@ -2873,8 +2595,7 @@ function framingEditor(writable, reason) {
             const placed = previewBox(state.nw, state.nh, state.view, FRAME_WIDTH);
             if (!placed) return;
             const next = { ...state.view };
-            // Picture pixels per screen pixel, so a finger moving 10px moves the
-            // picture 10px under it at any zoom.
+            // Picture pixels per screen pixel, so the picture follows the finger at any zoom.
             next.cx -= (mid.x - last.mid.x) / placed.scale / state.nw;
             next.cy -= (mid.y - last.mid.y) / placed.scale / state.nh;
             if (pointers.size > 1) {
@@ -2894,8 +2615,7 @@ function framingEditor(writable, reason) {
         frame.addEventListener('pointercancel', lift);
         // A frame taken out of the document loses its capture and hears no up.
         frame.addEventListener('lostpointercapture', lift);
-        // The wheel zooms in proportion to deltaY (a mouse notch of 100 is about 20%),
-        // since a touchpad sends many small deltas.
+        // In proportion to deltaY, since a touchpad sends many small deltas.
         frame.addEventListener('wheel', e => {
             e.preventDefault();
             setView({ ...state.view, zoom: state.view.zoom * Math.exp(-e.deltaY * 0.002) });
@@ -2943,8 +2663,7 @@ function saveFraming() {
     else notify('info', STRINGS.manager.framingSavedLater);
 }
 
-// Uploads the picked file, cropped or whole. The editor stays open until the server
-// answers, so a failure can be retried.
+// Uploads the picked file, cropped or whole; the editor stays open until the server answers.
 async function saveUploadFraming(cropped) {
     const state = framing;
     if (state?.mode !== 'upload' || framingBusy) return;
@@ -2962,36 +2681,21 @@ async function saveUploadFraming(cropped) {
     else scheduleDraw();
 }
 
-/* Duplicate as a new persona. SillyTavern owns persona creation and the command's
-   arguments are unverified, so it runs and the result is found by diffing the
-   personas map: exactly one new key is the copy, anything else is reported. */
+/* Duplicate as a new persona. SillyTavern owns persona creation, so the command runs and the
+   result is found by diffing the personas map: exactly one new key is the copy. */
 const DUPLICATE_COMMANDS = Object.freeze(['persona-duplicate']);
 
-// Built once: the picker sorts on every draw, and the locale cannot change in a session.
+// Built once: the picker sorts on every draw.
 const PICKER_COLLATOR = new Intl.Collator(undefined, { numeric: true });
 
 // The screen reset that duplicate, create and copy all end on.
 function landOnPersona(avatar) {
     pickerMode = 'target';
-    pickerOpen = false;
-    targetAvatar = avatar;
-    openVariant = null;
-    editorDirty = false;
-    expandedRow = null;
-    historyVariant = null;
-    historyIndex = null;
-    lastMissing = null;
-    placementOpen = false;
-    namesOpen = false;
-    personaOpen = false;
     dropFraming();
-    resetRevise();
-    resetFullText();
-    resetListUi();
+    moveTarget(avatar);
 }
 
-// Runs the duplicate command and answers the one new personas key, or null after
-// reporting why. The caller words the many-found message.
+// Runs the duplicate command and answers the one new personas key, or null after saying why.
 async function mintPersona(command, label, manyFoundMessage) {
     const before = new Set(Object.keys(freshContext()?.powerUserSettings?.personas ?? {}));
     try {
@@ -2999,7 +2703,7 @@ async function mintPersona(command, label, manyFoundMessage) {
     } catch (e) {
         console.warn(`[${MODULE_NAME}] ${command} failed`, e);
     }
-    // SillyTavern finishes after the command resolves, so the result is polled for.
+    // Polled: SillyTavern finishes after the command resolves.
     const added = [];
     await waitFor(() => {
         added.length = 0;
@@ -3013,16 +2717,12 @@ async function mintPersona(command, label, manyFoundMessage) {
     return added[0];
 }
 
-
 async function duplicateTargetPersona() {
     if (!(await confirmDropWorking())) return;
     const s = guardTarget();
-    if (!s) return;
-    if (s.readOnly || s.ambiguous) { notify('error', writeReason(s)); return; }
+    if (!s || refusedWrite(s)) return;
     const startAvatar = targetAvatar;
-    const commands = freshContext()?.SlashCommandParser?.commands;
-    // Discovered, never assumed, as the persona switch does.
-    const command = DUPLICATE_COMMANDS.find(name => commands && Object.hasOwn(commands, name) && commands[name]);
+    const command = pickPersonaCommand(freshContext()?.SlashCommandParser?.commands, DUPLICATE_COMMANDS);
     if (!command) { notify('error', STRINGS.manager.duplicateNoCommand); return; }
     const personas = freshContext()?.powerUserSettings?.personas ?? {};
     const label = personas[startAvatar] ?? startAvatar;
@@ -3035,9 +2735,8 @@ async function duplicateTargetPersona() {
     // SillyTavern made the persona; the composition is ours, via the picker's copy.
     const copy = copyPersonaOnto(after.root, startAvatar, destAvatar,
         freshContext()?.uuidv4, Date.now(), STRINGS.manager.copyLogDetail(label));
-    // A refusal is reported, not rolled back: the persona exists either way, but carries
-    // SillyTavern's copied description. outside 'discard': that copy is not an outside
-    // edit and would otherwise become a redundant choice.
+    // A refusal is reported, not rolled back: the persona exists either way. outside 'discard':
+    // SillyTavern's copied description is no outside edit to keep.
     const composed = copy ? saveAndComposeFor(destAvatar, { outside: 'discard' }) : null;
     freshContext()?.saveSettingsDebounced?.();
     const newName = freshContext()?.powerUserSettings?.personas?.[destAvatar] ?? destAvatar;
@@ -3048,23 +2747,19 @@ async function duplicateTargetPersona() {
     scheduleDraw();
 }
 
-/* New persona: minted by duplicating (no other creation path is known), then made
-   new. The typed name goes on first, since saveAndComposeFor refuses while two
-   personas share a name and the copy may carry its source's. Then a blank default
-   composition replaces the copied description. The image stays inherited. */
+/* New persona: minted by duplicating (no other creation path is known), then renamed first,
+   since saveAndComposeFor refuses while two personas share a name, then given a blank default
+   composition. The image stays inherited. */
 async function createTargetPersona() {
     if (!(await confirmDropWorking())) return;
     const s = guardTarget();
-    if (!s) return;
-    if (s.readOnly || s.ambiguous) { notify('error', writeReason(s)); return; }
+    if (!s || refusedWrite(s)) return;
     const startAvatar = targetAvatar;
-    const commands = freshContext()?.SlashCommandParser?.commands;
-    const command = DUPLICATE_COMMANDS.find(name => commands && Object.hasOwn(commands, name) && commands[name]);
+    const command = pickPersonaCommand(freshContext()?.SlashCommandParser?.commands, DUPLICATE_COMMANDS);
     if (!command) { notify('error', STRINGS.manager.createNoCommand); return; }
     const name = (await askText(STRINGS.manager.createNamePrompt, ''))?.trim();
     if (!name) return;
-    // Checked before anything is minted: found later, the new persona would be stuck
-    // under whatever name SillyTavern gave it.
+    // Checked before anything is minted.
     const taken = Object.values(freshContext()?.powerUserSettings?.personas ?? {}).includes(name);
     if (taken) { notify('error', STRINGS.manager.createNameTaken(name)); return; }
     if (!(await askConfirm(STRINGS.manager.confirmCreatePersona(name)))) return;
@@ -3072,20 +2767,16 @@ async function createTargetPersona() {
     const label = freshContext()?.powerUserSettings?.personas?.[startAvatar] ?? startAvatar;
     const destAvatar = await mintPersona(command, label, STRINGS.manager.createManyFound);
     if (!destAvatar) return;
-    // List scope only. A refusal is not rolled back (no known deletion path); the toast
-    // says which name the persona ended up with.
+    // List scope only. A refusal is not rolled back; the toast names what the persona got.
     const renamed = await applyPersonaName(destAvatar, name, { toChat: false });
-    // Not guardTarget(startAvatar): the new persona exists, so it gets its blank
-    // composition whatever happened to the source meanwhile.
+    // Not guardTarget: the new persona exists, whatever happened to the source meanwhile.
     const root = getRoot();
     const seeded = !!root && !root.readOnly;
     let composed = null;
     if (seeded) {
-        // The birth log line keeps the pruner off an entry whose variants are all empty.
+        // The birth log line keeps the pruner off this all-empty entry.
         const persona = ensurePersona(root, destAvatar, freshContext()?.uuidv4);
         addLog(persona, 'persona-create', name, Date.now());
-        // Overwrites the copied description with the empty composition; outside 'discard'
-        // as in duplicateTargetPersona.
         composed = saveAndComposeFor(destAvatar, { outside: 'discard' });
     }
     freshContext()?.saveSettingsDebounced?.();
@@ -3102,12 +2793,10 @@ async function createTargetPersona() {
     scheduleDraw();
 }
 
-/* Copy onto a persona SillyTavern already lists: our record for it is replaced. The
-   destination is chosen in the persona picker. */
+// Copy onto a persona SillyTavern already lists, chosen in the picker; our record for it is replaced.
 function openCopyPicker() {
     const s = guardTarget();
-    if (!s) return;
-    if (s.readOnly || s.ambiguous) { notify('error', writeReason(s)); return; }
+    if (!s || refusedWrite(s)) return;
     stashDraft();
     pickerMode = 'copy';
     pickerOpen = true;
@@ -3124,8 +2813,7 @@ function closeCopyPicker() {
 async function copyOnto(destAvatar) {
     if (!(await confirmDropWorking())) return;
     const s = guardTarget();
-    if (!s) return;
-    if (s.readOnly || s.ambiguous) { notify('error', writeReason(s)); return; }
+    if (!s || refusedWrite(s)) return;
     const startAvatar = targetAvatar;
     if (destAvatar === startAvatar) { notify('info', STRINGS.manager.copySameTarget); return; }
     const personas = freshContext()?.powerUserSettings?.personas ?? {};
@@ -3135,8 +2823,7 @@ async function copyOnto(destAvatar) {
     if (!(await askConfirm(STRINGS.manager.copyConfirm(fromName, toName)))) return;
     const after = guardTarget(startAvatar);
     if (!after) return;
-    // Kept to put the destination back if saveAndComposeFor refuses, rather than leave
-    // its record replaced and its description not.
+    // Kept to put the destination back if saveAndComposeFor refuses.
     const previous = after.root.personas?.[destAvatar] ?? null;
     const copy = copyPersonaOnto(after.root, startAvatar, destAvatar,
         freshContext()?.uuidv4, Date.now(), STRINGS.manager.copyLogDetail(fromName));
@@ -3180,8 +2867,7 @@ function composeTab(s, writable, reason) {
     box.append(personaBox(live, s, writable, reason));
     box.append(localNamesBox(live, s, writable, reason));
 
-    // Here, not in the settings drawer: the value lives on the persona, and the drawer
-    // only holds the default for new ones.
+    // The drawer only holds the default for new personas.
     box.append(headingFormatRow(persona, writable, reason));
 
     box.append(actionsRow([
@@ -3191,7 +2877,7 @@ function composeTab(s, writable, reason) {
         actionButton(STRINGS.manager.resplit, () => doResplit(), writable, STRINGS.manager.resplitTitle, reason),
         actionButton(STRINGS.manager.ownSplit, () => doOwnSplit(), writable, STRINGS.manager.ownSplitTitle, reason),
     ]));
-    if (listUi.compose.open) box.append(listSearchRow('compose'));
+    if (lists.compose.open) box.append(listSearchRow('compose'));
 
     const list = el('div');
     list.dataset.pmList = 'compose';
@@ -3207,29 +2893,21 @@ function composeTab(s, writable, reason) {
 function headingFormatRow(persona, writable, reason) {
     const row = el('div', 'pm-row pm-manager-headingrow');
     row.append(el('span', 'pm-manager-name', STRINGS.manager.headingFormatLabel));
-    const select = el('select', 'pm-manager-select');
     // The description's own title style is offered only to a persona that has one.
-    const own = validTemplate(persona.headingTemplate);
-    const formats = own ? [...HEADING_FORMATS, 'own'] : [...HEADING_FORMATS];
+    const formats = validTemplate(persona.headingTemplate) ? [...HEADING_FORMATS, 'own'] : [...HEADING_FORMATS];
     const formatName = key => (key === 'own'
         ? STRINGS.manager.headingFormatOwn(persona.headingTemplate.open)
         : STRINGS.manager.headingFormatNames[key]);
-    for (const key of formats) {
-        const option = el('option', null, formatName(key));
-        option.value = key;
-        select.append(option);
-    }
-    select.value = formats.includes(persona.headingFormat) ? persona.headingFormat : 'none';
+    const select = selectOf('pm-manager-select', formats.map(key => [key, formatName(key)]),
+        formats.includes(persona.headingFormat) ? persona.headingFormat : 'none', wanted => {
+            if (!formats.includes(wanted)) return;
+            const after = guardTarget();
+            if (!after) return;
+            ensureShape(after.persona).headingFormat = wanted;
+            commit('heading-format', formatName(wanted));
+        });
     select.disabled = !writable;
     select.setAttribute('aria-label', STRINGS.manager.headingFormatAria);
-    select.addEventListener('change', () => {
-        const wanted = select.value;
-        if (!formats.includes(wanted)) return;
-        const after = guardTarget();
-        if (!after) return;
-        ensureShape(after.persona).headingFormat = wanted;
-        commit('heading-format', formatName(wanted));
-    });
     row.append(select);
     const box = el('div', 'pm-manager-headingbox');
     box.append(row);
@@ -3240,25 +2918,15 @@ function headingFormatRow(persona, writable, reason) {
 
 /* Versions tab */
 
-// Repairs a dead slot where it is reported. The no-pick option stays selected, so the
-// control shows its real state rather than a choice nobody made.
+// Repairs a dead slot where it is reported; the no-pick option stays selected, as that is the
+// slot's real state.
 function deadPickSelect(persona, version, row, writable) {
-    const select = el('select', 'pm-manager-select');
-    const none = el('option', null, NO_PICK_LABEL);
-    none.value = '';
-    select.append(none);
-    for (const variant of persona.variants?.[row.sectionId] ?? []) {
-        const option = el('option', null, variant.label ?? '');
-        option.value = variant.id;
-        select.append(option);
-    }
-    select.value = '';
+    const options = [['', NO_PICK_LABEL], ...(persona.variants?.[row.sectionId] ?? []).map(variant => [variant.id, variant.label ?? ''])];
+    const select = selectOf('pm-manager-select', options, '', value => {
+        if (value) setVersionPick(version.id, row.sectionId, value);
+    });
     select.disabled = !writable;
     select.setAttribute('aria-label', STRINGS.manager.pickChoiceAria(row.sectionName));
-    select.addEventListener('change', () => {
-        if (!select.value) return;
-        setVersionPick(version.id, row.sectionId, select.value);
-    });
     return select;
 }
 
@@ -3268,7 +2936,7 @@ function versionRow(persona, version, writable, reason) {
     const open = expandedRow === key;
     const box = el('div', `pm-manager-version${open ? ' pm-manager-rowopen' : ''}`);
     registerRow(key, box, () => versionRow(persona, version, writable, reason), { persona });
-    // Ends of the whole list, not the filtered page: a move is one place in stored order.
+    // Ends of the whole list, not the filtered page.
     const versions = persona.versions ?? [];
     const atTop = versions[0] === version;
     const atEnd = versions[versions.length - 1] === version;
@@ -3276,12 +2944,11 @@ function versionRow(persona, version, writable, reason) {
     const head = rowHead();
     head.append(rowName(key, [
         checkMark(version.id === persona.activeVersionId),
-        markedText('pm-manager-name', version.name ?? '', listUi.versions.open ? listUi.versions.query : ''),
+        markedText('pm-manager-name', version.name ?? '', lists.versions.open ? lists.versions.query : ''),
     ], versionSummaryLine(persona, version)));
-    // Picks naming something deleted would drop that section from the prompt, so apply
-    // is disabled with a reason that points at the repair.
+    // Picks naming something deleted would drop that item, so apply points at the repair.
     const applicable = versionApplicable(persona, version.id);
-    // A word, not a thumbnail, so a page of rows does not fetch a picture each.
+    // A word, not a thumbnail, so a page of rows fetches no pictures.
     if (boundAsset(version)) head.append(el('span', 'pm-manager-value', STRINGS.manager.versionImageMark));
     head.append(actionsRow([
         actionButton(STRINGS.common.apply, () => {
@@ -3336,8 +3003,8 @@ function resetRevise() {
     revisePopupFrame = 0;
 }
 
-// Unsaved revisions leaving would discard: applied steps, plus an open edit box that
-// changed. The live field is read first: typing since the last draw exists nowhere else.
+// Unsaved revisions leaving would discard: applied steps, plus an open edit box that changed
+// (read live, as typing since the last draw exists nowhere else).
 function reviseDirtyCount() {
     if (!reviseActive) return 0;
     let count = reviseSteps.length;
@@ -3363,7 +3030,6 @@ function openRevise() {
 }
 
 async function leaveRevise() {
-    // The same one-question-at-a-time flag requestClose uses.
     if (closeAsked) return;
     const dirty = reviseDirtyCount();
     if (dirty > 0) {
@@ -3374,9 +3040,8 @@ async function leaveRevise() {
     scheduleDraw();
 }
 
-// A selection boundary as {block element, string offset}. Each block is one text
-// node, but a drag to a block's edge can land on the element itself (browser
-// dependent), where offset counts children: 0 is before the text, more is after.
+// A selection boundary as {block element, string offset}. A drag to a block's edge can land on
+// the element itself, where offset counts children: 0 is before the text, more is after.
 function reviseBoundary(node, offset) {
     if (node?.nodeType === 3) {
         const host = node.parentElement;
@@ -3389,8 +3054,7 @@ function reviseBoundary(node, offset) {
     return null;
 }
 
-// The last valid drag, as offsets into one block's text. Boundaries in two
-// different blocks answer null: no popup across an item boundary.
+// The last valid drag, as offsets into one block's text; null across an item boundary.
 function readReviseSelection() {
     const sel = document.getSelection?.();
     if (!sel || sel.rangeCount !== 1 || sel.isCollapsed) return null;
@@ -3406,8 +3070,7 @@ function readReviseSelection() {
     return { block, start: from, end: to, rect: range.getBoundingClientRect() };
 }
 
-// Absolute inside the position: relative .pm-revise, so it scrolls with the text;
-// both rects are viewport based, so their difference is the offset in the wrapper.
+// Absolute inside .pm-revise, so it scrolls with the text.
 function positionRevisePopup(rect) {
     const panel = document.getElementById(PANEL_ID);
     const wrap = panel?.querySelector('.pm-revise');
@@ -3415,8 +3078,7 @@ function positionRevisePopup(rect) {
     if (!wrap || !popup) return;
     popup.classList.remove('pm-hidden');
     const wrapRect = wrap.getBoundingClientRect();
-    // Below the selection, since Android's selection toolbar sits above it; above only
-    // when below would leave the wrapper.
+    // Below the selection, as Android's selection toolbar sits above it.
     const below = rect.bottom - wrapRect.top + 6;
     const top = below + popup.offsetHeight <= wrap.clientHeight
         ? below
@@ -3439,8 +3101,7 @@ function onReviseSelectionChange() {
     if (info) {
         if (revisePopupHide) { clearTimeout(revisePopupHide); revisePopupHide = 0; }
         reviseSelection = { block: info.block, start: info.start, end: info.end };
-        // One position write per frame: a handle drag fires this faster than paint. The
-        // frame re-reads the live selection; if it died, the grace path below hides.
+        // One position write per frame; the frame re-reads the live selection.
         if (revisePopupFrame) return;
         if (typeof requestAnimationFrame !== 'function') { positionRevisePopup(info.rect); return; }
         revisePopupFrame = requestAnimationFrame(() => {
@@ -3452,8 +3113,7 @@ function onReviseSelectionChange() {
         });
         return;
     }
-    // Hidden after a grace period: on Android, tapping the popup collapses the selection
-    // first, and the click then acts on the stored offsets.
+    // Hidden after a grace period: on Android, tapping the popup collapses the selection first.
     if (revisePopupHide) return;
     revisePopupHide = setTimeout(() => {
         revisePopupHide = 0;
@@ -3471,7 +3131,7 @@ function openReviseBox() {
     if (start === end) return;
     reviseEditing = { block: reviseSelection.block, start, end, original: text.slice(start, end) };
     reviseSelection = null;
-    // The box opens below the whole block, possibly a screen away, so the draw scrolls to it.
+    // The box opens below the whole block, possibly a screen away.
     reviseScrollToBox = true;
     try { document.getSelection()?.removeAllRanges(); } catch { /* best effort */ }
     hideRevisePopup();
@@ -3502,24 +3162,18 @@ function undoRevise() {
     scheduleDraw();
 }
 
-async function saveRevise() {
-    const s = guardTarget();
-    if (!s) return;
-    const startAvatar = targetAvatar;
-    const name = await askText(STRINGS.common.newVersionName, '');
-    if (!name || !name.trim()) return;
-    const after = guardTarget(startAvatar);
-    if (!after) return;
-    const persona = ensureShape(after.persona);
-    const undo = replaceVersionUndo(persona);
-    const result = makeReplaceVersion(persona, reviseBlocks, reviseTexts, name, freshContext()?.uuidv4, Date.now());
-    if (!result) return;
-    // Sections that vanished since opening are reported, never silently dropped.
-    if (result.skipped.length) notify('warning', STRINGS.manager.reviseSkipped(result.skipped.join(', ')));
-    // write: true, since the edited items' picks move to their new choices. Reset only
-    // on an accepted write; a refusal keeps the working copies and undoes the version.
-    if (commit('version-create', result.version.name, startAvatar, { write: true })) resetRevise();
-    else undoReplaceVersion(persona, result, undo);
+function saveRevise() {
+    return afterAsking(() => askName(STRINGS.common.newVersionName, ''), (after, name, startAvatar) => {
+        const persona = ensureShape(after.persona);
+        const undo = replaceVersionUndo(persona);
+        const result = makeReplaceVersion(persona, reviseBlocks, reviseTexts, name, freshContext()?.uuidv4, Date.now());
+        if (!result) return;
+        if (result.skipped.length) notify('warning', STRINGS.manager.reviseSkipped(result.skipped.join(', ')));
+        // write: the edited items' picks move to their new choices. A refusal keeps the working
+        // copies and undoes the version.
+        if (commit('version-create', result.version.name, startAvatar, { write: true })) resetRevise();
+        else undoReplaceVersion(persona, result, undo);
+    });
 }
 
 function reviseBox() {
@@ -3531,7 +3185,6 @@ function reviseBox() {
     area.setAttribute('aria-label', STRINGS.manager.reviseBoxAria);
     box.append(area);
     box.append(actionsRow([
-        // Edits only the working copy; saveRevise is the guarded write.
         actionButton(STRINGS.common.apply, () => applyReviseBox(), true),
         actionButton(STRINGS.common.cancel, () => { reviseEditing = null; scheduleDraw(); }, true),
     ]));
@@ -3560,7 +3213,7 @@ function reviseScreen(writable, reason) {
         }
         wrap.append(list);
     }
-    // Hidden until a selection positions it; the click acts on the stored offsets.
+    // Hidden until a selection positions it.
     wrap.append(button('pm-revise-popup pm-hidden', STRINGS.manager.revisePopup, () => openReviseBox()));
     const foot = el('div', 'pm-manager-editorfoot');
     foot.append(actionsRow([
@@ -3581,77 +3234,37 @@ function fillVersionList(container, s, writable, reason) {
     if (expandedRow !== null && !live.has(expandedRow)) expandedRow = null;
     if (!versions.length) { container.append(emptyOf(STRINGS.manager.noVersionsHere)); return; }
 
-    const ui = listUi.versions;
+    const ui = lists.versions;
     let list = versions;
     if (ui.open) {
-        // Once per version per fill: the chips and the filter would otherwise compose each twice.
+        // Once per version per fill, or the chips and the filter would compose each twice.
         const stamp = modifiedAt(persona);
         const langCache = new Map();
         const langOf = version => {
             if (!langCache.has(version.id)) langCache.set(version.id, versionLanguage(persona, version, stamp));
             return langCache.get(version.id);
         };
-        // Chips from what the versions carry now. A filter naming something gone is dropped
-        // rather than left to empty the list.
-        const langs = [];
-        const tags = [];
-        for (const version of versions) {
-            const lang = langOf(version);
-            if (lang && !langs.includes(lang)) langs.push(lang);
-            for (const tag of version.tags ?? []) if (!tags.includes(tag)) tags.push(tag);
-        }
-        if (ui.lang && !langs.includes(ui.lang)) ui.lang = null;
-        ui.tags = ui.tags.filter(tag => tags.includes(tag));
-        if (langs.length || tags.length) {
-            const row = el('div', 'pm-quickbar-chips pm-filter-chips');
-            for (const lang of langs) {
-                row.append(filterChip(STRINGS.common.languageNames[lang] ?? lang, ui.lang === lang, () => {
-                    ui.lang = ui.lang === lang ? null : lang;
-                    ui.page = 1;
-                    scheduleDraw();
-                }));
-            }
-            for (const tag of tags) {
-                row.append(filterChip(tag, ui.tags.includes(tag), () => {
-                    ui.tags = ui.tags.includes(tag) ? ui.tags.filter(t => t !== tag) : [...ui.tags, tag];
-                    ui.page = 1;
-                    scheduleDraw();
-                }));
-            }
-            container.append(row);
-        }
-        if (ui.lang) list = list.filter(version => langOf(version) === ui.lang);
-        if (ui.tags.length) list = list.filter(version => ui.tags.every(tag => (version.tags ?? []).includes(tag)));
+        const tagsOf = version => version.tags ?? [];
+        list = filterChips(container, ui, versions, list, { langOf, tagsOf, chip: filterChip, redraw: scheduleDraw });
         const query = ui.query.trim();
-        if (query) {
-            const ranked = [];
-            for (const version of list) {
-                let rank = rankOf(version.name ?? '', query);
-                for (const tag of version.tags ?? []) rank = Math.max(rank, rankOf(tag, query));
-                if (rank > 0) ranked.push({ version, rank });
-            }
-            ranked.sort((a, b) => b.rank - a.rank);
-            list = ranked.map(entry => entry.version);
-        }
+        if (query) list = rankByQuery(list, query, version => [version.name ?? '', ...tagsOf(version)]);
         if (!list.length) { container.append(emptyOf(STRINGS.common.searchNoHits)); return; }
     }
 
     const paged = pageOf(list, ui.page, s.root?.settings?.pageSizeVersions ?? 20);
     ui.page = paged.page;
-    // Bindings are described from the asset listing, which this tab must load itself.
-    // loadAssets sets assetState.avatar before its await, so this fires once, not per frame.
+    // Bindings are described from the asset listing, which this tab loads itself (once:
+    // loadAssets sets assetState.avatar before its await).
     if (assetState.avatar !== targetAvatar && !assetState.loading && (persona.versions ?? []).length) {
         void loadAssets(targetAvatar);
     }
     for (const version of paged.slice) container.append(versionRow(persona, version, writable, reason));
-    const pager = pagerRow(paged.page, paged.pages,
-        () => { ui.page = Math.max(1, ui.page - 1); redrawManagerList('versions'); },
-        () => { ui.page = ui.page + 1; redrawManagerList('versions'); });
+    const pager = pagerRow(paged, ui, () => redrawManagerList('versions'));
     if (pager) container.append(pager);
 }
 
 function versionsTab(s, writable, reason) {
-    // Revise state lives in module variables, so leaving the tab and coming back resumes it.
+    // Revise state lives in module variables, so coming back to the tab resumes it.
     if (reviseActive) return reviseScreen(writable, reason);
     const box = el('div', 'pm-manager-tabbody');
     const persona = s.persona;
@@ -3660,7 +3273,7 @@ function versionsTab(s, writable, reason) {
         actionButton(STRINGS.manager.reviseOpen, () => openRevise(), writable, '', reason),
         listSearchButton('versions'),
     ]));
-    if (listUi.versions.open) box.append(listSearchRow('versions'));
+    if (lists.versions.open) box.append(listSearchRow('versions'));
     const list = el('div');
     list.dataset.pmList = 'versions';
     fillVersionList(list, s, writable, reason);
@@ -3671,24 +3284,21 @@ function versionsTab(s, writable, reason) {
 
 /* History tab */
 
-// Clears the change log. Nothing is logged afterwards: the user asked for an empty
-// list (the expiry rule's trace line is for records the extension drops itself).
-async function clearLog() {
-    const s = guardTarget();
-    if (!s) return;
-    if (s.readOnly || s.ambiguous) { notify('error', writeReason(s)); return; }
-    const startAvatar = targetAvatar;
-    const count = (s.persona.log ?? []).length;
-    if (!count) { notify('info', STRINGS.manager.logEmpty); return; }
-    if (!(await askConfirm(STRINGS.manager.confirmClearLog(count)))) return;
-    const after = guardTarget(startAvatar);
-    if (!after) return;
-    // Counted again: a save may have added lines while the question was up.
-    const cleared = (after.persona.log ?? []).length;
-    after.persona.log = [];
-    freshContext()?.saveSettingsDebounced?.();
-    notify('info', STRINGS.manager.logCleared(cleared));
-    scheduleDraw();
+// Clears the change log. Nothing is logged afterwards: the user asked for an empty list.
+function clearLog() {
+    return afterAsking(s => {
+        if (refusedWrite(s)) return false;
+        const count = (s.persona.log ?? []).length;
+        if (!count) { notify('info', STRINGS.manager.logEmpty); return false; }
+        return askConfirm(STRINGS.manager.confirmClearLog(count));
+    }, after => {
+        // Counted again: a save may have added lines while the question was up.
+        const cleared = (after.persona.log ?? []).length;
+        after.persona.log = [];
+        freshContext()?.saveSettingsDebounced?.();
+        notify('info', STRINGS.manager.logCleared(cleared));
+        scheduleDraw();
+    });
 }
 
 function findVariant(persona, variantId) {
@@ -3928,7 +3538,7 @@ function assetRow(item, key, writable, reason, styleClass) {
     img.alt = '';
     img.loading = 'lazy';
     head.append(img);
-    head.append(rowName(rowId, [markedText('pm-manager-name', item.label, listUi.assets.open ? listUi.assets.query : '')]));
+    head.append(rowName(rowId, [markedText('pm-manager-name', item.label, lists.assets.open ? lists.assets.query : '')]));
     head.append(actionButton(STRINGS.manager.assetInsert, () => insertIntoSendBox(insertTagText(key, item.label)), true,
         STRINGS.manager.assetInsertTitle));
     head.append(moreButton(rowId));
@@ -3964,14 +3574,7 @@ function versionAssetBlock(version, writable) {
         return box;
     }
     for (const label of labels) {
-        const row = el('label', 'pm-quickbar-labelrow');
-        const checkbox = el('input', 'pm-checkbox');
-        checkbox.type = 'checkbox';
-        checkbox.checked = assetSelected(version, label, labels);
-        checkbox.disabled = !writable;
-        checkbox.addEventListener('change', () => toggleVersionAsset(version.id, label));
-        row.append(checkbox, el('span', 'pm-quickbar-labelname', label));
-        box.append(row);
+        box.append(checkRow(label, assetSelected(version, label, labels), writable, () => toggleVersionAsset(version.id, label)));
     }
     return box;
 }
@@ -4027,7 +3630,7 @@ function assetsTab(s, writable, reason) {
     box.append(uploadRow(writable, reason));
     if (visibleAssets().length) {
         box.append(actionsRow([listSearchButton('assets')]));
-        if (listUi.assets.open) box.append(listSearchRow('assets'));
+        if (lists.assets.open) box.append(listSearchRow('assets'));
     }
     const list = el('div');
     list.dataset.pmList = 'assets';
@@ -4043,69 +3646,39 @@ function fillAssetList(container, s, writable, reason) {
     const live = new Set(visibleAssets().map(item => rowKey('asset', item.label)));
     if (expandedRow !== null && !live.has(expandedRow)) expandedRow = null;
     const folderKey = resolveFolderKey(s.root, targetAvatar);
-    const ui = listUi.assets;
+    const ui = lists.assets;
     // An empty listing hides the search controls, so it also resets the search.
-    if (!visibleAssets().length) { Object.assign(ui, emptyListUi()); return; }
+    if (!visibleAssets().length) { Object.assign(ui, listUi()); return; }
     let list = visibleAssets();
     const query = ui.open ? ui.query.trim() : '';
     if (query) {
-        const ranked = list
-            .map(item => ({ item, rank: rankOf(item.label ?? '', query) }))
-            .filter(entry => entry.rank > 0)
-            .sort((a, b) => b.rank - a.rank);
-        list = ranked.map(entry => entry.item);
+        list = rankByQuery(list, query, item => [item.label ?? '']);
         if (!list.length) { container.append(emptyOf(STRINGS.common.searchNoHits)); return; }
     }
     const paged = pageOf(list, ui.page, s.root?.settings?.pageSizeAssets ?? 20);
     ui.page = paged.page;
     const styleClass = assetStyleClass();
     for (const item of paged.slice) container.append(assetRow(item, folderKey, writable, reason, styleClass));
-    const pager = pagerRow(paged.page, paged.pages,
-        () => { ui.page = Math.max(1, ui.page - 1); redrawManagerList('assets'); },
-        () => { ui.page = ui.page + 1; redrawManagerList('assets'); });
+    const pager = pagerRow(paged, ui, () => redrawManagerList('assets'));
     if (pager) container.append(pager);
 }
 
 /* Labels tab */
 
-// Enter is guarded by isComposingKey, so a hangul IME commit cannot submit.
-function newLabelRow(writable) {
-    const row = el('div', 'pm-quickbar-newlabel');
-    const input = el('input', 'pm-quickbar-newlabel-input');
-    input.type = 'text';
-    input.placeholder = STRINGS.manager.newGroupPlaceholder;
-    input.disabled = !writable;
-    input.setAttribute('aria-label', STRINGS.manager.newGroupAria);
-    const submit = () => {
-        if (!input.value.trim()) return;
-        // addLabel only schedules the redraw, so this field is still the live one.
-        if (!addLabel(input.value)) return;
-        input.value = '';
-        // Ends the typing session: the deferred redraw would otherwise wait for a blur that
-        // never comes.
-        input.blur();
-    };
-    input.addEventListener('keydown', e => {
-        if (isComposingKey(e)) return;
-        if (e.key === 'Enter') { e.preventDefault(); submit(); }
-    });
-    const addBtn = el('button', 'pm-manager-btn', STRINGS.common.create);
-    addBtn.type = 'button';
-    addBtn.disabled = !writable;
-    if (writable) addBtn.addEventListener('click', submit);
-    row.append(input, addBtn);
-    return row;
-}
-
 function labelsTab(s) {
     const box = el('div', 'pm-manager-tabbody');
     box.append(actionsRow([listSearchButton('groups')]));
-    if (listUi.groups.open) box.append(listSearchRow('groups'));
+    if (lists.groups.open) box.append(listSearchRow('groups'));
     const list = el('div');
     list.dataset.pmList = 'groups';
     fillGroupList(list, s);
     box.append(list);
-    box.append(newLabelRow(rosterWritable(getState())));
+    // addLabel answers false on a refusal, which keeps the typed name.
+    box.append(newGroupRow({
+        placeholder: STRINGS.manager.newGroupPlaceholder, aria: STRINGS.manager.newGroupAria,
+        buttonClass: 'pm-manager-btn', buttonLabel: STRINGS.common.create,
+        enabled: rosterWritable(getState()), onSubmit: value => addLabel(value),
+    }));
     return box;
 }
 
@@ -4121,13 +3694,9 @@ function fillGroupList(container, s) {
     if (expandedRow !== null && !live.has(expandedRow)) expandedRow = null;
     if (!labels.length) { container.append(emptyOf(STRINGS.manager.groupsEmpty)); return; }
     let list = labels;
-    const query = listUi.groups.open ? listUi.groups.query.trim() : '';
+    const query = lists.groups.open ? lists.groups.query.trim() : '';
     if (query) {
-        const ranked = labels
-            .map(label => ({ label, rank: rankOf(label.name ?? '', query) }))
-            .filter(entry => entry.rank > 0)
-            .sort((a, b) => b.rank - a.rank);
-        list = ranked.map(entry => entry.label);
+        list = rankByQuery(labels, query, label => [label.name ?? '']);
         if (!list.length) { container.append(emptyOf(STRINGS.common.searchNoHits)); return; }
     }
     for (const label of list) container.append(groupRow(label, query, writable));
@@ -4199,26 +3768,19 @@ function personaPickerButton(ctx) {
     return btn;
 }
 
-// The picker's view mode: its own setting (pickerViewMode), separate from the quick
-// panel's.
+// The picker's view mode: its own setting, separate from the quick panel's.
 function pickerViewSelect() {
-    const select = el('select', 'pm-manager-select');
-    for (const key of ['list', 'tiles', 'tilesNamed']) {
-        const option = el('option', null, STRINGS.quick.viewNames[key]);
-        option.value = key;
-        select.append(option);
-    }
     const stored = getRoot()?.settings?.pickerViewMode;
-    select.value = ['tiles', 'tilesNamed'].includes(stored) ? stored : 'list';
+    const select = selectOf('pm-manager-select', VIEW_MODES.map(key => [key, STRINGS.quick.viewNames[key]]),
+        VIEW_MODES.includes(stored) ? stored : 'list', value => {
+            // Refused on a read-only root rather than written and lost.
+            const root = getRoot();
+            if (!root || root.readOnly) { scheduleDraw(); return; }
+            root.settings.pickerViewMode = value;
+            freshContext()?.saveSettingsDebounced?.();
+            scheduleDraw();
+        });
     select.setAttribute('aria-label', STRINGS.quick.viewCaption);
-    select.addEventListener('change', () => {
-        // Refused on a read-only root rather than written and lost.
-        const root = getRoot();
-        if (!root || root.readOnly) { scheduleDraw(); return; }
-        root.settings.pickerViewMode = select.value;
-        freshContext()?.saveSettingsDebounced?.();
-        scheduleDraw();
-    });
     return select;
 }
 
@@ -4252,7 +3814,7 @@ function personaPicker(ctx) {
         box.append(actionsRow([actionButton(STRINGS.manager.copyCancel, () => closeCopyPicker(), true)]));
     }
     box.append(actionsRow([listSearchButton('picker')]));
-    if (listUi.picker.open) box.append(listSearchRow('picker'));
+    if (lists.picker.open) box.append(listSearchRow('picker'));
     const viewRow = el('div', 'pm-manager-pickrow');
     viewRow.append(el('span', 'pm-manager-picklabel', STRINGS.quick.viewCaption));
     viewRow.append(pickerViewSelect());
@@ -4280,17 +3842,10 @@ function fillPickerList(container, ctx) {
         return a[0] < b[0] ? -1 : (a[0] > b[0] ? 1 : 0);
     });
     const root = getRoot();
-    const ui = listUi.picker;
+    const ui = lists.picker;
     const query = ui.open ? ui.query.trim() : '';
     if (query) {
-        const ranked = [];
-        for (const [avatar, name] of entries) {
-            let rank = rankOf(String(name ?? ''), query);
-            for (const tag of getPersona(root, avatar)?.tags ?? []) rank = Math.max(rank, rankOf(tag, query));
-            if (rank > 0) ranked.push({ entry: [avatar, name], rank });
-        }
-        ranked.sort((a, b) => b.rank - a.rank);
-        entries = ranked.map(r => r.entry);
+        entries = rankByQuery(entries, query, ([avatar, name]) => [String(name ?? ''), ...(getPersona(root, avatar)?.tags ?? [])]);
         if (!entries.length) { container.append(emptyOf(STRINGS.common.searchNoHits)); return; }
     }
     // The picker shares the roster's page size.
@@ -4306,29 +3861,23 @@ function fillPickerList(container, ctx) {
             grid.append(pickerTile(ctx, avatar, String(name ?? ''), query, viewMode === 'tilesNamed'));
         }
         container.append(grid);
-        const tilePager = pagerRow(paged.page, paged.pages,
-            () => { ui.page = Math.max(1, ui.page - 1); redrawManagerList('picker'); },
-            () => { ui.page = ui.page + 1; redrawManagerList('picker'); });
-        if (tilePager) container.append(tilePager);
-        return;
+    } else {
+        for (const [avatar, name] of paged.slice) {
+            const row = el('div', 'pm-row pm-manager-personarow');
+            const url = thumbnailUrl(ctx, avatar);
+            if (url) row.append(pickerThumbs.take('pm-quickbar-rowimg', url));
+            row.append(markedText('pm-manager-name', String(name ?? ''), query));
+            // getPersona only reads: listing must not create entries.
+            if (!getPersona(root, avatar)) row.append(el('span', 'pm-manager-count', STRINGS.manager.notAdoptedTag));
+            row.append(checkMark(avatar === targetAvatar));
+            makeRowActivatable(row, () => {
+                if (pickerMode === 'copy') copyOnto(avatar);
+                else selectTarget(avatar);
+            });
+            container.append(row);
+        }
     }
-    for (const [avatar, name] of paged.slice) {
-        const row = el('div', 'pm-row pm-manager-personarow');
-        const url = thumbnailUrl(ctx, avatar);
-        if (url) row.append(pickerThumbs.take('pm-quickbar-rowimg', url));
-        row.append(markedText('pm-manager-name', String(name ?? ''), query));
-        // getPersona only reads: listing must not create entries.
-        if (!getPersona(root, avatar)) row.append(el('span', 'pm-manager-count', STRINGS.manager.notAdoptedTag));
-        row.append(checkMark(avatar === targetAvatar));
-        makeRowActivatable(row, () => {
-            if (pickerMode === 'copy') copyOnto(avatar);
-            else selectTarget(avatar);
-        });
-        container.append(row);
-    }
-    const pager = pagerRow(paged.page, paged.pages,
-        () => { ui.page = Math.max(1, ui.page - 1); redrawManagerList('picker'); },
-        () => { ui.page = ui.page + 1; redrawManagerList('picker'); });
+    const pager = pagerRow(paged, ui, () => redrawManagerList('picker'));
     if (pager) container.append(pager);
 }
 
@@ -4530,44 +4079,25 @@ function drawManager() {
     drawWaitingOnGesture = false;
     rowNodes.clear();
     clearDragState();
-    // Already waiting for a field to blur; a second listener would draw twice.
-    if (drawDeferred) return;
-    // Wait for the user to leave a focused field: rebuilding takes it out of the
-    // document mid IME composition and loses a half-typed hangul syllable.
-    const active = document.activeElement;
-    if (active && panel.contains(active) && isTextEntry(active)) {
-        drawDeferred = true;
-        // Released after the blurring gesture ends (afterGesture): the blur comes on the
-        // tap's mousedown, and a rebuild before its mouseup would swallow the click.
-        active.addEventListener('blur', () => afterGesture(() => { drawDeferred = false; scheduleDraw(); }), { once: true });
-        return;
-    }
+    if (drawHold.wait(panel)) return;
 
     // One read for the whole draw; drawing is synchronous and no handler keeps either.
     const ctx = freshContext();
     const s = targetState();
 
-    // .pm-scroll scrolls inside the clipped panel. Emptying it clamps scrollTop to 0, so
-    // the offset is saved and restored, as is editor typing: the draw a blur releases
-    // would otherwise rebuild the textarea from the stored text.
+    // .pm-scroll scrolls inside the clipped panel. Emptying it clamps scrollTop to 0, so the
+    // offset is saved and restored, as is editor typing: the draw a blur releases would
+    // otherwise rebuild the textarea from the stored text. Each screen keeps its own offset.
     const oldScroll = panel.querySelector('.pm-scroll');
-    // One offset per screen: the screen being left keeps its offset, and the one entered
-    // gets its own, or the top.
     const screen = screenKey();
     if (lastScreen !== null && oldScroll) scrollByScreen.set(lastScreen, oldScroll.scrollTop);
     const scrollTop = screen === lastScreen ? (oldScroll?.scrollTop ?? 0) : (scrollByScreen.get(screen) ?? 0);
     lastScreen = screen;
-    const editing = panel.querySelector('.pm-manager-editor-text');
-    const typed = (editing && editorDirty)
-        ? { value: editing.value, start: editing.selectionStart, end: editing.selectionEnd }
-        : null;
-    // The revise edit box too, for the same race.
+    const typed = editorDirty ? fieldSnapshot(panel.querySelector('.pm-manager-editor-text')) : null;
+    // The revise edit box too, also parked in module state: the restore below only bridges
+    // draws that both show the box.
     const reviseField = panel.querySelector('.pm-revise-input');
-    const reviseTyped = reviseField
-        ? { value: reviseField.value, start: reviseField.selectionStart, end: reviseField.selectionEnd }
-        : null;
-    // Also parked in module state: the restore below only bridges draws that both show
-    // the box, and a draw without it (tab switch, picker) would lose the typing.
+    const reviseTyped = fieldSnapshot(reviseField);
     if (reviseEditing && reviseField) reviseEditing.typed = reviseField.value;
     // Full-text typing is parked on the working copies, which the rebuild draws from.
     harvestFullTexts();
@@ -4582,8 +4112,8 @@ function drawManager() {
     } else {
         panel.replaceChildren();
     }
-    // Header, tabs and band stay on top, outside .pm-scroll: as a sticky bar inside it,
-    // content showed through the theme's translucent tint.
+    // Header, tabs and band stay outside .pm-scroll: as a sticky bar inside it, content
+    // showed through the theme's translucent tint.
     const sticky = el('div', 'pm-manager-sticky');
     sticky.append(headerRow(ctx), tabsRow(), bandRow(STRINGS.manager.tabs[managerTab]));
     const scroll = keepScroll ? oldScroll : el('div', 'pm-scroll');
@@ -4659,24 +4189,8 @@ function drawManager() {
 
     if (scroll.scrollTop !== scrollTop) scroll.scrollTop = scrollTop;
     // Focus is not restored: it would reopen the keyboard the user just closed.
-    if (typed) {
-        const rebuilt = panel.querySelector('.pm-manager-editor-text');
-        if (rebuilt) {
-            rebuilt.value = typed.value;
-            if (typed.start != null && typed.end != null && typeof rebuilt.setSelectionRange === 'function') {
-                rebuilt.setSelectionRange(typed.start, typed.end);
-            }
-        }
-    }
-    if (reviseTyped) {
-        const rebuilt = panel.querySelector('.pm-revise-input');
-        if (rebuilt) {
-            rebuilt.value = reviseTyped.value;
-            if (reviseTyped.start != null && reviseTyped.end != null && typeof rebuilt.setSelectionRange === 'function') {
-                rebuilt.setSelectionRange(reviseTyped.start, reviseTyped.end);
-            }
-        }
-    }
+    if (typed) restoreField(panel.querySelector('.pm-manager-editor-text'), typed);
+    if (reviseTyped) restoreField(panel.querySelector('.pm-revise-input'), reviseTyped);
     if (reviseScrollToBox) {
         reviseScrollToBox = false;
         try { panel.querySelector('.pm-revise-box')?.scrollIntoView({ block: 'nearest' }); } catch { /* best effort */ }
@@ -4694,9 +4208,9 @@ function onOpenRequest(e) {
     detail.handled = true;
     openManager(detail.tab);
     // The quick panel's search shortcut also asks for the search row. Set after
-    // openManager, which resets listUi.
-    if (detail.search && listUi[detail.tab]) {
-        listUi[detail.tab].open = true;
+    // openManager, which resets the lists.
+    if (detail.search && lists[detail.tab]) {
+        lists[detail.tab].open = true;
         focusSearch = detail.tab;
         scheduleDraw();
     }

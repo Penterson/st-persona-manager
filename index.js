@@ -15,8 +15,7 @@ import { syncGreetingInContext } from './modules/greeting.js';
 
 const listeners = [];
 let chatObserver = null;
-// folderKey -> Map(label -> path). Folder-qualified tags exist so old messages resolve
-// whichever persona is active, so they often name a folder other than the current one.
+// folderKey -> Map(label -> path), for folder-qualified tags naming another persona's folder.
 const folders = new Map();
 
 // Nothing here keeps a context (see freshContext): every handler asks for its own.
@@ -28,8 +27,7 @@ function on(typeName, fn) {
     listeners.push([type, fn]);
 }
 
-// One part failing to mount must not take the rest down: a throw would reject init
-// before any event listener is registered.
+// One part failing to mount must not take the rest down.
 function safely(label, fn) {
     try { fn(); } catch (e) { console.error(`[${MODULE_NAME}] ${label} failed to mount`, e); }
 }
@@ -39,8 +37,7 @@ function resolveTag({ folderKey, filename }) {
     const s = getState();
     if (!s) return null;
     const own = s.avatar ? resolveFolderKey(s.root, s.avatar) : null;
-    // Only paths the server listed: a guessed URL for a name the server sanitised
-    // differently renders as a broken image, worse than leaving the tag as text.
+    // Only paths the server listed: a guessed URL can render as a broken image.
     if (!folderKey || folderKey === own) {
         if (!own) return null;
         return lookupLabel(s.assetPaths, filename);
@@ -53,11 +50,9 @@ function resolveTag({ folderKey, filename }) {
         if (!ctx) { folders.set(folderKey, new Map()); return hit.path; }
         listAssets(ctx, folderKey)
             .then(list => folders.set(folderKey, new Map(list.map(a => [a.label, a.path]))))
-            // A folder we cannot list stays an empty listing, so its tags remain
-            // plain text and we never retry in a render loop.
+            // An unlistable folder stays empty, so its tags stay text and nothing retries in a loop.
             .catch(() => folders.set(folderKey, new Map()))
-            // Redraw all: while the listing was pending, later tags saw fetch:false and
-            // stayed text. The key now holds a Map, so this cannot issue a new request.
+            // Tags seen while the listing was pending stayed text; the Map stops a new request.
             .then(() => renderAll());
     }
     return hit.path;
@@ -77,8 +72,8 @@ function renderAll() {
     for (const el of document.querySelectorAll('#chat .mes_text')) render(el);
 }
 
-// SillyTavern empties off-screen messages and refills them on scroll-back without
-// firing message events, so this observer re-renders {{pimg::}} tags on refill.
+// SillyTavern refills off-screen messages on scroll-back without message events, so this
+// observer re-renders {{pimg::}} tags.
 function startChatObserver() {
     const chat = document.getElementById('chat');
     if (!chat || chatObserver) return;
@@ -98,11 +93,9 @@ function startChatObserver() {
 
     const collect = node => {
         if (!node || node.nodeType !== 1) return;
-        // Before closest(), which counts the node itself: a new .mes_text would take that
-        // early return, and its addition targets the parent .mes, so it would be lost.
+        // Before closest(), which counts the node itself.
         if (node.matches?.('.mes_text')) { pending.add(node); return; }
-        // Inside a .mes_text (a streaming refill), the host is collected via record.target
-        // below; walking the subtree for every appended node would be wasted work.
+        // Inside a .mes_text, the host is collected via record.target below.
         if (node.closest?.('.mes_text')) return;
         for (const found of node.querySelectorAll?.('.mes_text') ?? []) pending.add(found);
     };
@@ -110,24 +103,21 @@ function startChatObserver() {
     chatObserver = new MutationObserver(records => {
         for (const record of records) {
             for (const node of record.addedNodes) collect(node);
-            // A refill that only swaps text nodes reports the .mes_text itself as the
-            // target, and that node is not in addedNodes.
+            // A refill that only swaps text nodes reports the .mes_text as the target.
             const host = record.target?.nodeType === 1
                 ? record.target.closest?.('.mes_text')
                 : record.target?.parentElement?.closest?.('.mes_text');
             if (host) pending.add(host);
         }
-        // One pass per frame, not one per node SillyTavern appends while filling a message.
+        // One pass per frame.
         if (pending.size && !frame) frame = requestAnimationFrame(flush);
     });
 
-    // Scoped to #chat for cost. Not loop-safe by idempotence (unresolved tags stay matchable):
-    // it relies on renderInElement writing nothing when no tag resolved.
+    // Scoped to #chat. Loop-safe because renderInElement writes nothing when no tag resolved.
     chatObserver.observe(chat, { childList: true, subtree: true, characterData: true });
 }
 
-/* A picture replaced under the same name: rendered tags are already <img>s, so a new listing
-   changes nothing on screen. Repoint them, dropping the old size (the shape may differ). */
+/* A picture replaced under the same name: rendered <img>s are repointed, dropping the old size. */
 function repointChatAssets() {
     const s = getState();
     if (!s?.assetPaths?.size) return;
@@ -173,8 +163,7 @@ function syncGreeting() {
     noteUserName();
 }
 
-// After SillyTavern has finished its own reaction to a persona event (a switch
-// re-sends an untouched greeting on some builds), so this acts on the result.
+// After SillyTavern's own reaction to a persona event, so this acts on the result.
 function scheduleGreetingSync() {
     if (greetingTimer) clearTimeout(greetingTimer);
     greetingTimer = setTimeout(() => { greetingTimer = 0; syncGreeting(); }, 120);
@@ -192,42 +181,34 @@ async function init() {
     noteUserName();
     // Before any screen mounts, so the first tap is already tracked (see afterGesture in dom.js).
     installGestureTracking();
-    // UI mounts before the awaits: anything that appears seconds late looks broken. None
-    // needs what they bring: paintButton copes with no avatar yet, the manager waits for
-    // pm:open-manager, and the settings drawer reads getRoot() when opened.
+    // UI mounts before the awaits, none of which it needs: late UI looks broken.
     safely('quickbar', mountQuickbar);
     safely('manager', mountManager);
     safely('settings', mountSettings);
 
     await initPrecise();
-    // Torn down while waiting (a newer load of this file took over): stop here, or
-    // the rest of init would register listeners that nothing can take back off.
+    // Torn down while waiting: stop, or listeners would outlive the instance.
     if (!alive) return;
-    // Again, now that the precise api has landed: name1 alone cannot tell apart two
-    // personas with the same name. Cheap: no request, no DOM.
+    // Again, now that the precise api can tell same-named personas apart.
     refresh();
-    // Read before the fetch, because the listing is for this persona: read after, a move
-    // mid-fetch would seed lastAvatar wrongly and the first event would skip its refetch.
+    // Read before the fetch, whose listing is for this persona.
     const assetsAvatar = getState()?.avatar ?? null;
     await refreshAssets();
     if (!alive) return;
     // Used only to register; the macro callbacks read getState, not this context.
     const ctx = freshContext();
     if (ctx) {
-        // Without registerMacro only the asset macros are lost, and registerAssetMacros
-        // returns quietly, so warn here or {{persona_assets}} sits in prompts unexplained.
+        // registerAssetMacros returns quietly without registerMacro, so the warning is here.
         if (typeof ctx.registerMacro !== 'function') {
             notify('warning', STRINGS.common.noRegisterMacro);
         }
         safely('macros', () => registerAssetMacros(ctx, getState));
     }
 
-    // Assets are refetched only on an avatar change (PERSONA_UPDATED fires on every version
-    // switch). Seeded so the first event, usually init's own settings save, does not refetch.
+    // Assets are refetched only on an avatar change, seeded so the first event does not refetch.
     let lastAvatar = assetsAvatar;
-    /* SETTINGS_UPDATED echoes every save, ours included, a second later, and a redraw
-       replaces the scroll box mid-gesture, so an echo that changes nothing shown is dropped.
-       view lists the SillyTavern data screens show; our own writes redraw on their own. */
+    /* SETTINGS_UPDATED echoes every save a second later, and a redraw replaces the scroll box
+       mid-gesture, so an echo that changes nothing shown (view) is dropped. */
     let lastView = null;
     const viewChanged = () => {
         const ctx = freshContext();
@@ -251,20 +232,17 @@ async function init() {
         const avatar = getState()?.avatar ?? null;
         if (avatar !== lastAvatar) {
             lastAvatar = avatar;
-            /* Repaint first: the listing is a round trip that can be slow or fail, and
-               nothing that reacts to pm:changed reads it. */
+            // Repaint first: the listing is a slow round trip nothing on pm:changed reads.
             document.dispatchEvent(new CustomEvent('pm:changed'));
             await refreshAssets();
-            /* Tags that resolved to nothing under the previous persona may resolve now;
-               a sweep that finds nothing changes no node. */
+            // Tags unresolved under the previous persona may resolve now.
             renderAll();
         }
         if (!viewChanged() && origin === 'settings') return;
         document.dispatchEvent(new CustomEvent('pm:changed'));
     };
-    // Per-language auto-naming; a no-op unless enabled, and debounced inside. Not on
-    // USER_MESSAGE_RENDERED: that fires as generation begins and this ends in a
-    // /persona-set; the character's reply carries the same language signal at turn end.
+    // Per-language auto-naming (debounced, a no-op unless enabled). Not on USER_MESSAGE_RENDERED,
+    // which fires as generation begins; the reply carries the same language signal.
     const onChatText = () => scheduleAutoName();
     on('PERSONA_CHANGED', onPersona);
     on('SETTINGS_UPDATED', () => onPersona('settings'));
@@ -273,8 +251,7 @@ async function init() {
     on('PERSONA_CREATED', onPersona);
     on('PERSONA_DELETED', onPersona);
     on('CHAT_CHANGED', async () => {
-        // Opening a chat happens once, by choice, outside any render loop, so failed
-        // listings (cached as empty) are retried here.
+        // Outside any render loop, so failed listings (cached as empty) are retried here.
         folders.clear();
         await onPersona();
         // Our own folder too: onPersona refetches only when the persona changed.
@@ -285,8 +262,7 @@ async function init() {
     on('USER_MESSAGE_RENDERED', i => renderOne(i));
     on('CHARACTER_MESSAGE_RENDERED', i => { renderOne(i); onChatText(); });
     on('MESSAGE_UPDATED', i => renderOne(i));
-    // A greeting swipe shows a stored alternate that may carry an old user name. Only
-    // message 0: a swipe on a reply starts a generation and is not ours.
+    // A greeting swipe shows an alternate that may carry an old user name (message 0 only).
     on('MESSAGE_SWIPED', i => {
         if (Number(i) !== 0) return;
         syncGreeting();
@@ -297,8 +273,7 @@ async function init() {
 
     renderAll();
     startChatObserver();
-    // Repaints the icon painted before the precise api, and catches a persona switch made
-    // during the awaits, before these listeners existed.
+    // Repaints the icon and catches a persona switch made during the awaits.
     void onPersona();
 }
 
@@ -331,8 +306,8 @@ function destroy() {
 }
 
 function boot() {
-    // A re-evaluation (extension reload without page reload) tears down the previous
-    // instance first. Published here, not after init, so one awaiting APP_READY is reachable.
+    // An extension reload tears down the previous instance first. Published before init, so an
+    // instance awaiting APP_READY is reachable.
     const previous = globalThis.__personaManagerDestroy;
     if (typeof previous === 'function') {
         try { previous(); } catch (e) { console.warn(`[${MODULE_NAME}] previous instance teardown`, e); }
