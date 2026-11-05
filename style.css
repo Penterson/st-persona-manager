@@ -1,10 +1,7 @@
-/* Persona Manager. No literal colours: everything derives from SillyTavern's theme variables.
-   Surfaces are translucent lifts of currentColor, so one rule darkens on light themes and
-   lightens on dark ones. The tokens sit on the extension's own roots, not :root, so they
-   cannot leak into SillyTavern's UI. */
+/* Persona Manager. No literal colours: everything derives from SillyTavern's theme variables,
+   and surfaces are translucent lifts of currentColor, so one rule suits light and dark themes.
+   Tokens sit on the extension's own roots (both panels carry .pm-panel), never :root. */
 .pm-panel,
-.pm-quickbar-panel,
-.pm-manager-panel,
 .pm-settings {
     /* Break Korean between words rather than inside them; an overlong token still wraps. */
     word-break: keep-all;
@@ -28,26 +25,22 @@
     --pm-rule: 1px solid color-mix(in srgb, currentColor 55%, transparent);
     --pm-rule-strong: 1px solid currentColor;
 
-    /* Rhythm: --pm-rhythm is the air around a block; --pm-pair, much smaller, joins a label to
-       the line it labels, so a caption reads as belonging to its subject. */
+    /* Rhythm: the air around a block, and the much smaller gap joining a label to its line. */
     --pm-rhythm: 14px;
     --pm-pair: 4px;
 
-    /* No webfont: Latin display faces have no Hangul and a Hangul one is megabytes, so the
-       display voice is weight, tight tracking and a horizontal stretch. --pm-font-display is a
-       hook for a face set in SillyTavern's custom CSS. */
+    /* No webfont (a Hangul face is megabytes): the display voice is weight, tracking and a
+       horizontal stretch. --pm-font-display is a hook for SillyTavern's custom CSS. */
     --pm-font-display: inherit;
     --pm-display-stretch: 1.06;
-    /* The ink block: the theme's body colour as fill, its blur tint as type. SillyTavern
-       guarantees that pair contrasts, and it inverts with the theme by itself. */
+    /* The ink block: the theme's body colour as fill, its blur tint as type, a pair the theme
+       guarantees contrasts. */
     --pm-mass: var(--SmartThemeBodyColor);
     --pm-on-mass: var(--SmartThemeBlurTintColor);
-    /* From the mass tokens, not the raw theme variables, so it resolves against the opaque
-       --pm-on-mass that the @supports block below sets on the same element. */
+    /* From the mass tokens, so it resolves against the opaque --pm-on-mass set below. */
     --pm-mass-muted: color-mix(in srgb, var(--pm-on-mass) 68%, var(--pm-mass));
-    /* Secondary text derives from currentColor, not --SmartThemeEmColor: a theme's em
-       colour can fall under 4.5:1, while a fixed fraction of the body colour keeps most of
-       the contrast the theme guarantees. --pm-muted-2, for the smallest labels, is stronger. */
+    /* Secondary text is a fraction of the body colour, not --SmartThemeEmColor, which can fall
+       under 4.5:1. --pm-muted-2 is for the smallest labels. */
     --pm-muted: color-mix(in srgb, currentColor 74%, transparent);
     --pm-muted-2: color-mix(in srgb, currentColor 82%, transparent);
 }
@@ -76,8 +69,7 @@
 
 .pm-row:active { background: color-mix(in srgb, currentColor 14%, transparent); }
 
-/* No tap highlight and no text selection: a long press on a row would otherwise start a
-   selection instead of registering as a tap. */
+/* No tap highlight or text selection: a long press would start a selection, not a tap. */
 .pm-quickbar,
 .pm-quickbar-panel {
     -webkit-tap-highlight-color: transparent;
@@ -94,8 +86,7 @@
     position: relative;
 }
 
-/* The send row allots the icon about 28px, so the box cannot grow; the ::before reaches out
-   to a 40px target (22 + 18 tall, 30 + 10 wide). */
+/* The send row allots the icon about 28px, so the ::before reaches out to a 40px target. */
 .pm-quickbar::before {
     content: '';
     position: absolute;
@@ -107,8 +98,7 @@
     opacity: 0.6;
 }
 
-/* This button sits outside the roots that define the tokens, so it reads the theme variable
-   directly. */
+/* Outside the token roots, so it reads the theme variable directly. */
 .pm-quickbar:focus-visible {
     outline: 2px solid var(--SmartThemeQuoteColor);
     outline-offset: -2px;
@@ -121,8 +111,7 @@
     object-fit: cover;
 }
 
-/* Stand-in for a missing picture: the same 22px box, so the icon keeps its place in the
-   send row. */
+/* Stand-in for a missing picture, in the same 22px box. */
 .pm-quickbar-fallback {
     display: inline-flex;
     align-items: center;
@@ -153,8 +142,7 @@
     bottom: 12px;
     transform: translateX(-50%);
     width: min(420px, 94vw);
-    /* quickbar.js sets max-height from visualViewport.height, since vh ignores the on-screen
-       keyboard; this is the fallback until it does. */
+    /* Fallback until quickbar.js sizes it from visualViewport (vh ignores the keyboard). */
     max-height: calc(100dvh - 24px);
     display: flex;
     flex-direction: column;
@@ -165,9 +153,8 @@
     background: var(--pm-on-mass);
 }
 
-/* The one scrolling box in each panel. min-height: 0 lets the flex item shrink below its
-   content and scroll; the both-edges gutter keeps content from shifting when a scrollbar
-   appears and keeps full-width ink blocks symmetric; contain keeps the chat behind still. */
+/* The one scrolling box in each panel. The both-edges gutter keeps content still when a
+   scrollbar appears and ink blocks symmetric; contain keeps the chat behind still. */
 .pm-scroll {
     flex: 1 1 auto;
     min-height: 0;
@@ -225,8 +212,7 @@
     flex: 0 0 auto;
     min-width: 1em;
     text-align: center;
-    /* Ink, not the accent: a theme's quote colour can fall under 3:1 on a light panel, and the
-       accent is reserved for the current-persona ring. */
+    /* Ink, not the accent, which can fall under 3:1 and marks the current persona. */
     color: currentColor;
     font-weight: 800;
 }
@@ -237,8 +223,7 @@
     inset: -6px;
 }
 
-/* Selects and inputs generate no ::before box to borrow a reach from, so their own border
-   box carries the 44px tap floor (border-box keeps the padding inside min-height). */
+/* Selects and inputs have no ::before to reach with, so the box itself is 44px. */
 .pm-manager-select {
     flex: 0 1 auto;
     max-width: 55%;
@@ -248,8 +233,7 @@
     padding: 8px 10px;
 }
 
-/* Inactive rows and controls: inert, and only lightly dimmed so muted second lines stay above
-   3:1. */
+/* Inert, and only lightly dimmed so muted second lines stay above 3:1. */
 .pm-disabled {
     opacity: 0.72;
     cursor: default;
@@ -263,8 +247,8 @@
     user-select: text;
 }
 
-/* Warning banners: an accent ring with a ground-colour ring inside it, so they read as
-   warnings by shape even where the accent alone falls under 3:1 on ink. */
+/* Warning banners: an accent ring inside a ground-colour ring, so the shape reads as a
+   warning even where the accent falls under 3:1. */
 .pm-quickbar-warn,
 .pm-manager-warn {
     border-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 60%, var(--SmartThemeBorderColor));
@@ -296,8 +280,7 @@
     -webkit-tap-highlight-color: transparent;
 }
 
-/* The reach is half the 6px row gap: a full-gap reach makes neighbouring hit areas overlap,
-   and the later button in the markup takes the tap. 40px + 3px a side still clears 44px. */
+/* The reach is half the 6px gap, so neighbouring hit areas never overlap; 40 + 3 + 3 = 46. */
 .pm-quickbar-btn::before,
 .pm-manager-btn::before {
     content: '';
@@ -321,18 +304,15 @@
     gap: 6px;
 }
 
-/* Five controls on one line under the heading; 4px gaps are what fit them on a 411px phone.
-   overflow-x makes this box clip vertically too, so the 3px top padding keeps the buttons'
-   upward reach, and wrapped lines get a 6px row gap. */
+/* Five controls on one line; 4px gaps fit them on a 411px phone. The box clips, so the 3px top
+   padding keeps the buttons' upward reach. */
 .pm-quickbar-rosterhead-controls {
     display: flex;
     align-items: center;
-    /* No wrapping here; the selects give up width instead. */
     flex-wrap: nowrap;
     gap: 6px 4px;
     padding: 3px 12px 6px;
-    /* At large theme font sizes the row scrolls rather than pushing a control out of reach;
-       a scrollbar in a 40px row costs more than it explains, so it is hidden. */
+    /* At large font sizes the row scrolls, without a scrollbar. */
     overflow-x: auto;
     overscroll-behavior-x: contain;
     scrollbar-width: none;
@@ -342,8 +322,7 @@
     display: none;
 }
 
-/* Tighter padding in this row only, which buys the single line; the ::before reach keeps the
-   targets full size. */
+/* Tighter padding buys the single line; the reach keeps the targets full size. */
 .pm-quickbar-rosterhead-controls > .pm-quickbar-btn {
     flex: 0 0 auto;
     padding-left: 10px;
@@ -355,11 +334,9 @@
     inset: -3px -2px;
 }
 
-/* The two selects absorb the leftover width; a select will not shrink below its widest
-   option unless min-width allows it. */
+/* The selects absorb the leftover width, down to a min-width that stays readable. */
 .pm-quickbar-rosterhead-controls > .pm-quickbar-sort {
     flex: 1 1 0;
-    /* The narrowest that stays readable; below it the narrow-screen query wraps the row. */
     min-width: 68px;
 }
 
@@ -391,8 +368,7 @@
     -webkit-tap-highlight-color: transparent;
 }
 
-/* Horizontal reach is half the 6px chip gap; a single-line chip row has no vertical
-   neighbour, so it keeps the full 6px there. */
+/* Half the 6px chip gap sideways; a single-line row has no vertical neighbour. */
 .pm-quickbar-chip::before {
     content: '';
     position: absolute;
@@ -407,8 +383,7 @@
     padding: 2px 12px 10px 28px;
 }
 
-/* These rows butt against each other, leaving no gap for a reach, so the 44px floor is the
-   box's own height. */
+/* The rows butt together, leaving no room for a reach, so the box itself is 44px. */
 .pm-quickbar-labelrow {
     display: flex;
     align-items: center;
@@ -472,9 +447,8 @@
     box-shadow: 0 2px 8px color-mix(in srgb, currentColor 25%, transparent);
 }
 
-/* Top-layer dialog hosts for both panels. The top layer is pinned to the viewport, so a theme
-   that transforms an ancestor cannot drag a panel off screen; z-index covers the non-modal
-   fallback, where SillyTavern's positioned layers would otherwise paint over it. */
+/* Top-layer dialog hosts: pinned to the viewport whatever a theme transforms. z-index covers
+   the non-modal fallback. */
 .pm-quickbar-host,
 .pm-manager-host {
     position: fixed;
@@ -509,8 +483,7 @@
     display: none;
 }
 
-/* The text half is a column, so the optional version line stacks under the name while the
-   thumbnail and check stay centred. */
+/* A column, so the version line stacks under the name. */
 .pm-quickbar-rowtext {
     flex: 1 1 auto;
     min-width: 0;
@@ -550,9 +523,8 @@
     background: var(--pm-lift-1);
 }
 
-/* manager.js sizes this from visualViewport, since vh ignores the on-screen keyboard. The
-   ground is opaque: over the full viewport a translucent tint shows the chat and its blur
-   layers through, and makes the browser repaint them on every scroll frame. */
+/* manager.js sizes this from visualViewport. Opaque: a translucent tint would show the chat
+   through and repaint its blur layers on every scroll frame. */
 .pm-manager-panel {
     position: absolute;
     left: 0;
@@ -569,8 +541,7 @@
     background: var(--pm-on-mass);
 }
 
-/* File inputs stay in the tree so a read-only sync can disable them with everything else;
-   this keeps them from drawing as a stray button. */
+/* File inputs stay in the tree (so they disable with everything else) without drawing. */
 .pm-manager-panel .pm-hidden,
 .pm-settings .pm-hidden {
     display: none;
@@ -621,8 +592,12 @@
 
 .pm-manager-tab:first-child { border-left: none; }
 
-/* Vertical reach only; horizontally the tabs butt against each other. */
-.pm-manager-tab::before {
+/* Vertical reaches only: these controls butt against their neighbours sideways, and a 2px
+   reach meets the next one without overlapping (a fold head's 40px box plus 2 + 2 is 44). */
+.pm-manager-tab::before,
+.pm-manager-rowname::before,
+.pm-manager-target::before,
+.pm-quickbar-foldhead::before {
     content: '';
     position: absolute;
     inset: -2px 0;
@@ -632,7 +607,6 @@
     border-color: var(--pm-mass);
     background: var(--pm-mass);
     color: var(--pm-on-mass);
-    font-weight: 700;
 }
 
 @media (hover: hover) {
@@ -656,8 +630,6 @@
     letter-spacing: 0.01em;
 }
 
-/* Air under the tab description, and room under the trailing add button so it is not flush
-   with the bottom of the scroll area. */
 .pm-manager-tabbody {
     padding: 4px 0 8px;
 }
@@ -682,8 +654,7 @@
     padding: 2px 0;
 }
 
-/* The identity half is a button of its own, so the tap that opens the drawer can never be
-   the tap on the primary action beside it. */
+/* The identity half is its own button, apart from the primary action beside it. */
 .pm-manager-rowname {
     display: block;
     position: relative;
@@ -699,14 +670,6 @@
     text-align: left;
     cursor: pointer;
     -webkit-tap-highlight-color: transparent;
-}
-
-/* 2px vertical reach: the row pads 2px above and below, so stacked names meet without
-   overlapping, and the box stays 40px so a long list does not grow. */
-.pm-manager-rowname::before {
-    content: '';
-    position: absolute;
-    inset: -2px 0;
 }
 
 .pm-manager-rowname:active {
@@ -740,13 +703,7 @@
     background: color-mix(in srgb, currentColor 8%, transparent);
 }
 
-.pm-manager-more {
-    flex: 0 0 auto;
-    min-width: 44px;
-}
-
-/* The drawer under an open row, inset from the rule above so the nesting reads without a
-   second background. */
+/* The drawer under an open row, inset so the nesting reads without a second background. */
 .pm-manager-expand {
     padding: 4px 0 8px 14px;
     border-top: var(--pm-rule);
@@ -759,8 +716,8 @@
     align-items: stretch;
 }
 
-/* The destructive button sits last, set apart by space and a rule. Compound because the
-   quick panel's bulk bar puts .pm-manager-danger on a bare button in a row. */
+/* The destructive button sits last, set apart. Compound: the bulk bar puts .pm-manager-danger
+   on a bare button. */
 .pm-manager-stack.pm-manager-danger {
     margin-top: 12px;
     padding-top: 10px;
@@ -780,8 +737,7 @@
     color: var(--pm-muted);
 }
 
-/* min-width replaces a flex item's automatic minimum, so without flex-shrink: 0 a button
-   could shrink below its nowrap label; the rows wrap instead. */
+/* No shrinking below the nowrap label; the rows wrap instead. */
 .pm-manager-btn {
     box-sizing: border-box;
     min-width: 40px;
@@ -836,8 +792,7 @@
     padding: 6px 12px 0;
 }
 
-/* Ink text with an accent rule beside it: accent-coloured text falls under 3:1 on light
-   themes. */
+/* Ink text with an accent rule beside it, as accent text can fall under 3:1. */
 .pm-manager-editorhead {
     padding: 10px 14px;
     font-weight: 600;
@@ -849,9 +804,8 @@
     box-shadow: inset 3px 0 0 var(--pm-accent);
 }
 
-/* Save and back stay pinned while the body scrolls (sticky within .pm-scroll, which is why the
-   editor is drawn inside it). The strip is the opaque --pm-on-mass rather than a
-   backdrop-filter, which would re-filter on every scrolled frame. */
+/* Save and back stay pinned while the body scrolls, on an opaque strip: a backdrop-filter
+   would re-filter on every scrolled frame. */
 .pm-manager-editorfoot {
     position: sticky;
     bottom: 0;
@@ -903,8 +857,7 @@
     white-space: nowrap;
 }
 
-/* A pick naming a deleted choice is the state the user must repair: struck (grey already
-   means muted) and bold at full ink. */
+/* A pick naming a deleted choice must be repaired: struck, and bold at full ink. */
 .pm-manager-dead {
     text-decoration: line-through;
 }
@@ -914,8 +867,7 @@
     font-weight: 700;
 }
 
-/* A disabled button's reason is also drawn as text: a tooltip needs a hover a phone cannot
-   make. */
+/* A disabled button's reason, as text: a phone cannot hover for a tooltip. */
 .pm-manager-actionswrap {
     display: flex;
     flex-direction: column;
@@ -958,13 +910,6 @@
 
 @media (hover: hover) {
     .pm-manager-target:hover { background: color-mix(in srgb, currentColor 14%, transparent); }
-}
-
-/* 2px vertical reach, as on the tabs. */
-.pm-manager-target::before {
-    content: '';
-    position: absolute;
-    inset: -2px 0;
 }
 
 .pm-manager-targetimg {
@@ -1015,14 +960,15 @@
     padding: 6px 12px 10px;
 }
 
-/* This box already has its 12px gutter, so nested notes and heads drop their own. */
+/* These boxes already have their gutter, so nested notes and heads drop their own. */
 .pm-manager-historydetail .pm-manager-note,
-.pm-manager-logbox .pm-manager-loghead {
+.pm-manager-logbox .pm-manager-loghead,
+.pm-manager-headingbox .pm-manager-note,
+.pm-full .pm-manager-note {
     padding-inline: 0;
 }
 
-/* The shell keeps the border and clips; the inner box scrolls. sizeToViewport measures the
-   cap (--pm-history-cap); 240px covers the frame before it does. */
+/* The shell clips; the inner box scrolls, up to the cap sizeToViewport measures. */
 .pm-manager-text {
     margin: 6px 0;
     border: var(--pm-rule);
@@ -1117,15 +1063,13 @@
 .pm-settings {
     color: var(--SmartThemeBodyColor);
     -webkit-tap-highlight-color: transparent;
-    /* Fill the row even when the extensions list is a flex or grid container that does not
-       stretch its items (width covers one build, align-self another). */
+    /* Fills the row in every build's extensions list, flex, grid or block. */
     box-sizing: border-box;
     width: 100%;
     align-self: stretch;
 }
 
-/* Collapsed, the row is laid out by SillyTavern's .inline-drawer-header so it matches its
-   neighbours; these only pin title-left, chevron-right in case a build says otherwise. */
+/* Collapsed, SillyTavern's header class lays the row out; this only pins title and chevron. */
 .pm-settings-header {
     display: flex;
     align-items: center;
@@ -1134,8 +1078,7 @@
     user-select: none;
 }
 
-/* Open (toggleDrawer in settings-ui.js adds .pm-mass), the row becomes our ink header with
-   its own geometry; closed, it stays as plain as every other extension's row. */
+/* Open, the row becomes an ink header; closed, it matches every other extension's row. */
 .pm-settings-header.pm-mass {
     gap: 8px;
     box-sizing: border-box;
@@ -1158,8 +1101,7 @@
     border-bottom: var(--pm-rule);
 }
 
-/* The row's padding sits outside the label and takes no taps, so the 44px floor is on the
-   label. */
+/* The label takes the taps, so the 44px floor is on it. */
 .pm-settings-label {
     display: flex;
     align-items: center;
@@ -1181,13 +1123,11 @@
     padding-bottom: 2px;
 }
 
-/* appearance: none takes the sizing back from SillyTavern's input rule and lets ::after
-   draw a tick big enough to see. */
+/* Drawn here, so SillyTavern's input rule cannot size it and the tick is big enough to see. */
 .pm-settings-check,
 .pm-checkbox {
     appearance: none;
-    /* Border, fill and tick are currentColor, and an input's own colour is FieldText
-       unless something sets it. */
+    /* Border, fill and tick follow currentColor, which is FieldText unless set. */
     color: inherit;
     position: relative;
     flex: none;
@@ -1220,18 +1160,12 @@
     transform: rotate(45deg);
 }
 
-.pm-settings-check:disabled,
-.pm-checkbox:disabled {
-    cursor: default;
-}
-
 /* The label is the hit target, so it shows the press (the tap highlight is off). */
 .pm-settings-label:active {
     background: color-mix(in srgb, currentColor 10%, transparent);
 }
 
-/* One width for every control in the drawer, so the rows read as a form; the 44px floor is
-   on the box, as for every select. */
+/* One width for every control in the drawer, so the rows read as a form. */
 .pm-settings-number,
 .pm-settings-select {
     box-sizing: border-box;
@@ -1273,8 +1207,7 @@
     border-top: var(--pm-rule);
 }
 
-/* Revise screen. The wrapper positions the edit popup, so the popup scrolls with the text it
-   points at. */
+/* Revise screen. The wrapper positions the edit popup, which scrolls with its text. */
 .pm-revise {
     position: relative;
     padding: 0 12px 8px;
@@ -1313,8 +1246,8 @@
     -webkit-user-select: text;
 }
 
-/* The floating edit button: filled to read as on top of the text, and 44px on the box since
-   it shares the spot with the selection toolbar (it is out of flow, so it pushes nothing). */
+/* The floating edit button: filled to read as on top, 44px on the box beside the selection
+   toolbar. */
 .pm-revise-popup {
     position: absolute;
     z-index: 3;
@@ -1342,8 +1275,7 @@
 .pm-quickbar-tiles {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
-    /* Rows sit further apart than a picture and its name, so each name reads as belonging to
-       the picture above it. */
+    /* Rows sit further apart than a picture and its name, which pairs them. */
     column-gap: 8px;
     row-gap: 16px;
     padding: 8px 12px;
@@ -1356,8 +1288,7 @@
     /* Picture-to-name gap; pairs with the grid's wider row-gap. */
     gap: 3px;
     min-height: 56px;
-    /* Lets a long unbroken name ellipsize instead of widening its column (pairs with the JS
-       minmax(0, 1fr)). */
+    /* A long name ellipsizes rather than widen its column. */
     min-width: 0;
     padding: 0;
     border: none;
@@ -1402,20 +1333,12 @@
 .pm-quickbar-foldhead {
     position: relative;
     box-sizing: border-box;
-    /* 40px on the box: a reach may only take half the 5px gap between heads (see ::before). */
     min-height: 40px;
     /* Room for the mark, which is out of the flow at the right edge. */
     padding-right: 30px;
     cursor: pointer;
     user-select: none;
     -webkit-tap-highlight-color: transparent;
-}
-
-/* Half the 5px between collapsed heads: 40 + 2 + 2 = 44. */
-.pm-quickbar-foldhead::before {
-    content: '';
-    position: absolute;
-    inset: -2px 0;
 }
 
 .pm-quickbar-foldmark {
@@ -1433,8 +1356,7 @@
     padding: 16px 12px;
 }
 
-/* Spacing inside the quick panel's ink block: each line owns one rhythm above it and nothing
-   below, so the gaps match. */
+/* In the quick panel's ink block each line owns one rhythm above it, so the gaps match. */
 .pm-quickbar-panel .pm-mass > .pm-quickbar-head {
     padding-top: var(--pm-rhythm);
     padding-bottom: 0;
@@ -1474,8 +1396,7 @@
     min-width: 0;
 }
 
-/* A version row and its ⋯ are separate full-height compartments, so a tap aimed at one never
-   lands on the other; the wrapper carries the row's rule. */
+/* A version row and its ⋯ are separate full-height compartments; the wrapper carries the rule. */
 .pm-quickbar-vrow {
     display: flex;
     align-items: stretch;
@@ -1514,8 +1435,7 @@
     min-height: 44px;
 }
 
-/* Identification diagnostics: a status line, then evidence for a screenshot, which is
-   selectable and may break anywhere because a class list has no good break points. */
+/* Identification diagnostics: a status line, then selectable evidence for a screenshot. */
 .pm-settings-identify {
     padding: 6px 0 0;
     font-size: 0.82em;
@@ -1606,13 +1526,7 @@
 }
 
 .pm-manager-headingrow .pm-manager-select {
-    flex: 0 1 auto;
     max-width: 60%;
-}
-
-.pm-manager-headingbox .pm-manager-note {
-    padding-left: 0;
-    padding-right: 0;
 }
 
 /* The picture keeps a square box of its own, so a named tile's label can sit under it. */
@@ -1626,7 +1540,9 @@
     background: var(--pm-lift-1);
 }
 
-/* At most two centred lines, so a long name cannot make its tile taller than the rest. */
+/* At most two centred lines, so a long name cannot make its tile taller than the rest. The
+   tile is a flex container, which blockifies -webkit-box, so max-height (2 x 1.2em) states
+   the clamp outright. */
 .pm-quickbar-tilelabel {
     display: -webkit-box;
     -webkit-line-clamp: 2;
@@ -1634,16 +1550,16 @@
     white-space: normal;
     overflow: hidden;
     text-overflow: ellipsis;
-    padding: 0 2px;
+    max-height: 2.4em;
+    padding: 6px 2px 0;
     font-size: 0.78em;
-    line-height: 1.25;
+    line-height: 1.2;
     text-align: center;
     color: var(--pm-muted);
 }
 
-/* Rows appended straight into a tab body, the picker or a list wrapper get the 12px gutter.
-   The upload row and history detail pad themselves; a disabled-reason wrap takes the gutter
-   so the reason stays aligned with its buttons. */
+/* Rows drawn straight into a tab body, the picker or a list wrapper get the 12px gutter; the
+   upload row and history detail pad themselves. */
 .pm-manager-tabbody > .pm-manager-actions,
 .pm-manager-picker > .pm-manager-actions,
 .pm-manager-tabbody > div:not(.pm-manager-upload):not(.pm-manager-historydetail):not(.pm-manager-actionswrap) > .pm-manager-actions,
@@ -1654,23 +1570,6 @@
 
 .pm-manager-tabbody > .pm-quickbar-newlabel {
     padding: 4px 12px 0;
-}
-
-/* The tile is a flex container, so this label's display: -webkit-box is blockified and the
-   clamp may not apply; max-height states the two lines (2 x 1.2em) outright. */
-.pm-quickbar-tile-named .pm-quickbar-tilelabel {
-    position: static;
-    padding: 6px 2px 0;
-    font-size: 0.78em;
-    line-height: 1.2;
-    text-align: center;
-    background: none;
-    color: var(--pm-muted);
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    max-height: 2.4em;
-    overflow: hidden;
 }
 
 .pm-quickbar-tile-active .pm-quickbar-tilelabel {
@@ -1686,8 +1585,7 @@
     border-bottom: var(--pm-rule-strong);
 }
 
-/* The header's bottom rule takes the block's colour, so no light seam shows between it and
-   an ink tab below. Compound to outrank .pm-mass's own border-bottom. */
+/* No light seam between the header and an ink tab below. Compound to outrank .pm-mass. */
 .pm-manager-header.pm-mass {
     border-bottom-color: var(--pm-mass);
 }
@@ -1708,10 +1606,8 @@
     padding-bottom: var(--pm-rhythm);
 }
 
-/* Avatar shape is a variable, set by a class on each panel root and on the send-row
-   button (which sits outside the panels), so it reaches every picture; 50% is the fallback.
-   Rounded is a percentage so it holds from the 22px icon to a 70px tile. Only picture boxes
-   are shaped, never a tile, which can be taller than it is wide. */
+/* Avatar shape: a variable set by a class on each panel root and the send-row button, so it
+   reaches every picture box (never a whole tile). */
 .pm-tileshape-circle { --pm-avatar-radius: 50%; }
 .pm-tileshape-rounded { --pm-avatar-radius: 22%; }
 .pm-tileshape-square { --pm-avatar-radius: 0; }
@@ -1723,8 +1619,7 @@
     border-radius: var(--pm-avatar-radius, 50%);
 }
 
-/* ── Display type ────────────────────────────────────────────────────────────
-   The section word set large in a ruled band (manager.js bandRow, settings drawer). */
+/* ── Display type: the section word, large in a ruled band ────────────────── */
 .pm-band {
     display: flex;
     align-items: baseline;
@@ -1756,11 +1651,9 @@
 }
 
 /* ── Grain ───────────────────────────────────────────────────────────────────
-   Two hairline gratings painted on the panel, not on the scrolling content, so
-   they composite once. Kept under reduced motion (nothing moves); off for prefers-contrast. */
+   Two hairline gratings on the panel, not the scrolling content, so they composite once. */
 
-/* Whatever carries the grain is the overlay's containing block. The panels stay absolute:
-   a fixed child of the top-layer host would resolve against a transformed theme ancestor. */
+/* The grain's containing block. The panels stay absolute inside the top-layer host. */
 .pm-grain {
     position: relative;
 }
@@ -1800,8 +1693,8 @@
     letter-spacing: -0.02em;
 }
 
-/* Buttons and chips are ruled rectangles, filled for the state you are in or for the screen's
-   one primary action (.pm-manager-primary, picked per tab in JS). */
+/* Buttons and chips are ruled rectangles, filled for the current state or the screen's one
+   primary action. */
 .pm-quickbar-btn,
 .pm-manager-btn,
 .pm-quickbar-chip {
@@ -1831,8 +1724,7 @@
     background: none;
 }
 
-/* The UA placeholder grey is too faint on dark themes, and on the search and new-group
-   fields it is the only label. */
+/* The UA placeholder grey is too faint on dark themes, and it is some fields' only label. */
 .pm-panel ::placeholder,
 .pm-settings ::placeholder {
     color: var(--pm-muted);
@@ -1928,8 +1820,7 @@
     font-weight: 700;
 }
 
-/* ── Empty states ────────────────────────────────────────────────────────────
-   One large glyph and the message; the screen's own button below stays the next action. */
+/* ── Empty states: one large glyph and the message ───────────────────────── */
 .pm-empty {
     display: flex;
     flex-direction: column;
@@ -1955,9 +1846,7 @@
     text-align: center;
 }
 
-/* ── Drag to reorder ─────────────────────────────────────────────────────────
-   Only the handle starts a drag; touch-action: none stops the browser from claiming the
-   gesture as a scroll. */
+/* ── Drag to reorder: only the handle starts a drag, never a scroll ──────── */
 .pm-draghandle {
     flex: none;
     min-width: 44px;
@@ -1975,8 +1864,7 @@
     opacity: 0.45;
 }
 
-/* Drop position: a rule across the row's top edge, not an inserted gap, so rows do not jump
-   under the finger. */
+/* Drop position: a rule across the row's edge, so rows do not jump under the finger. */
 .pm-dragover {
     box-shadow: inset 0 3px 0 0 var(--pm-accent);
 }
@@ -1990,8 +1878,7 @@
     .pm-dragging { opacity: 0.7; }
 }
 
-/* Six shortcuts into the manager's tabs, pinned to the bottom of the scroll box in one row of
-   cells. */
+/* Six shortcuts into the manager's tabs, pinned to the bottom in one row of cells. */
 .pm-quickbar-footer {
     display: grid;
     grid-template-columns: repeat(6, 1fr);
@@ -2012,16 +1899,14 @@
     padding: 4px 2px;
 }
 
-/* No reach: the cells tile the row with no gap, so a reach could only take the neighbour's
-   pixels. The cells are 46px on their own. */
+/* No reach: the cells tile the row and are 46px on their own. */
 .pm-quickbar-footer .pm-quickbar-btn::before {
     content: none;
 }
 
 .pm-quickbar-footer .pm-quickbar-btn:first-child { border-left: none; }
 
-/* A toggle that is on is filled rather than relabelled; a longer label would squeeze the
-   selects beside it. */
+/* A toggle that is on is filled rather than relabelled. */
 .pm-quickbar-btn[aria-pressed="true"] {
     background: var(--pm-mass);
     color: var(--pm-on-mass);
@@ -2043,9 +1928,6 @@
 }
 
 .pm-quickbar-bulk .pm-manager-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
     padding: 0 12px;
 }
 
@@ -2059,8 +1941,7 @@
     color: var(--pm-mass-muted);
 }
 
-/* A picked tile marks its picture with an inset shadow, which follows border-radius; a
-   negative outline-offset draws a rectangle even on a circle. */
+/* A picked tile marks its picture with an inset shadow, which follows border-radius. */
 .pm-quickbar-tile.pm-picked .pm-quickbar-tileimgbox {
     box-shadow: inset 0 0 0 3px var(--pm-mass);
 }
@@ -2071,15 +1952,13 @@
     font-weight: 800;
 }
 
-/* ── Edit tab folds ──────────────────────────────────────────────────────────
-   The blocks above the item list fold, so a long list stays on the first screen. */
+/* ── Edit tab folds ────────────────────────────────────────────────────────── */
 .pm-manager-fold {
     padding: 9px 14px 9px 16px;
     border-bottom: var(--pm-rule);
 }
 
-/* A fold after the item list gets the strong rule that separates regions, or it reads as part
-   of the last item. */
+/* A fold after the item list gets the strong region rule. */
 .pm-manager-tabbody > .pm-manager-fold:last-child {
     border-top: var(--pm-rule-strong);
     margin-top: 4px;
@@ -2110,7 +1989,6 @@
 }
 
 .pm-manager-nameedit .pm-manager-rowtop {
-    display: flex;
     align-items: baseline;
     gap: 10px;
 }
@@ -2142,8 +2020,7 @@
 
 .pm-manager-fieldbox .pm-manager-valuerow { border-bottom: none; }
 
-/* ── Size lines ──────────────────────────────────────────────────────────────
-   Tabular figures, so the count does not jump sideways while it updates. */
+/* ── Size lines: tabular figures, so the count does not jump ─────────────── */
 .pm-manager-size {
     padding: 4px 0 8px;
     font-size: 0.78em;
@@ -2152,16 +2029,9 @@
     color: var(--pm-muted);
 }
 
-/* ── Full description ────────────────────────────────────────────────────────
-   The composed description in prompt order, one body per box. */
+/* ── Full description: one body per box, in prompt order ──────────────────── */
 .pm-full {
     padding: 6px 12px 0;
-}
-
-.pm-full .pm-manager-note,
-.pm-full .pm-manager-size {
-    padding-left: 0;
-    padding-right: 0;
 }
 
 /* A heading that is really sent reads as text, not as a caption. */
@@ -2191,11 +2061,10 @@
     opacity: 0.6;
 }
 
-/* ── Keyboard and mouse ──────────────────────────────────────────────────────
-   Each block sits behind a query a phone does not match, or applies to both. */
+/* ── Keyboard and mouse ────────────────────────────────────────────────────── */
 
-/* An inset focus ring: full-width rows in a clipping panel would cut an outer ring off. Ink
-   outline plus an accent band clears 3:1 on any theme; :focus-visible so a tap leaves none. */
+/* An inset focus ring (a clipping panel would cut an outer one): ink plus an accent band
+   clears 3:1 on any theme. */
 .pm-panel :focus-visible,
 .pm-settings :focus-visible {
     outline: 2px solid var(--pm-mass, var(--SmartThemeBodyColor));
@@ -2203,8 +2072,7 @@
     box-shadow: inset 0 0 0 4px var(--pm-accent, var(--SmartThemeQuoteColor));
 }
 
-/* On ink the outline takes the ground colour. The list covers every control filled with
-   --pm-mass, not only .pm-mass descendants; .pm-mass:focus-visible is the settings header. */
+/* On ink, including every control filled with --pm-mass, the outline takes the ground colour. */
 .pm-mass :focus-visible,
 .pm-mass:focus-visible,
 .pm-manager-tab-active:focus-visible,
@@ -2218,9 +2086,7 @@
 @media (hover: hover) and (pointer: fine) {
     /* A mouse has no long press, so text becomes selectable again (the drag handle prevents
        selection on pointerdown). */
-    .pm-panel,
-    .pm-quickbar-panel,
-    .pm-manager-panel {
+    .pm-panel {
         user-select: text;
     }
 
@@ -2234,8 +2100,7 @@
     }
 }
 
-/* Wider panels on a desktop, capped because Korean lines past about 45 characters get harder
-   to read. */
+/* Wider panels on a desktop, capped for line length. */
 @media (min-width: 900px) {
     .pm-manager-panel {
         width: min(720px, 100%);
@@ -2249,8 +2114,7 @@
 /* ── Overrides ───────────────────────────────────────────────────────────────
    Many rules from here on beat earlier ones only by source order; move them with care. */
 
-/* Filled controls stay filled when pressed or hovered: the generic washes are class plus
-   pseudo-class and would outrank the fill, leaving ground-coloured labels on a wash. */
+/* Filled controls stay filled when pressed or hovered, outranking the generic washes. */
 .pm-manager-tab-active:active,
 .pm-quickbar-chip-active:active,
 .pm-manager-primary:active {
@@ -2267,8 +2131,7 @@
     border-color: var(--pm-on-mass);
 }
 
-/* Press feedback where the tap highlight is suppressed; filled controls are excluded and
-   keep the treatment above. */
+/* Press feedback where the tap highlight is off; filled controls keep the treatment above. */
 .pm-quickbar-tile:active,
 .pm-manager-tab:not(.pm-manager-tab-active):active,
 .pm-quickbar-chip:not(.pm-quickbar-chip-active):active,
@@ -2294,14 +2157,12 @@
     }
 }
 
-/* Whatever follows a fold head paints above the head's positioned ::before, so the reach
-   cannot take its taps. */
+/* Paints above a fold head's reach, so the reach cannot take its taps. */
 .pm-quickbar-foldhead + * {
     position: relative;
 }
 
-/* In chip rows that wrap, the vertical reach is half the 6px row gap, and the box grows to
-   38px so 38 + 3 + 3 still clears 44. */
+/* In chip rows that wrap, the reach is half the 6px gap and the box grows to 38px. */
 .pm-filter-chips .pm-quickbar-chip,
 .pm-tag-chips .pm-quickbar-chip {
     min-height: 38px;
@@ -2327,21 +2188,17 @@
     overscroll-behavior: contain;
 }
 
-/* --pm-on-mass is the theme's blur tint, usually translucent; as type on an ink block it would
-   fade into the ink, so its alpha is forced to 1. Relative colour syntax is not universal,
-   hence @supports (fallback further down). */
+/* --pm-on-mass, the theme's usually translucent blur tint, is forced opaque so type on ink
+   stays readable (fallback at the end). */
 @supports (color: rgb(from white r g b)) {
     .pm-panel,
-    .pm-quickbar-panel,
-    .pm-manager-panel,
     .pm-settings {
         /* The / 1 is required: left off, the origin's alpha is kept. */
         --pm-on-mass: rgb(from var(--SmartThemeBlurTintColor) r g b / 1);
     }
 }
 
-/* On the ink header the inversion above outranks the generic press and hover washes by
-   source order, so the picker gets its own. */
+/* The ink header's picker gets its own press and hover washes. */
 .pm-mass .pm-manager-target:active {
     background: color-mix(in srgb, var(--pm-on-mass) 28%, transparent);
 }
@@ -2352,9 +2209,8 @@
     }
 }
 
-/* Label, value and buttons in one row. The buttons share one box that wraps as a unit, so
-   they never split. The value has an em floor that scales with the font, and flex-basis 0 so
-   a long value does not push the buttons down while there is still room. */
+/* Label, value and buttons in one row; the buttons wrap as a unit, and the value has an em
+   floor and flex-basis 0 so it does not push them down while there is room. */
 .pm-manager-namescope {
     display: flex;
     flex: 0 0 auto;
@@ -2382,16 +2238,13 @@
     scroll-padding-bottom: 72px;
 }
 
-/* No doubled rule above the footer (:last-of-type cannot find this group: the footer is a
-   div too). */
+/* No doubled rule above the footer. */
 .pm-quickbar-group:has(+ .pm-quickbar-footer) {
     border-bottom: none;
 }
 
 /* ── Image framing ───────────────────────────────────────────────────────────
-   The frame is the avatar's 2:3 shape; the picture moves and is clipped inside it.
-   touch-action: none only on the frame, so the rest of the screen still scrolls. The dashed
-   square is the centre crop an icon shows, a sixth of the height down. */
+   The frame is the avatar's 2:3 shape; the dashed square is the crop an icon shows. */
 .pm-framing {
     display: flex;
     flex-direction: column;
@@ -2451,8 +2304,7 @@
     accent-color: currentColor;
 }
 
-/* ── Settings sections ───────────────────────────────────────────────────────
-   Captions in the small-head voice; the strong rule marks each boundary. */
+/* ── Settings sections ─────────────────────────────────────────────────────── */
 .pm-settings-section {
     padding: var(--pm-rhythm) 0 var(--pm-pair);
     border-top: var(--pm-rule-strong);
@@ -2475,8 +2327,7 @@
     line-height: 1.5;
 }
 
-/* Disabled controls: our colours override the browser's disabled grey, so they are dimmed
-   (still above 3:1) and lose the hover wash. */
+/* Disabled controls are dimmed (still above 3:1) and lose the hover wash. */
 .pm-panel :is(button, select, input, textarea):disabled,
 .pm-settings :is(button, select, input, textarea):disabled {
     opacity: 0.6;
@@ -2490,14 +2341,12 @@
     }
 }
 
-/* Disabled checkboxes need more opacity to tell ticked from unticked; scoped to outrank the
-   general rule above. */
+/* Disabled checkboxes keep more opacity, to tell ticked from unticked. */
 :is(.pm-panel, .pm-settings) :is(.pm-settings-check, .pm-checkbox):disabled {
     opacity: 0.7;
 }
 
-/* The current tile's ring sits on the picture box, so it follows the shape: ink inside,
-   accent outside, to clear 3:1 on any theme. */
+/* The current tile's ring follows the picture's shape: ink inside, accent outside. */
 .pm-quickbar-tile-active .pm-quickbar-tileimgbox {
     border-color: var(--pm-accent);
     box-shadow: 0 0 0 2px var(--pm-mass), 0 0 0 4px var(--pm-accent);
@@ -2515,20 +2364,16 @@
     color: var(--pm-mass);
 }
 
-/* Native dropdown lists take theme colours; otherwise a dark theme gets light text on a white
-   list. */
+/* Native dropdown lists take theme colours. */
 .pm-panel option,
 .pm-settings option {
     background: var(--pm-on-mass, var(--SmartThemeBlurTintColor));
     color: var(--SmartThemeBodyColor);
 }
 
-/* Without relative colour syntax (Firefox before 128, Chromium before 119) the tint stays
-   translucent, so an opaque system colour pair stands in. */
+/* Without relative colour syntax an opaque system colour pair stands in. */
 @supports not (color: rgb(from white r g b)) {
     .pm-panel,
-    .pm-quickbar-panel,
-    .pm-manager-panel,
     .pm-settings {
         --pm-on-mass: Canvas;
         --pm-mass: CanvasText;

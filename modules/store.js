@@ -1,28 +1,29 @@
-// Data model, defaults, migration and size accounting.
-// Pure: no DOM, no getContext. Everything is passed in.
+// Data model, defaults, migration and size accounting. Pure: no DOM, no getContext.
 import { STRINGS } from './strings.js';
 import { validCrop } from './framing.js';
 
 export const MODULE_NAME = 'persona-manager';
-/* Bumped whenever an older build would damage the data, since older builds treat a newer
-   root as read-only. 2: lastComposed became composedSig (no baseline for 1). 3: heading
-   format 'own', whose titles a build on 2 would strip on its next write. */
+/* Bumped whenever an older build would damage the data (older builds treat a newer root as
+   read-only). 2: lastComposed became composedSig. 3: heading format 'own'. */
 export const SCHEMA_VERSION = 3;
 
-/* Fingerprint (length + 32-bit FNV-1a) of what was last given to SillyTavern. A full copy
-   was a fifth of our stored data, and only equality is ever asked of it. */
-export function textSignature(text) {
-    const s = String(text ?? '');
+// 32-bit FNV-1a.
+export function fnv1a(text) {
     let h = 0x811c9dc5;
-    for (let i = 0; i < s.length; i++) {
-        h ^= s.charCodeAt(i);
+    for (let i = 0; i < text.length; i++) {
+        h ^= text.charCodeAt(i);
         h = Math.imul(h, 0x01000193);
     }
-    return `${s.length}:${(h >>> 0).toString(36)}`;
+    return h >>> 0;
 }
 
-// No master "enabled" flag on purpose: SillyTavern's extension manager owns that. An
-// older settings.json may still carry the key; nothing reads it, and it is left in place.
+// Fingerprint (length + hash) of what was last given to SillyTavern; only equality is asked of it.
+export function textSignature(text) {
+    const s = String(text ?? '');
+    return `${s.length}:${fnv1a(s).toString(36)}`;
+}
+
+// No master "enabled" flag: SillyTavern's extension manager owns that.
 export const DEFAULT_SETTINGS = Object.freeze({
     showQuickBar: true,
     historyPerVariant: 5,
@@ -31,12 +32,10 @@ export const DEFAULT_SETTINGS = Object.freeze({
     historyMaxDays: 0,
     historyCoalesceMinutes: 5,
     injectAssetMacros: true,
-    // Per-language auto-naming. On by default: it only acts on personas with a name
-    // registered for the chat's language, and registering one is asking for this.
+    // Acts only on personas with a name registered for the chat's language.
     autoLocalName: true,
     defaultHeadingFormat: 'none',
-    // How adopt seeds a description (state.js seedDescription): 'own' keeps its own
-    // division, 'whole' puts it in one item, 'defaults' matches the shipped names.
+    // How adopt seeds a description (state.js seedDescription).
     adoptSplitMode: 'own',
     assetStyle: 'plain',
     assetPromptTemplate: STRINGS.settings.assetPromptDefault,
@@ -44,15 +43,11 @@ export const DEFAULT_SETTINGS = Object.freeze({
     sortBy: 'name',
     activeLabelId: null,
     lastUsedCap: 50,
-    // Off by default: the persona list is SillyTavern's, so nothing is added unasked.
     rosterShowVersionCount: false,
     rosterShowVersionNames: false,
-    // Collapsed by default: the quick panel is opened to switch personas.
     quickVersionOpen: false,
-    // Per-language names in the quick panel; collapsed for the same reason.
     quickNamesOpen: false,
-    // The manager's picker has its own view, separate from the quick panel's
-    // rosterViewMode (migrate seeds it from that, so no picker changes on upgrade).
+    // The manager's picker view; migrate seeds it from rosterViewMode.
     pickerViewMode: 'list',
     rosterViewMode: 'list',
     // 0 means automatic columns / everything on one page.
@@ -76,27 +71,15 @@ export function makeId(makeIdFn) {
     return `pm-${Date.now().toString(36)}-${(++fallbackCounter).toString(36)}`;
 }
 
-export function emptyRoot() {
-    return {
-        schemaVersion: SCHEMA_VERSION,
-        settings: { ...DEFAULT_SETTINGS },
-        personas: {},
-        labels: [],
-        lastUsed: {},
-    };
-}
-
 const isPlainObject = value => !!value && typeof value === 'object' && !Array.isArray(value);
 
-// Containers every reader iterates. Arrays are refused where an object is expected:
-// JSON.stringify drops an array's named keys, so they would be lost on save.
+// Containers every reader iterates. Arrays are refused where an object is expected, since
+// JSON.stringify drops an array's named keys.
 function backfillContainers(root) {
     if (!isPlainObject(root.settings)) root.settings = {};
     if (!isPlainObject(root.personas)) root.personas = {};
     if (!Array.isArray(root.labels)) root.labels = [];
     if (!isPlainObject(root.lastUsed)) root.lastUsed = {};
-    // Array.isArray, not ?? []: a non-iterable value would throw in for..of, and migrate
-    // runs from getRoot, so one malformed record would take down every screen.
     for (const persona of Object.values(root.personas)) {
         if (!persona || typeof persona !== 'object') continue;
         if (!Array.isArray(persona.tags)) persona.tags = [];
@@ -107,9 +90,8 @@ function backfillContainers(root) {
     }
 }
 
-/* A root written by a newer build is shown, never rewritten: screens read a normalised
-   copy (cached per stored object, so getRoot does not clone per draw), and every write
-   path refuses on readOnly, so nothing is written into the copy and lost. */
+/* A root written by a newer build is shown, never rewritten: screens read a normalised copy,
+   cached per stored object, and every write path refuses on readOnly. */
 const futureViews = new WeakMap();
 
 function futureView(stored) {
@@ -143,25 +125,21 @@ export function migrate(root) {
     if (typeof root.schemaVersion !== 'number') root.schemaVersion = SCHEMA_VERSION;
     if (root.schemaVersion > SCHEMA_VERSION) return futureView(root);
     backfillContainers(root);
-    // Below the read-only return because the rest drops unrecognised values, which is
-    // only allowed on a root this build may write.
     const backfillPicks = root.schemaVersion < 3;
     for (const persona of Object.values(root.personas)) {
         if (!persona || typeof persona !== 'object') continue;
-        // Schema 1 to 2: the full copy becomes its fingerprint (see textSignature).
+        // Schema 1 to 2: the full copy becomes its fingerprint.
         if ('lastComposed' in persona) {
             if (typeof persona.composedSig !== 'string') {
                 persona.composedSig = typeof persona.lastComposed === 'string' ? textSignature(persona.lastComposed) : null;
             }
             delete persona.lastComposed;
         }
-        // Schema 2 to 3, once: versions saved before an item existed get the item's current
-        // pick, as pickInEveryVersion gives new items; without one, applying drops the item.
+        // Schema 2 to 3: versions saved before an item existed get the item's current pick.
         if (backfillPicks) backfillVersionPicks(persona);
         if (persona.avatarWritten !== null && typeof persona.avatarWritten !== 'string') persona.avatarWritten = null;
         const backup = persona.avatarBackup;
         if (backup !== null && (typeof backup !== 'object' || typeof backup?.label !== 'string')) persona.avatarBackup = null;
-        // An array, guaranteed by backfillContainers above.
         for (const version of persona.versions) {
             if (!version || typeof version !== 'object') continue;
             if ('avatarCrop' in version) version.avatarCrop = validCrop(version.avatarCrop);
@@ -169,19 +147,17 @@ export function migrate(root) {
         }
     }
     root.schemaVersion = SCHEMA_VERSION;
-    // A stale readOnly may sit in settings.json (older builds stored it); it would block
-    // every write, and nothing else clears it.
+    // Older builds stored readOnly; left in place it would block every write.
     delete root.readOnly;
     // Before the defaults, so a root predating pickerViewMode keeps its view in both places.
     if (!Object.hasOwn(root.settings, 'pickerViewMode') && root.settings.rosterViewMode) {
         root.settings.pickerViewMode = root.settings.rosterViewMode;
     }
-    /* A default we shipped is ours to replace; a text the user wrote is not. An exact
-       match with a past default means untouched, so it moves to the current one. */
+    // A template identical to a past default was never edited, so it moves to the current one.
     if (STRINGS.settings.legacyAssetPrompts.includes(root.settings.assetPromptTemplate)) {
         root.settings.assetPromptTemplate = DEFAULT_SETTINGS.assetPromptTemplate;
     }
-    // splitOnAdopt shipped on, so its stored value says nothing about the user: dropped.
+    // splitOnAdopt shipped on, so its stored value says nothing about the user.
     delete root.settings.splitOnAdopt;
     // 0.3.1's on/off switch, folded into the mode: on meant the shipped names.
     if (Object.hasOwn(root.settings, 'autoSplitOnAdopt')) {
@@ -199,39 +175,36 @@ export function migrate(root) {
     return root;
 }
 
-// Heading formats offered by the settings drawer and the edit tab. 'own' is not listed:
-// it exists only on personas adopted with their own division, whose select adds it.
+// Offered by the settings drawer and the edit tab; 'own' exists only on personas adopted
+// with their own division.
 export const HEADING_FORMATS = Object.freeze(['none', 'plain', 'markdown']);
 export const ADOPT_MODES = Object.freeze(['own', 'whole', 'defaults']);
-
-// Roster tile shapes; validated on read, because the value reaches a class name.
+// Validated on read, because the value reaches a class name.
 export const TILE_SHAPES = Object.freeze(['circle', 'rounded', 'square']);
+// The persona list's views (rosterViewMode, pickerViewMode).
+export const VIEW_MODES = Object.freeze(['list', 'tiles', 'tilesNamed']);
 
 export function makeDefaultPersona(makeIdFn, headingFormat) {
     const p = {
         sections: [], variants: {}, versions: [],
         activeVersionId: null, activePicks: {},
-        // 'none' unless the user set another default, so adopting never changes the
-        // prompt by itself; unknown values (hand edits) fall back here.
+        // 'none' unless the user set another default, so adopting never changes the prompt.
         headingFormat: HEADING_FORMATS.includes(headingFormat) ? headingFormat : 'none',
         history: {}, log: [], assets: {},
         assetFolderKey: null,
-        // The fingerprint of what SillyTavern was last given; null is the empty text.
+        // Fingerprint of what SillyTavern was last given; null is the empty text.
         composedSig: null,
         tags: [],
-        // The asset holding the avatar as it was before our first overwrite. Written once:
-        // a second backup would copy our own replacement.
+        // The asset holding the avatar as it was before our first overwrite. Written once.
         avatarBackup: null,
-        // The label we last wrote to the avatar file. A cache of a server fact,
-        // read only to skip a write that would change nothing.
+        // The label last written to the avatar file, read only to skip a no-op write.
         avatarWritten: null,
     };
     for (const name of DEFAULT_SECTION_NAMES) appendSection(p, { name }, makeIdFn, '', 0);
     return p;
 }
 
-// Appends an item with one picked choice under the default label; the item's id is
-// made before the choice's.
+// Appends an item with one picked choice under the default label.
 export function appendSection(persona, section, makeIdFn, text, updatedAt) {
     const sectionId = makeId(makeIdFn);
     const variantId = makeId(makeIdFn);
@@ -239,6 +212,13 @@ export function appendSection(persona, section, makeIdFn, text, updatedAt) {
     persona.variants[sectionId] = [{ id: variantId, label: STRINGS.manager.defaultChoiceLabel, text, updatedAt }];
     persona.activePicks[sectionId] = variantId;
     return { sectionId, variantId };
+}
+
+// A new item is picked in every saved version too, or applying an older version drops its text.
+export function pickInEveryVersion(persona, sectionId, variantId) {
+    for (const version of Array.isArray(persona?.versions) ? persona.versions : []) {
+        if (version && typeof version === 'object') version.picks = { ...(version.picks ?? {}), [sectionId]: variantId };
+    }
 }
 
 export function getPersona(root, avatarId) {
@@ -268,24 +248,20 @@ export function isEmptyPersona(p) {
     if (Object.keys(p.assets ?? {}).length) return false;
     if ((p.versions ?? []).length) return false;
     if ((p.log ?? []).length) return false;
-    // Tags and per-language names are user work that lives nowhere else, and the birth
-    // log line that usually protects a record can be cleared from the history tab.
+    // Tags, names and pictures are user work that lives nowhere else.
     if ((p.tags ?? []).length) return false;
     if (Object.values(p.names ?? {}).some(name => String(name ?? '').trim())) return false;
-    // Likewise for pictures: this record is the only way back to the server-side files.
     if (p.assetFolderKey || p.avatarBackup) return false;
-    // Actual history entries, not keys: an empty array is not history content.
     for (const list of Object.values(p.history ?? {})) {
         if (Array.isArray(list) && list.length) return false;
     }
     for (const list of Object.values(p.variants ?? {})) {
-        // A shape this function cannot read is not proof of emptiness: kept.
+        // A shape this function cannot read is not proof of emptiness.
         if (!Array.isArray(list)) return false;
         for (const v of list) if (typeof v?.text === 'string' && v.text.trim()) return false;
     }
-    /* Structure is content even with every body blank: only the exact makeDefaultPersona
-       shell (default items and names, one default choice each) counts as empty. A record
-       with no sections stays prunable; it is the shell the prune button exists for. */
+    /* Structure is content even with every body blank: only the exact makeDefaultPersona shell
+       counts as empty. A record with no sections stays prunable. */
     const sections = p.sections ?? [];
     if (sections.length) {
         if (sections.length !== DEFAULT_SECTION_NAMES.length) return false;

@@ -20,7 +20,7 @@ import {
     pickAutoName, nameCollides, sortLabel, NO_VERSION_LABEL, MODIFIED_SUFFIX,
 } from '../modules/quickbar-pure.js';
 import { sanitizeKey, resolveFolderKey, parseTag, labelOf, lookupLabel, findTags, planRender, withoutBackups, assetLookup, buildImgHtml, assetClass } from '../modules/assets.js';
-import { makeDefaultPersona, emptyRoot, SCHEMA_VERSION, DEFAULT_SETTINGS } from '../modules/store.js';
+import { makeDefaultPersona, migrate, SCHEMA_VERSION, DEFAULT_SETTINGS } from '../modules/store.js';
 import { STRINGS } from '../modules/strings.js';
 
 let counter = 0;
@@ -112,7 +112,7 @@ test('snapshot caps, coalesces, forces, and restore is itself undoable', () => {
 });
 
 test('expiry and budget evict with a log line per persona', () => {
-    const root = emptyRoot();
+    const root = migrate({});
     const p = makeDefaultPersona(ids);
     root.personas.a = p;
     p.history = { v: [{ at: 0, text: 'old' }, { at: 10_000, text: 'new' }] };
@@ -300,7 +300,7 @@ test('full text and revise planning', () => {
 });
 
 test('duplicatePersona regenerates ids and copyPersonaOnto keeps the destination picture', () => {
-    const root = emptyRoot();
+    const root = migrate({});
     const src = makeDefaultPersona(ids);
     src.versions.push({ id: 'v', name: 'V', picks: { ...src.activePicks }, avatarAsset: 'pic', assetSelection: ['a'] });
     src.activeVersionId = 'v';
@@ -385,7 +385,7 @@ test('waitFor, popups and commands', async () => {
 });
 
 test('roster view, version line, auto name and collisions', () => {
-    const root = emptyRoot();
+    const root = migrate({});
     root.labels = [{ id: 'l', name: 'L', members: ['gone'] }];
     root.settings.activeLabelId = 'l';
     const view = buildRosterView({ personas: { a: 'A', b: 'B' } }, root);

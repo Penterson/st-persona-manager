@@ -5,9 +5,11 @@ import { livingLabels, filterByLabel, sortEntries } from './roster.js';
 import { STRINGS } from './strings.js';
 import { chatSources, contextLanguage } from './search-pure.js';
 
-// Persona-switch slash commands in preference order, all taking (unnamed: persona name,
-// named: mode). Builds differ, so the one used is looked up in SlashCommandParser.commands.
+// Persona-switch slash commands in preference order, all taking (unnamed: persona name, named: mode).
 const PERSONA_COMMAND_NAMES = Object.freeze(['persona-set', 'persona', 'name']);
+
+// The languages a persona can carry a name for, keyed by detectLanguage's codes.
+export const NAME_LANGUAGES = Object.freeze(['ko', 'ja', 'zh', 'en']);
 
 // Aliases kept for the names the DOM half and the tests import.
 export const NO_VERSION_LABEL = STRINGS.quick.iconNoVersion;
@@ -87,10 +89,11 @@ export function divergedActions(writable) {
     ];
 }
 
-export function pickPersonaCommand(commands) {
+// The first of names this build registers. Builds differ, so commands are looked up, never assumed.
+export function pickPersonaCommand(commands, names = PERSONA_COMMAND_NAMES) {
     if (!commands || typeof commands !== 'object') return null;
-    for (const name of PERSONA_COMMAND_NAMES) {
-        // Own properties only: commands is a plain object and `in` would see Object.prototype.
+    for (const name of names) {
+        // Own properties only: `in` would see Object.prototype.
         if (Object.hasOwn(commands, name) && commands[name]) return name;
     }
     return null;

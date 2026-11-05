@@ -1,7 +1,10 @@
 // Pure logic behind the manager screen. No DOM, so tests import it in plain Node;
 // the DOM half is manager.js, which tests must never import.
 import { addLog } from './history.js';
-import { DEFAULT_SETTINGS, DEFAULT_SECTION_NAMES, SCHEMA_VERSION, makeId, appendSection, findVersion, liveVariant, migrate, HEADING_FORMATS, TILE_SHAPES } from './store.js';
+import {
+    DEFAULT_SETTINGS, DEFAULT_SECTION_NAMES, SCHEMA_VERSION, makeId, appendSection, findVersion, liveVariant, migrate,
+    HEADING_FORMATS, TILE_SHAPES, VIEW_MODES, pickInEveryVersion,
+} from './store.js';
 import { SORT_KEYS } from './roster.js';
 import { STRINGS } from './strings.js';
 import { validCrop, writtenKey } from './framing.js';
@@ -359,8 +362,8 @@ const SETTING_CHOICES = Object.freeze({
     rosterTileShape: TILE_SHAPES,
     defaultHeadingFormat: HEADING_FORMATS,
     sortBy: SORT_KEYS,
-    rosterViewMode: ['list', 'tiles', 'tilesNamed'],
-    pickerViewMode: ['list', 'tiles', 'tilesNamed'],
+    rosterViewMode: VIEW_MODES,
+    pickerViewMode: VIEW_MODES,
 });
 
 // The only gate before an imported file replaces everything stored. Writes nothing: returns
@@ -818,14 +821,6 @@ function sectionNameKey(name) {
 export function missingDefaultSections(persona) {
     const have = new Set((persona?.sections ?? []).map(section => sectionNameKey(section.name)));
     return DEFAULT_SECTION_NAMES.filter(name => !have.has(sectionNameKey(name)));
-}
-
-// A new section is picked in every saved version too, or applying an older version would drop
-// its text from the prompt.
-export function pickInEveryVersion(persona, sectionId, variantId) {
-    for (const version of Array.isArray(persona?.versions) ? persona.versions : []) {
-        if (version && typeof version === 'object') version.picks = { ...(version.picks ?? {}), [sectionId]: variantId };
-    }
 }
 
 // Appends the missing default sections, each with one empty choice picked, and returns their

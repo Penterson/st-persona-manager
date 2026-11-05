@@ -1,6 +1,6 @@
 // Splits a description at its title lines into items, matched by name. Pure: no
 // document, no context, so the node suite runs it as is.
-import { makeId, appendSection, liveVariant } from './store.js';
+import { makeId, appendSection, liveVariant, pickInEveryVersion } from './store.js';
 import { STRINGS } from './strings.js';
 
 /* Title lines are whole lines: ## Name (a space after the marks, so #hashtag is content),
@@ -252,11 +252,7 @@ export function applyResplit(persona, plan, makeIdFn, now, defaultFormat, snapsh
                 const key = normalizeTitle(part.title);
                 if (!created.has(key)) {
                     const { sectionId, variantId } = appendSection(persona, { name: part.title }, makeIdFn, '', now);
-                    // Every saved version picks it too, or applying one would drop
-                    // the moved text from the prompt.
-                    for (const version of Array.isArray(persona.versions) ? persona.versions : []) {
-                        if (version && typeof version === 'object') version.picks = { ...(version.picks ?? {}), [sectionId]: variantId };
-                    }
+                    pickInEveryVersion(persona, sectionId, variantId);
                     created.set(key, persona.sections.length - 1);
                 }
                 index = created.get(key);
