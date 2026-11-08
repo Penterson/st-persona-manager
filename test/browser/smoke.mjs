@@ -244,7 +244,7 @@ async function tour(width, label, light) {
         await fullBtn('전체 저장').click();
         await page.waitForTimeout(250);
         expect(`${label} saved clear-all empties the description`, (await readDescription()) === '', await readDescription());
-        await fullBtn('되돌리기').click();
+        await fullBtn('되돌리기').first().click();
         await page.waitForTimeout(150);
         expect(`${label} undo refills the joined box`, (await page.locator('.pm-full-raw-text').inputValue()) === kept);
         await shot('08c-fulltext-undo');
@@ -260,9 +260,25 @@ async function tour(width, label, light) {
         await page.locator('.pm-full .pm-manager-btn', { hasText: '전체 비우기' }).click();
         await page.waitForTimeout(150);
         expect(`${label} clear-all empties every item box`, (await boxes()).every(value => value === ''), await boxes());
-        await page.locator('.pm-full .pm-manager-btn', { hasText: '되돌리기' }).click();
+        await page.locator('.pm-full .pm-manager-btn', { hasText: '되돌리기' }).first().click();
         await page.waitForTimeout(150);
         expect(`${label} undo refills every item box`, JSON.stringify(await boxes()) === JSON.stringify(filled), [filled, await boxes()]);
+        // One item at a time; undo takes the clears back newest first.
+        const clearItem = i => page.locator('.pm-full-itemhead .pm-manager-btn', { hasText: '비우기' }).nth(i).click();
+        await clearItem(0);
+        await page.waitForTimeout(150);
+        await clearItem(1);
+        await page.waitForTimeout(150);
+        const both = await boxes();
+        expect(`${label} item clear empties only its own box`, both[0] === '' && both[1] === '' && both.slice(2).join() === filled.slice(2).join(), both);
+        await shot('08d-fulltext-itemclear');
+        await page.locator('.pm-full .pm-manager-btn', { hasText: '되돌리기 (2)' }).first().click();
+        await page.waitForTimeout(150);
+        const one = await boxes();
+        expect(`${label} undo restores the newest item clear first`, one[0] === '' && one[1] === filled[1], one);
+        await page.locator('.pm-full .pm-manager-btn', { hasText: '되돌리기' }).first().click();
+        await page.waitForTimeout(150);
+        expect(`${label} second undo restores the first item clear`, JSON.stringify(await boxes()) === JSON.stringify(filled), await boxes());
     }
     await page.locator('.pm-manager-editorfoot .pm-manager-btn', { hasText: '목록으로' }).click();
     await page.waitForTimeout(100);

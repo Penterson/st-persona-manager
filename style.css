@@ -2397,3 +2397,17 @@
 .pm-manager-itemcheck {
     margin-left: 6px;
 }
+
+/* Full-text item boxes: the caption with its own clear button at the far end. */
+.pm-full-itemhead {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.pm-full-itemhead > .pm-revise-caption {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}

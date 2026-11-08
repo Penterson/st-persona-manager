@@ -126,9 +126,9 @@ let fullTexts = null;
 // in one box and divided back along its title lines (fullRaw: { text, start }).
 let fullView = 'items';
 let fullRaw = null;
-// The working copies as they were before the last clear-all, for its undo; kept across a
-// save so a saved clear can still be taken back (and saved again).
-let fullUndo = null;
+// The working copies as they were before each clear (all or one item), newest last, for
+// undo; kept across a save so a saved clear can still be taken back (and saved again).
+let fullUndo = [];
 // Item select mode on the compose tab: checkboxes on the rows, deleted together.
 let itemSelecting = false;
 let selectedItems = new Set();
@@ -1735,7 +1735,7 @@ function resetFullText() {
     fullActive = false;
     fullView = 'items';
     fullRaw = null;
-    fullUndo = null;
+    fullUndo = [];
     fullBlocks = null;
     fullTexts = null;
     if (sizeTimer) { clearTimeout(sizeTimer); sizeTimer = 0; }
@@ -1892,7 +1892,7 @@ function clearFullText() {
         notify('info', STRINGS.manager.fullClearNothing);
         return;
     }
-    fullUndo = { texts: [...fullTexts], raw: fullRaw ? { ...fullRaw } : null };
+    fullUndo.push([...fullTexts]);
     fullTexts = fullTexts.map(() => '');
     if (fullRaw) fullRaw.text = '';
     pushFullToFields();
@@ -1900,17 +1900,30 @@ function clearFullText() {
     scheduleDraw();
 }
 
+// One item's body, emptied in place; undone like clear-all.
+function clearFullItem(index) {
+    if (!fullActive || !Array.isArray(fullTexts) || !(index >= 0 && index < fullTexts.length)) return;
+    harvestFullTexts();
+    const name = fullBlocks?.[index]?.sectionName ?? '';
+    if (!String(fullTexts[index] ?? '').trim()) { notify('info', STRINGS.manager.fullClearNothing); return; }
+    fullUndo.push([...fullTexts]);
+    fullTexts[index] = '';
+    pushFullToFields();
+    notify('info', STRINGS.manager.fullItemCleared(name));
+    scheduleDraw();
+}
+
+// Takes back the newest clear only; earlier ones stay for the next press.
 function undoFullClear() {
-    if (!fullUndo) return;
+    if (!fullUndo.length) return;
     harvestFullTexts();
     const s = targetState();
-    fullTexts = [...fullUndo.texts];
+    fullTexts = [...fullUndo.pop()];
     if (fullRaw && s?.persona) {
         // Same text as start: the working copies alone carry what differs from the bodies.
         const text = composeFrom(s.persona, fullBlocks, fullTexts);
         fullRaw = { text, start: text };
     }
-    fullUndo = null;
     pushFullToFields();
     notify('info', STRINGS.manager.fullClearUndone);
     scheduleDraw();
@@ -1944,7 +1957,8 @@ function fullTextScreen(s, writable, reason) {
         toggles.append(btn);
     }
     toggles.append(actionButton(STRINGS.manager.fullClear, () => clearFullText(), writable, STRINGS.manager.fullClearTitle, reason));
-    if (fullUndo) toggles.append(actionButton(STRINGS.manager.fullClearUndo, () => undoFullClear(), writable, '', reason));
+    const undoButton = () => actionButton(STRINGS.manager.fullClearUndo(fullUndo.length), () => undoFullClear(), writable, '', reason);
+    if (fullUndo.length) toggles.append(undoButton());
     wrap.append(toggles);
     const format = persona.headingFormat;
     if (fullView === 'raw' && fullRaw) {
@@ -1960,6 +1974,7 @@ function fullTextScreen(s, writable, reason) {
         const foot = el('div', 'pm-manager-editorfoot');
         foot.append(actionsRow([
             actionButton(STRINGS.manager.fullTextSave, () => saveFullText(), writable, '', reason),
+            ...(fullUndo.length ? [undoButton()] : []),
             actionButton(STRINGS.manager.editorBackToList, () => leaveFullText(), true),
         ]));
         wrap.append(foot);
@@ -1986,7 +2001,12 @@ function fullTextScreen(s, writable, reason) {
         const head = untitled.has(block.sectionId) ? '' : headingLine(format, block.sectionName, persona.headingTemplate);
         const variant = (persona.variants?.[block.sectionId] ?? []).find(entry => entry.id === block.variantId);
         const caption = head || STRINGS.manager.editorHeading(block.sectionName, variant?.label ?? '');
-        wrap.append(el('div', `pm-revise-caption${head ? ' pm-full-heading' : ''}`, caption));
+        const itemHead = el('div', 'pm-full-itemhead');
+        itemHead.append(el('div', `pm-revise-caption${head ? ' pm-full-heading' : ''}`, caption));
+        const clear = actionButton(STRINGS.manager.fullItemClear, () => clearFullItem(index), writable, '', reason);
+        clear.setAttribute('aria-label', STRINGS.manager.fullItemClearAria(block.sectionName));
+        itemHead.append(clear);
+        wrap.append(itemHead);
         const area = el('textarea', 'pm-full-text');
         area.dataset.pmBlock = String(index);
         const value = fullTexts?.[index] ?? block.text;
@@ -2000,6 +2020,7 @@ function fullTextScreen(s, writable, reason) {
     const foot = el('div', 'pm-manager-editorfoot');
     foot.append(actionsRow([
         actionButton(STRINGS.manager.fullTextSave, () => saveFullText(), writable, '', reason),
+        ...(fullUndo.length ? [undoButton()] : []),
         actionButton(STRINGS.manager.editorBackToList, () => leaveFullText(), true),
     ]));
     wrap.append(foot);

@@ -407,7 +407,11 @@ export const STRINGS = deepFreeze({
         // Clear-all on the full-text screen: no question asked, an undo instead.
         fullClear: '전체 비우기',
         fullClearTitle: '모든 항목 본문 비우기. [전체 저장] 전까지 미반영',
-        fullClearUndo: '되돌리기',
+        // n: clears waiting to be undone, newest first.
+        fullClearUndo: n => (n > 1 ? `되돌리기 (${n})` : '되돌리기'),
+        fullItemClear: '비우기',
+        fullItemClearAria: name => `${name} 본문 비우기`,
+        fullItemCleared: name => `${name} 본문 비우기 완료. [되돌리기]로 복구 가능`,
         fullCleared: '모든 항목 본문 비우기 완료. [되돌리기]로 복구 가능',
         fullClearNothing: '비울 본문 없음',
         fullClearUndone: '비우기 이전 본문으로 복구 완료',
