@@ -113,6 +113,11 @@ async function tour(width, label, light) {
     expect(`${label} panel opens`, await page.evaluate(() => !!document.getElementById('pm-quickbar-panel')));
     await shot('01-panel');
     // The default: the whole description in one 전문 item, divided by nothing.
+    await ensureOpen(page, 0);
+    const modeSelect = page.locator('.pm-quickbar-adoptmode select');
+    expect(`${label} the adopt mode is offered beside 관리 시작`, await modeSelect.count() >= 1);
+    expect(`${label} the adopt mode starts on 전문`, (await modeSelect.first().inputValue()) === 'whole');
+    await shot('01a-adopt-mode');
     await adopt(page);
     const wholeRoot = await page.evaluate(() => window.SillyTavern.getContext().extensionSettings['persona-manager']);
     const wholeNames = (wholeRoot?.personas?.[ALICE] ?? wholeRoot?.personas?.['1700000000000-alice.png'])?.sections?.map(section => section.name);
@@ -127,10 +132,14 @@ async function tour(width, label, light) {
         const c = window.SillyTavern.getContext();
         const root = c.extensionSettings['persona-manager'];
         delete root.personas[a];
-        root.settings.adoptSplitMode = 'own';
         await c.eventSource.emit(c.event_types.PERSONA_CHANGED);
     }, ALICE);
     await openPanel(page);
+    await ensureOpen(page, 0);
+    await page.locator('.pm-quickbar-adoptmode select').first().selectOption('own');
+    await page.waitForTimeout(150);
+    expect(`${label} picking a mode beside 관리 시작 saves the setting`,
+        (await ctxEval(page)).extensionSettings['persona-manager'].settings.adoptSplitMode === 'own');
     await adopt(page);
     const root = await page.evaluate(() => window.SillyTavern.getContext().extensionSettings['persona-manager']);
     const alice = root?.personas?.[ALICE];

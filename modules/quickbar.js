@@ -1,8 +1,8 @@
 // The quick switch bar: one icon in #leftSendForm and a panel on body.
 // DOM code only; the testable logic lives in quickbar-pure.js.
-import { MODULE_NAME, getPersona, findVersion, liveVariant, TILE_SHAPES, VIEW_MODES, makeId } from './store.js';
+import { MODULE_NAME, getPersona, findVersion, liveVariant, TILE_SHAPES, VIEW_MODES, makeId, ADOPT_MODES } from './store.js';
 import {
-    getState, saveAndCompose, adopt, getPreciseApi, getRoot, adoptFor, refresh, KEEP_DESCRIPTION_KINDS,
+    getState, saveAndCompose, adopt, setAdoptMode, getPreciseApi, getRoot, adoptFor, refresh, KEEP_DESCRIPTION_KINDS,
 } from './state.js';
 import { freshContext } from './ctx.js';
 import { compose, planAbsorb } from './compose.js';
@@ -1136,6 +1136,20 @@ function adoptHere() {
     if (count > 1) notify('success', STRINGS.common.adoptSplit(count));
 }
 
+// Beside 관리 시작: how this start takes the description in (settings.adoptSplitMode).
+function adoptModeRow(s, writable) {
+    const row = el('div', 'pm-row pm-quickbar-adoptmode');
+    row.append(el('span', 'pm-quickbar-adoptlabel', STRINGS.common.adoptModeLabel));
+    const current = ADOPT_MODES.includes(s?.settings?.adoptSplitMode) ? s.settings.adoptSplitMode : ADOPT_MODES[0];
+    const select = selectOf('pm-quickbar-sort', ADOPT_MODES.map(mode => [mode, STRINGS.settings.adoptModeNames[mode]]), current, mode => {
+        if (setAdoptMode(mode)) document.dispatchEvent(new CustomEvent('pm:changed'));
+    });
+    select.disabled = !writable;
+    select.setAttribute('aria-label', STRINGS.common.adoptModeAria);
+    row.append(select);
+    return row;
+}
+
 function groupOf(title) { return sharedGroup('pm-quickbar', title); }
 
 function rowOf(text, onClick) {
@@ -1290,6 +1304,7 @@ function versionGroup(s, writable) {
     if (!open) return box;
     if (!s.persona) {
         box.append(rowOf(STRINGS.quick.adoptRow, writable ? () => { adoptHere(); scheduleDraw(); } : null));
+        box.append(adoptModeRow(s, writable));
         return box;
     }
     const versions = s.persona.versions ?? [];
@@ -1471,6 +1486,7 @@ function namesGroup(s, writable) {
     if (!open) return box;
     if (!s.persona) {
         box.append(rowOf(STRINGS.quick.adoptRow, writable ? () => { adoptHere(); scheduleDraw(); } : null));
+        box.append(adoptModeRow(s, writable));
         return box;
     }
     const current = freshContext()?.powerUserSettings?.personas?.[s.avatar] ?? '';

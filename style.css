@@ -2411,3 +2411,23 @@
     min-width: 0;
     overflow-wrap: anywhere;
 }
+
+/* Beside 관리 시작 in the quick panel: the label, then the mode select taking the rest. */
+.pm-quickbar-adoptmode {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 12px 8px;
+}
+
+.pm-quickbar-adoptlabel {
+    flex: none;
+    font-size: 0.85em;
+    color: var(--pm-muted);
+}
+
+.pm-quickbar-adoptmode > .pm-quickbar-sort {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: none;
+}

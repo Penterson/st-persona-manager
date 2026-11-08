@@ -154,6 +154,15 @@ function createRecord(ctx, root, avatarId) {
     return persona;
 }
 
+// How the next 관리 시작 takes in a description, chosen beside the button or in the drawer.
+export function setAdoptMode(mode) {
+    const root = getRoot();
+    if (!root || root.readOnly || !ADOPT_MODES.includes(mode)) return false;
+    root.settings.adoptSplitMode = mode;
+    provider()?.saveSettingsDebounced?.();
+    return true;
+}
+
 export function adopt() {
     const ctx = provider();
     if (!ctx) return null;

@@ -73,6 +73,9 @@ export const STRINGS = deepFreeze({
         versionNotApplicable: '해당 버전은 현재 페르소나에 적용 불가',
         // Shown when adopting split the description by its titles.
         adoptSplit: n => `관리 시작 완료. 기존 설명문을 항목 ${n}개로 분리`,
+        // The adopt mode, offered right beside 관리 시작 (the same setting as the drawer's).
+        adoptModeLabel: '설명문 넣는 방식',
+        adoptModeAria: '관리 시작 때 설명문 넣는 방식',
         // An outside edit kept as a choice before a write replaced it.
         outsideKept: section => `SillyTavern에서 고친 설명문을 '${section}' 항목의 선택지로 보관`,
         savedActiveUnknown: '저장 완료. 활성 페르소나 미확인으로 프롬프트 반영 보류. SillyTavern에서 페르소나 재선택 필요',
@@ -726,12 +729,12 @@ export const STRINGS = deepFreeze({
         historyCoalesceMinutesHint: '설정 시간 안의 연속 편집은 이력 한 건으로 병합 (1~30)',
         defaultHeadingFormat: '새 페르소나의 항목 제목',
         defaultHeadingFormatHint: '관리를 새로 시작하는 페르소나가 쓸 형식. 이미 만든 페르소나는 편집 탭에서 각각 변경',
-        splitOnAdopt: '관리 시작 시 설명문 가져오기',
-        splitOnAdoptHint: '전문 항목 하나에 통째로: 설명문 전체를 "전문" 항목 하나에 배치, 제목 기준 나누기 없음. 나누기는 편집 탭의 [원래 항목으로 재구성]·[제목별 분류]로 직접. 원래 항목 그대로: 설명문에 이미 있는 제목의 이름·순서·모양으로 항목 구성, 설명문 글자 변경 없음. 같은 모양의 제목이 2개 미만이거나 그대로 재현되지 않는 설명문은 전문 항목 하나에 배치. 기본 항목에 맞춰 분류: 외모·성격 같은 기본 항목으로 이동',
+        splitOnAdopt: '관리 시작 때 설명문 넣는 방식',
+        splitOnAdoptHint: '전문 항목에 그대로: 설명문 전체를 "전문" 항목 하나에 배치, 나누기는 나중에 편집 탭의 [원래 항목으로 재구성]·[제목별 분류]로. 바로 분류(설명문의 제목대로): 설명문에 이미 있는 제목의 이름·순서·모양으로 항목 구성, 설명문 글자 변경 없음. 같은 모양의 제목이 2개 미만이거나 그대로 재현되지 않으면 전문 항목에 배치. 바로 분류(기본 항목에 맞춰): 외모·성격 같은 기본 항목으로 이동. 관리 시작 단추 옆에서도 선택 가능',
         adoptModeNames: Object.freeze({
-            own: '원래 항목 그대로',
-            whole: '전문 항목 하나에 통째로 (기본)',
-            defaults: '기본 항목에 맞춰 분류',
+            whole: '전문 항목에 그대로 (기본)',
+            own: '바로 분류: 설명문의 제목대로',
+            defaults: '바로 분류: 기본 항목에 맞춰',
         }),
         autoAbsorbOutside: 'SillyTavern에서 고친 설명문 자동 반영',
         autoAbsorbOutsideHint: 'SillyTavern 페르소나 화면에서 설명문을 고치면 항목 본문에 바로 반영(이전 본문은 이력에 보관). 본문이 여러 항목에 있으면 항목 제목 줄 기준으로 나누므로, 제목 줄이 지워졌거나 순서가 바뀌었거나 항목 제목 형식이 없음이면 반영하지 않고 외부 수정 알림 표시',

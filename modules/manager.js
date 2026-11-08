@@ -9,10 +9,10 @@
 // whether SillyTavern's prompt field is written, so a persona not being played can be edited.
 import {
     MODULE_NAME, makeId, appendSection, getPersona, findVersion, liveVariant, ensurePersona, HEADING_FORMATS,
-    VIEW_MODES, pickInEveryVersion,
+    VIEW_MODES, pickInEveryVersion, ADOPT_MODES,
 } from './store.js';
 import {
-    getState, getRoot, adoptFor, saveAndComposeFor, refreshAssets, KEEP_DESCRIPTION_KINDS,
+    getState, getRoot, adoptFor, saveAndComposeFor, refreshAssets, KEEP_DESCRIPTION_KINDS, setAdoptMode,
 } from './state.js';
 import { freshContext } from './ctx.js';
 import {
@@ -3109,6 +3109,20 @@ function composeTab(s, writable, reason) {
     return box;
 }
 
+// Beside 관리 시작: how adopting takes the description in (the drawer's same setting).
+function adoptModeRow(s, writable) {
+    const row = el('div', 'pm-row pm-manager-headingrow');
+    row.append(el('span', 'pm-manager-name', STRINGS.common.adoptModeLabel));
+    const current = ADOPT_MODES.includes(s?.settings?.adoptSplitMode) ? s.settings.adoptSplitMode : ADOPT_MODES[0];
+    const select = selectOf('pm-manager-select', ADOPT_MODES.map(mode => [mode, STRINGS.settings.adoptModeNames[mode]]), current, mode => {
+        if (setAdoptMode(mode)) scheduleDraw();
+    });
+    select.disabled = !writable;
+    select.setAttribute('aria-label', STRINGS.common.adoptModeAria);
+    row.append(select);
+    return row;
+}
+
 // Changing this rewrites the prompt, so it goes through commit.
 function headingFormatRow(persona, writable, reason) {
     const row = el('div', 'pm-row pm-manager-headingrow');
@@ -4386,6 +4400,7 @@ function drawManager() {
     if (!s.persona) {
         body.append(noteOf(STRINGS.manager.notAdopted));
         body.append(actionsRow([actionButton(STRINGS.manager.adoptButton, () => adoptTarget(), writable, '', reason)]));
+        body.append(adoptModeRow(s, writable));
         return;
     }
 

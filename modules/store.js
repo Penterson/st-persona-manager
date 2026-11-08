@@ -187,7 +187,8 @@ export function migrate(root) {
 // Offered by the settings drawer and the edit tab; 'own' exists only on personas adopted
 // with their own division.
 export const HEADING_FORMATS = Object.freeze(['none', 'plain', 'markdown']);
-export const ADOPT_MODES = Object.freeze(['own', 'whole', 'defaults']);
+// In the order the choice is offered: the default first.
+export const ADOPT_MODES = Object.freeze(['whole', 'own', 'defaults']);
 // Validated on read, because the value reaches a class name.
 export const TILE_SHAPES = Object.freeze(['circle', 'rounded', 'square']);
 // The persona list's views (rosterViewMode, pickerViewMode).
