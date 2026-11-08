@@ -347,6 +347,18 @@ export const STRINGS = deepFreeze({
         itemGone: '삭제된 항목',
         lastItemKept: '마지막 항목은 삭제 불가',
         confirmDropItem: name => `항목 "${name}" 삭제 (선택지 전부 포함)`,
+        // Deleting several items at once: a select mode over the item list.
+        itemSelect: '항목 선택',
+        itemSelectAll: '전체 선택',
+        itemSelectNone: '선택 해제',
+        itemSelectAria: name => `${name} 선택`,
+        itemDropSelected: n => `선택 항목 삭제 (${n})`,
+        itemDropNothing: '선택한 항목 없음',
+        confirmDropItems: n => `항목 ${n}개 삭제 (선택지와 이력 포함, 되돌리기 불가)`,
+        confirmDropAllItems: n => `항목 ${n}개 전부 삭제 (선택지와 이력 포함, 되돌리기 불가). 빈 항목 하나는 유지`,
+        itemsDropped: n => `항목 ${n}개 삭제 완료`,
+        // The one empty item left when every item is deleted.
+        emptyItemName: '본문',
         addItem: '+ 항목 추가',
         noItems: '항목 없음',
         dragHandle: '끌어서 순서 변경',
@@ -388,7 +400,13 @@ export const STRINGS = deepFreeze({
         // View modes: editable boxes per item, or the joined prompt text to read and copy.
         fullViewItems: '항목별',
         fullViewRaw: '전문',
-        fullViewRawGuide: '프롬프트에 들어가는 그대로. 수정은 항목별 보기에서',
+        fullViewRawGuide: '프롬프트에 들어가는 그대로. 제목 줄 아래 글이 해당 항목 본문. 제목 줄은 지우거나 옮기지 말 것. 빈 항목은 제목 줄을 입력해 추가',
+        // Shown instead when the joined text has no title lines to divide along.
+        fullViewRawLocked: '항목 제목 형식이 없음이라 나눌 기준 없음. 수정은 항목별 보기에서',
+        fullRawAria: '설명문 전문',
+        fullRawMissing: name => `제목 줄 없음: ${name}. 항목을 비우려면 제목 줄은 두고 본문만 지우기`,
+        fullRawOrder: name => `제목 줄 순서 변경 또는 중복: ${name}. 항목 순서는 편집 탭에서 변경`,
+        fullRawStray: '첫 제목 줄 앞의 글은 들어갈 항목 없음. 제목 줄 아래로 옮기기',
         fullTextHeadingNote: '항목 이름 줄은 제목 형식 설정에 따라 프롬프트에 함께 전송',
         // Only for a persona with no sections; empty sections still open the screen.
         fullTextNoSections: '항목 없음',

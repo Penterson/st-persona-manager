@@ -17,7 +17,7 @@ import {
 import { freshContext } from './ctx.js';
 import {
     compose, composePicked, composeFrom, hasDiverged, headingLine, validTemplate,
-    readPlacement, writePlacement,
+    readPlacement, writePlacement, splitFullText, fullTextSplittable,
 } from './compose.js';
 import { addLog, snapshot, enforceGlobalBudget, restore, diffWords, expireOldHistory } from './history.js';
 import { toggleMember, modifiedAt } from './roster.js';
@@ -46,7 +46,7 @@ import {
     replacePersonaAvatar, feedPersonaImage, restoreAvatarBackup, findAsset, imageSize,
 } from './assets.js';
 import {
-    canDeleteSection, removeSection, moveSection, reorderSection, deleteVariant,
+    canDeleteSection, removeSection, removeSections, moveSection, reorderSection, deleteVariant,
     renameLabel, deleteLabel, versionSummary, versionSummaryLine, NO_PICK_LABEL,
     putDraft, peekDraft, takeDraft, clearDrafts, rowKey,
     historyView, hasEvictionNotice, missingSignature, previewText,
@@ -122,8 +122,13 @@ let reviseScrollToBox = false;
 let fullActive = false;
 let fullBlocks = null;
 let fullTexts = null;
-// 'items': one box per item. 'raw': the composed text as SillyTavern receives it, read only.
+// 'items': one box per item. 'raw': the composed text as SillyTavern receives it, editable
+// in one box and divided back along its title lines (fullRaw: { text, start }).
 let fullView = 'items';
+let fullRaw = null;
+// Item select mode on the compose tab: checkboxes on the rows, deleted together.
+let itemSelecting = false;
+let selectedItems = new Set();
 // Folded blocks at the top of the compose tab.
 let placementOpen = false;
 let namesOpen = false;
@@ -216,6 +221,7 @@ function openManager(tab) {
     namesOpen = false;
     personaOpen = false;
     resetFullText();
+    resetItemSelect();
     targetAvatar = getState()?.avatar ?? null;
 
     // The grain sits on the panel, not the scrolling content, so it composites once.
@@ -337,6 +343,7 @@ function closeManager(reopenPanel = true) {
     // (requestClose has asked about them).
     resetRevise();
     resetFullText();
+    resetItemSelect();
     pickerMode = 'target';
     focusSearch = null;
     clearListFrames();
@@ -505,6 +512,60 @@ function dropSection(sectionId, name) {
         for (const variantId of gone.variantIds) takeDraft(startAvatar, sectionId, variantId);
         commit(null, gone.name, startAvatar);
     });
+}
+
+function resetItemSelect() {
+    itemSelecting = false;
+    selectedItems = new Set();
+}
+
+function dropSelectedSections() {
+    return afterAsking(s => {
+        const ids = (s.persona.sections ?? []).filter(section => selectedItems.has(section.id)).map(section => section.id);
+        if (!ids.length) { notify('info', STRINGS.manager.itemDropNothing); return false; }
+        const all = ids.length === (s.persona.sections ?? []).length;
+        return askConfirm(all ? STRINGS.manager.confirmDropAllItems(ids.length) : STRINGS.manager.confirmDropItems(ids.length));
+    }, (after, _, startAvatar) => {
+        const { gone } = removeSections(ensureShape(after.persona), [...selectedItems], freshContext()?.uuidv4, Date.now());
+        if (!gone.length) { notify('info', STRINGS.manager.itemDropNothing); scheduleDraw(); return; }
+        for (const item of gone) {
+            if (openVariant?.sectionId === item.id) { openVariant = null; editorDirty = false; }
+            if (item.variantIds.includes(historyVariant)) { historyVariant = null; historyIndex = null; }
+            // Drafts of removed bodies would be unreachable text until teardown.
+            for (const variantId of item.variantIds) takeDraft(startAvatar, item.id, variantId);
+        }
+        resetItemSelect();
+        if (commit(null, gone.map(item => item.name).join(', '), startAvatar)) notify('info', STRINGS.manager.itemsDropped(gone.length));
+    });
+}
+
+function itemSelectButton() {
+    const btn = button(`pm-manager-btn${itemSelecting ? ' pm-manager-primary' : ''}`, STRINGS.manager.itemSelect, () => {
+        const wasOn = itemSelecting;
+        resetItemSelect();
+        itemSelecting = !wasOn;
+        scheduleDraw();
+    });
+    btn.setAttribute('aria-pressed', itemSelecting ? 'true' : 'false');
+    return btn;
+}
+
+// Above the list in select mode: select all or none, and delete the checked items.
+function itemSelectActions(persona, writable, reason) {
+    // While searching, select all means the items on screen.
+    const query = lists.compose.open ? lists.compose.query.trim() : '';
+    const ids = (persona.sections ?? []).filter(section => !query || sectionMatchesQuery(persona, section, query)).map(section => section.id);
+    const allPicked = ids.length > 0 && ids.every(id => selectedItems.has(id));
+    // Deletion takes every checked item, hidden by the search or not.
+    const count = (persona.sections ?? []).filter(section => selectedItems.has(section.id)).length;
+    return actionsRow([
+        actionButton(allPicked ? STRINGS.manager.itemSelectNone : STRINGS.manager.itemSelectAll, () => {
+            selectedItems = allPicked ? new Set() : new Set(ids);
+            scheduleDraw();
+        }, true),
+        actionButton(STRINGS.manager.itemDropSelected(count), () => dropSelectedSections(), writable && count > 0, '',
+            count > 0 ? reason : STRINGS.manager.itemDropNothing),
+    ]);
 }
 
 /* Writes: variants */
@@ -928,6 +989,7 @@ function toggleLabelMembership(labelId, avatarId) {
 // search and selections.
 function moveTarget(avatar) {
     resetFullText();
+    resetItemSelect();
     placementOpen = false;
     namesOpen = false;
     personaOpen = false;
@@ -1296,6 +1358,18 @@ function sectionBlock(persona, section, index, writable, reason) {
     const showChoices = open || choiceOpen || searching;
 
     const head = rowHead();
+    if (itemSelecting) {
+        const check = el('input', 'pm-checkbox pm-manager-itemcheck');
+        check.type = 'checkbox';
+        check.checked = selectedItems.has(section.id);
+        check.setAttribute('aria-label', STRINGS.manager.itemSelectAria(section.name ?? ''));
+        check.addEventListener('change', () => {
+            if (check.checked) selectedItems.add(section.id);
+            else selectedItems.delete(section.id);
+            scheduleDraw();
+        });
+        head.append(check);
+    }
     const headParts = [
         markedText('pm-manager-name', section.name ?? '', lists.compose.open ? lists.compose.query : ''),
         el('span', 'pm-manager-count', STRINGS.manager.choiceCount(variants.length)),
@@ -1657,6 +1731,7 @@ function refreshSizeLines() {
 function resetFullText() {
     fullActive = false;
     fullView = 'items';
+    fullRaw = null;
     fullBlocks = null;
     fullTexts = null;
     if (sizeTimer) { clearTimeout(sizeTimer); sizeTimer = 0; }
@@ -1667,6 +1742,8 @@ function harvestFullTexts() {
     if (!fullActive || !Array.isArray(fullTexts)) return;
     const panel = document.getElementById(PANEL_ID);
     if (!panel) return;
+    const raw = panel.querySelector('.pm-full-raw-text');
+    if (raw && fullRaw) fullRaw.text = raw.value;
     for (const area of panel.querySelectorAll('.pm-full-text')) {
         const index = Number(area.dataset.pmBlock);
         if (Number.isInteger(index) && index >= 0 && index < fullTexts.length) fullTexts[index] = area.value;
@@ -1677,11 +1754,42 @@ function harvestFullTexts() {
 function fullDirtyCount() {
     if (!fullActive || !Array.isArray(fullBlocks)) return 0;
     harvestFullTexts();
+    const split = splitRaw();
+    // An undividable joined text still holds typing that leaving would lose.
+    if (!split.ok) return Math.max(1, countChanged(fullTexts));
+    return countChanged(split.texts);
+}
+
+function countChanged(texts) {
     let count = 0;
     fullBlocks.forEach((block, index) => {
-        if ((fullTexts?.[index] ?? block.text) !== block.text) count++;
+        if ((texts?.[index] ?? block.text) !== block.text) count++;
     });
     return count;
+}
+
+// The joined view's text divided back into the working copies, or why it cannot be.
+function splitRaw() {
+    if (!fullRaw || fullRaw.text === fullRaw.start) return { ok: true, texts: fullTexts };
+    const s = targetState();
+    if (!s?.persona) return { ok: false, reason: 'stray', name: '' };
+    return splitFullText(s.persona, fullBlocks, fullRaw.text, fullTexts);
+}
+
+function rawRefusal(split) {
+    if (split.reason === 'order') return STRINGS.manager.fullRawOrder(split.name);
+    if (split.reason === 'missing') return STRINGS.manager.fullRawMissing(split.name);
+    return STRINGS.manager.fullRawStray;
+}
+
+// Leaves the joined view only when its text divides; otherwise the typing stays on screen.
+function takeRaw() {
+    harvestFullTexts();
+    const split = splitRaw();
+    if (!split.ok) { notify('warning', rawRefusal(split)); return false; }
+    fullTexts = split.texts;
+    fullRaw = null;
+    return true;
 }
 
 function openFullText() {
@@ -1714,11 +1822,21 @@ function saveFullText() {
     const s = guardTarget();
     if (!s) return;
     const startAvatar = targetAvatar;
-    harvestFullTexts();
+    const inRaw = !!fullRaw;
+    if (!takeRaw()) return;
     // The plan skips bodies that are no longer the ones the screen drew.
     const plan = planFullTextSave(s.persona, fullBlocks, fullTexts);
     if (plan.skipped.length) notify('warning', STRINGS.manager.fullTextSkipped(plan.skipped.join(', ')));
-    if (!plan.writes.length) { notify('info', STRINGS.manager.nothingChanged); return; }
+    // The joined view stays open, redrawn from the working copies.
+    const reopenRaw = () => {
+        if (!inRaw) return;
+        const text = composeFrom(s.persona, fullBlocks, fullTexts);
+        fullRaw = { text, start: text };
+        // The next draw harvests the box first, so the box takes the new text now.
+        const area = document.getElementById(PANEL_ID)?.querySelector('.pm-full-raw-text');
+        if (area) area.value = text;
+    };
+    if (!plan.writes.length) { reopenRaw(); notify('info', STRINGS.manager.nothingChanged); return; }
     const now = Date.now();
     for (const write of plan.writes) {
         const variant = (s.persona.variants?.[write.sectionId] ?? []).find(entry => entry.id === write.variantId);
@@ -1730,7 +1848,7 @@ function saveFullText() {
         takeDraft(startAvatar, write.sectionId, write.variantId);
     }
     trimHistory(s.root, s.settings, now);
-    if (!commit(null, '', startAvatar)) return;
+    if (!commit(null, '', startAvatar)) { reopenRaw(); return; }
     notify('info', STRINGS.manager.fullTextSaved(plan.writes.length));
     // The written bodies become the new baseline. Each block keeps the choice it was drawn
     // from, or typing could land in the choice active now.
@@ -1743,6 +1861,8 @@ function saveFullText() {
             ? block.text
             : (fullTexts?.[index] ?? block.text)));
     }
+    reopenRaw();
+    scheduleDraw();
 }
 
 // Each body under the heading it is printed with, or a caption naming the item and choice.
@@ -1751,7 +1871,8 @@ function fullTextScreen(s, writable, reason) {
     wrap.append(noteOf(STRINGS.manager.fullTextGuide));
     const persona = s.persona;
     const blocks = fullBlocks ?? [];
-    const line = el('div', 'pm-manager-size pm-size-full', sizeTextOf(composeFrom(persona, blocks, fullTexts)));
+    const line = el('div', 'pm-manager-size pm-size-full',
+        sizeTextOf(fullRaw ? fullRaw.text : composeFrom(persona, blocks, fullTexts)));
     wrap.append(line);
     const toggles = el('div', 'pm-manager-actions');
     for (const [key, text] of [['items', STRINGS.manager.fullViewItems], ['raw', STRINGS.manager.fullViewRaw]]) {
@@ -1760,6 +1881,11 @@ function fullTextScreen(s, writable, reason) {
             if (fullView === key) return;
             // The boxes leave the screen; their typing lives on in the working copies.
             harvestFullTexts();
+            if (fullView === 'raw' && !takeRaw()) return;
+            if (key === 'raw' && fullTextSplittable(persona, blocks)) {
+                const text = composeFrom(persona, blocks, fullTexts);
+                fullRaw = { text, start: text };
+            }
             fullView = key;
             scheduleDraw();
         });
@@ -1768,9 +1894,27 @@ function fullTextScreen(s, writable, reason) {
     }
     wrap.append(toggles);
     const format = persona.headingFormat;
-    if (fullView === 'raw') {
-        // Read only: the joined text cannot tell which item an edit belongs to.
+    if (fullView === 'raw' && fullRaw) {
+        // Editable: saving divides the text back along the title lines (splitFullText).
         wrap.append(noteOf(STRINGS.manager.fullViewRawGuide));
+        const area = el('textarea', 'pm-full-text pm-full-raw-text');
+        area.value = fullRaw.text;
+        area.rows = Math.min(30, Math.max(8, fullRaw.text.split('\n').length + Math.floor(fullRaw.text.length / 44)));
+        area.disabled = !writable;
+        area.setAttribute('aria-label', STRINGS.manager.fullRawAria);
+        area.addEventListener('input', () => scheduleSizeUpdate());
+        wrap.append(area);
+        const foot = el('div', 'pm-manager-editorfoot');
+        foot.append(actionsRow([
+            actionButton(STRINGS.manager.fullTextSave, () => saveFullText(), writable, '', reason),
+            actionButton(STRINGS.manager.editorBackToList, () => leaveFullText(), true),
+        ]));
+        wrap.append(foot);
+        return wrap;
+    }
+    if (fullView === 'raw') {
+        // Read only: with no title lines the joined text cannot tell which item an edit belongs to.
+        wrap.append(noteOf(STRINGS.manager.fullViewRawLocked));
         const { box, inner } = textBox('pm-full-raw');
         inner.textContent = composeFrom(persona, blocks, fullTexts) || STRINGS.manager.previewEmpty;
         wrap.append(box);
@@ -2876,8 +3020,10 @@ function composeTab(s, writable, reason) {
         actionButton(STRINGS.manager.fillDefaults, () => doFillDefaults(), writable, '', reason),
         actionButton(STRINGS.manager.resplit, () => doResplit(), writable, STRINGS.manager.resplitTitle, reason),
         actionButton(STRINGS.manager.ownSplit, () => doOwnSplit(), writable, STRINGS.manager.ownSplitTitle, reason),
+        itemSelectButton(),
     ]));
     if (lists.compose.open) box.append(listSearchRow('compose'));
+    if (itemSelecting) box.append(itemSelectActions(persona, writable, reason));
 
     const list = el('div');
     list.dataset.pmList = 'compose';

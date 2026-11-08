@@ -40,6 +40,23 @@ export function removeSection(persona, sectionId, now) {
     return { id: sectionId, name: section.name ?? '', variantIds };
 }
 
+/* Removes several sections at once, each as removeSection does. Removing every one first
+   adds an empty section (picked in every version), since a persona keeps at least one.
+   Returns { gone: [removeSection results], added: name | null }. */
+export function removeSections(persona, sectionIds, makeIdFn, now) {
+    const wanted = new Set(sectionIds ?? []);
+    const targets = (persona?.sections ?? []).filter(section => wanted.has(section.id)).map(section => section.id);
+    if (!targets.length) return { gone: [], added: null };
+    let added = null;
+    if (targets.length === persona.sections.length) {
+        added = STRINGS.manager.emptyItemName;
+        const { sectionId, variantId } = appendSection(persona, { name: added }, makeIdFn, '', now);
+        pickInEveryVersion(persona, sectionId, variantId);
+    }
+    const gone = targets.map(id => removeSection(persona, id, now)).filter(Boolean);
+    return { gone, added };
+}
+
 // Moves the entry with this id by delta places. Returns whether it moved: a step past
 // either end is a no-op, not an error.
 function stepById(list, id, delta) {

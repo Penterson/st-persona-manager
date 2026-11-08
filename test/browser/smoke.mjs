@@ -210,6 +210,35 @@ async function tour(width, label, light) {
     await page.locator('.pm-manager-btn', { hasText: '전문' }).first().click();
     await page.waitForTimeout(150);
     await shot('08-fulltext');
+    // The joined view: edited as one text, saved back into the items along the title lines.
+    await page.locator('.pm-full .pm-manager-actions .pm-manager-btn', { hasText: '전문' }).click();
+    await page.waitForTimeout(150);
+    const raw = page.locator('.pm-full-raw-text');
+    expect(`${label} joined full text is an editable box`, await raw.count() === 1);
+    if (await raw.count() === 1) {
+        const before = await raw.inputValue();
+        const readDescription = () => page.evaluate(a => window.SillyTavern.getContext().powerUserSettings.persona_descriptions[a].description, ALICE);
+        await raw.fill(`${before}\nPM-SMOKE-RAW`);
+        await shot('08b-fulltext-raw');
+        await page.locator('.pm-full .pm-manager-editorfoot .pm-manager-btn', { hasText: '전체 저장' }).click();
+        await page.waitForTimeout(250);
+        const saved = await readDescription();
+        expect(`${label} joined edit reaches the description`, saved.trimEnd().endsWith('PM-SMOKE-RAW'), saved);
+        expect(`${label} joined view stays open after saving`, await page.locator('.pm-full-raw-text').count() === 1);
+        // Titles stripped: the text cannot be divided, so the view keeps it rather than switch.
+        const lines = before.split('\n');
+        await page.locator('.pm-full-raw-text').fill(lines.filter((line, i) => i === 0 || !/^(##|\S+:$|<|\[)/.test(line.trim())).join('\n'));
+        await page.locator('.pm-full .pm-manager-actions .pm-manager-btn', { hasText: '항목별' }).click();
+        await page.waitForTimeout(150);
+        expect(`${label} undividable joined text keeps the joined view`, await page.locator('.pm-full-raw-text').count() === 1);
+        await page.locator('.pm-full-raw-text').fill(before);
+        await page.locator('.pm-full .pm-manager-editorfoot .pm-manager-btn', { hasText: '전체 저장' }).click();
+        await page.waitForTimeout(250);
+        expect(`${label} joined edit undone`, (await readDescription()) === saved.replace(/\nPM-SMOKE-RAW\s*$/, ''), await readDescription());
+        await page.locator('.pm-full .pm-manager-actions .pm-manager-btn', { hasText: '항목별' }).click();
+        await page.waitForTimeout(150);
+        expect(`${label} joined view returns to the item boxes`, await page.locator('.pm-full-raw-text').count() === 0);
+    }
     await page.locator('.pm-manager-editorfoot .pm-manager-btn', { hasText: '목록으로' }).click();
     await page.waitForTimeout(100);
 
@@ -324,6 +353,34 @@ async function tour(width, label, light) {
     });
     expect(`${label} absorb lands in the first item, which held the text`, absorbed.length === 1 && absorbed[0][0] === 0 && absorbed[0][1] === '밖에서 고친 본문', absorbed);
     expect(`${label} absorb clears the banner`, await page.locator('.pm-quickbar-banner', { hasText: '외부' }).count() === 0);
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(100);
+
+    /* Several items deleted at once; deleting all of them leaves one empty item */
+    await openPanel(page);
+    await openManager(page);
+    await page.locator('.pm-manager-tabbody .pm-manager-btn', { hasText: '항목 선택' }).click();
+    await page.waitForTimeout(150);
+    const checks = page.locator('.pm-manager-itemcheck');
+    const itemCount = await checks.count();
+    expect(`${label} select mode puts a checkbox on every item`, itemCount >= 2, itemCount);
+    await checks.first().check();
+    await page.waitForTimeout(150);
+    expect(`${label} delete button counts the checked items`, await page.locator('.pm-manager-btn', { hasText: '선택 항목 삭제 (1)' }).count() === 1);
+    await page.locator('.pm-manager-btn', { hasText: '전체 선택' }).click();
+    await page.waitForTimeout(150);
+    await shot('15b-item-select');
+    await page.locator('.pm-manager-btn', { hasText: `선택 항목 삭제 (${itemCount})` }).click();
+    await page.waitForTimeout(250);
+    const afterDrop = await page.evaluate(a => {
+        const c = window.SillyTavern.getContext();
+        const p = c.extensionSettings['persona-manager'].personas[a];
+        return { names: p.sections.map(s => s.name), text: c.powerUserSettings.persona_descriptions[a].description };
+    }, ALICE);
+    expect(`${label} deleting every item leaves one empty item`, afterDrop.names.length === 1 && afterDrop.names[0] === '본문' && afterDrop.text === '', afterDrop);
+    expect(`${label} select mode ends after deleting`, await page.locator('.pm-manager-itemcheck').count() === 0);
+    await page.locator('.pm-manager-header .pm-manager-btn', { hasText: '닫기' }).click();
+    await page.waitForTimeout(200);
     await page.keyboard.press('Escape');
     await page.waitForTimeout(100);
 

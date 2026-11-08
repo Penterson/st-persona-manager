@@ -145,6 +145,74 @@ export function splitByComposition(persona, text) {
     return out;
 }
 
+/* The full-text screen's joined view, edited and divided back into its blocks (from
+   buildReplaceBlocks, empty bodies included). current holds the working texts the view
+   was joined from: a block printed there must keep its title line; an empty one is filled
+   only if its title line is typed in, in item order. Untouched blocks keep their text.
+   Returns { ok: true, texts } or { ok: false, reason: 'missing'|'order'|'stray', name }. */
+export function fullTextSplittable(persona, blocks) {
+    const untitled = new Set((persona?.sections ?? []).filter(section => section?.untitled === true).map(section => section.id));
+    // Every block after the first needs a title line to be found by.
+    return (blocks ?? []).every((block, index) => index === 0
+        || (!untitled.has(block?.sectionId) && !!headingLine(persona?.headingFormat, block?.sectionName ?? '', persona?.headingTemplate)));
+}
+
+export function splitFullText(persona, blocks, text, current) {
+    const format = persona?.headingFormat;
+    const template = persona?.headingTemplate;
+    const untitled = new Set((persona?.sections ?? []).filter(section => section?.untitled === true).map(section => section.id));
+    const list = (blocks ?? []).map((block, index) => {
+        const name = block?.sectionName ?? '';
+        const bare = untitled.has(block?.sectionId);
+        const body = typeof current?.[index] === 'string' ? current[index] : (block?.text ?? '');
+        return {
+            name,
+            head: bare ? '' : headingLine(format, name, template),
+            close: bare ? '' : closingLine(format, name, template),
+            required: !!body.trim(),
+        };
+    });
+    if (!list.length) return { ok: true, texts: [] };
+    // A block with no title line can only be the first, holding the text above every title.
+    const headless = list.find((block, index) => index > 0 && !block.head);
+    if (headless) return { ok: false, reason: 'missing', name: headless.name };
+    const lines = String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
+    const same = (line, wanted) => !!wanted && line.replace(/[ \t]+$/, '') === wanted;
+    const starts = list.map(() => -1);
+    let last = -1;
+    for (const [at, line] of lines.entries()) {
+        const next = list.findIndex((block, index) => index > last && same(line, block.head));
+        if (next === -1) {
+            // A title already passed, seen again: moved or doubled, so the division is unsure.
+            const back = list.findIndex((block, index) => index <= last && same(line, block.head));
+            if (back !== -1) return { ok: false, reason: 'order', name: list[back].name };
+            continue;
+        }
+        const skipped = list.slice(last + 1, next).find(block => block.required && block.head);
+        if (skipped) return { ok: false, reason: 'missing', name: skipped.name };
+        starts[next] = at;
+        last = next;
+    }
+    const lost = list.find((block, index) => index > last && block.required && block.head);
+    if (lost) return { ok: false, reason: 'missing', name: lost.name };
+    const firstTitle = starts.find(at => at !== -1) ?? lines.length;
+    const above = lines.slice(0, firstTitle).join('\n').trim();
+    if (above && list[0].head) return { ok: false, reason: 'stray', name: '' };
+    const texts = list.map((block, index) => {
+        if (index === 0 && !block.head) return above;
+        if (starts[index] === -1) return typeof current?.[index] === 'string' ? current[index] : (blocks[index]?.text ?? '');
+        const following = starts.slice(index + 1).find(at => at !== -1) ?? lines.length;
+        let body = lines.slice(starts[index] + 1, following);
+        if (block.close) {
+            // A removed closing line costs nothing: the next title still ends the block.
+            const end = body.map(line => line.trim()).lastIndexOf(block.close.trim());
+            if (end !== -1 && !body.slice(end + 1).some(line => line.trim())) body = body.slice(0, end);
+        }
+        return body.join('\n').trim();
+    });
+    return { ok: true, texts };
+}
+
 // Composition over any pick set, e.g. a version's own picks rather than the live ones.
 export function composePicked(persona, picks) {
     const parts = [];

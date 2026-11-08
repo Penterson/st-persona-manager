@@ -2392,3 +2392,8 @@
 .pm-manager-valuerow > .pm-manager-select {
     max-width: none;
 }
+
+/* Item select mode: the checkbox sits at the start of the item's row. */
+.pm-manager-itemcheck {
+    margin-left: 6px;
+}
