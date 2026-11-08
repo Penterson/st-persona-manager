@@ -2,11 +2,11 @@
 // handler (see buildPanel). Handlers look everything up when they run.
 import { MODULE_NAME, makeId, pruneEmpty, HEADING_FORMATS, TILE_SHAPES, ADOPT_MODES } from './store.js';
 import { getRoot, getState, readUsageBytes, refresh, autoAbsorbOutside } from './state.js';
-import { freshContext, getPrecisePath, avatarBlockReport } from './ctx.js';
+import { freshContext, saveSettings, getPrecisePath, avatarBlockReport } from './ctx.js';
 import { addLog, expireOldHistory, enforceGlobalBudget } from './history.js';
 import { resolveFolderKey, buildImgHtml, withoutBackups } from './assets.js';
-import { notify, askConfirm, scheduleAutoName, cancelAutoName } from './quickbar.js';
-import { el, track, runCleanups, blockDrawerClose, isComposingKey, selectOf } from './dom.js';
+import { notify, askConfirm, scheduleAutoName, cancelAutoName, requestManager } from './quickbar.js';
+import { el, track, runCleanups, blockDrawerClose, isComposingKey, selectOf, bandRow } from './dom.js';
 import { invalidateManagerCaches } from './manager.js';
 import { clampSetting, SETTING_RANGES, TILE_COLUMN_CHOICES, serializeRoot, parseImportedRoot } from './manager-pure.js';
 import { STRINGS } from './strings.js';
@@ -20,7 +20,7 @@ let mounted = false;
 let cleanups = [];
 
 function save() {
-    freshContext()?.saveSettingsDebounced?.();
+    saveSettings();
     // The panels redraw on pm:changed at once; ST's SETTINGS_UPDATED waits for its debounce.
     if (typeof document !== 'undefined') document.dispatchEvent(new CustomEvent('pm:changed'));
 }
@@ -267,9 +267,7 @@ function doClearLogs() {
 }
 
 function openManagerScreen() {
-    const detail = { tab: 'compose', handled: false };
-    document.dispatchEvent(new CustomEvent('pm:open-manager', { detail }));
-    if (!detail.handled) notify('error', STRINGS.settings.openManagerFailed);
+    if (!requestManager('compose')) notify('error', STRINGS.settings.openManagerFailed);
 }
 
 /* Export and import */
@@ -503,9 +501,7 @@ function buildPanel() {
     const readOnlyBanner = el('div', 'pm-manager-banner pm-manager-warn pm-settings-readonly pm-hidden');
     readOnlyBanner.append(el('div', 'pm-manager-banner-text', STRINGS.settings.readOnlyBanner));
     content.append(readOnlyBanner);
-    const band = el('div', 'pm-band');
-    band.append(el('span', 'pm-band-word', STRINGS.settings.bandWord));
-    content.append(band);
+    content.append(bandRow(STRINGS.settings.bandWord));
 
     const sections = STRINGS.settings.sections;
     // showQuickBar only hides the icon: disabling the extension is ST's job.

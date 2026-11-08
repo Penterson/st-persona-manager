@@ -35,7 +35,7 @@ export function headingLine(format, name, template) {
 }
 
 // The line that closes a block, for the own format only.
-export function closingLine(format, name, template) {
+function closingLine(format, name, template) {
     if (format !== 'own' || !validTemplate(template) || !template.close) return '';
     return fill(template.close, name);
 }
@@ -146,7 +146,7 @@ export function splitByComposition(persona, text) {
 }
 
 // The own-format closing line at the very end, stripped like the leading heading.
-export function stripTrailingLine(text, closing) {
+function stripTrailingLine(text, closing) {
     const source = String(text ?? '');
     if (!closing) return source;
     const trimmed = source.replace(/\s+$/, '');
@@ -156,7 +156,7 @@ export function stripTrailingLine(text, closing) {
     return rest.replace(/\s+$/, '');
 }
 
-export function stripLeadingHeading(text, heading) {
+function stripLeadingHeading(text, heading) {
     const source = String(text ?? '');
     if (!heading) return source;
     const trimmed = source.replace(/^\s+/, '');

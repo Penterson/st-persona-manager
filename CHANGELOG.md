@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.12: 코드 정리 3차 (2026-11-08)
+
+- 기능·화면·저장 데이터 변화 없음. 코드와 스타일시트만 정리.
+- 중복 코드(jscpd 기준) 21곳 → 14곳, 중복 토큰 약 41% 감소. JS 13,243줄 → 13,210줄, CSS 규칙 329개 → 327개.
+- 검증: 단위 테스트 114개와 스모크 테스트 통과. 모든 화면을 5가지 폭·테마(동작 줄이기, 고대비 포함)로 구동해 화면 구조, 저장 데이터, 알림, 네트워크 요청, 슬래시 명령, 모든 요소의 계산된 스타일(hover·active·focus-visible 포함)을 정리 전과 비교해 모두 일치.
+
+### 정리 내용
+
+1. **두 화면이 따로 갖던 같은 코드를 하나로**
+   - 외부 수정 가져오기의 본문 반영(`state.js` `applyAbsorb`): 자동 반영과 알림의 **가져오기**가 공용.
+   - 그림 적용 실패 알림(`quickbar.js` `notifyBoundImageFailure`), 관리자 열기 요청(`requestManager`, 3곳), 설명문 넣는 방식 선택 줄(`adoptModeRow`), 띠 제목(`dom.js` `bandRow`).
+   - 이력 상한 두 가지를 함께 적용하는 `capHistory`(`history.js`, 4곳), 설정 저장 `saveSettings`(`ctx.js`, 약 30곳), 기록 한 줄과 저장 `logFor`(`state.js`, 4곳).
+2. **흩어진 같은 반복문을 함수로**: 항목·선택지 찾기(`store.js` `findSection`, `findVariant`), 관리자 화면의 오류 알림과 다시 그리기(`fail`, 20곳), 편집 화면 아래 단추 줄(`editorFoot`, 4곳), 지운 항목의 편집기·이력 선택·임시 저장 정리(`forgetSection`), 새 페르소나 만들기 전 확인(`readyToMint`), 그림 요소(`lazyImg`), 목록 검색어(`listQuery`).
+3. **상태 초기화를 한 곳에서**: 관리자 화면을 열고 닫을 때의 초기화가 대상 페르소나 변경(`moveTarget`)과 같은 함수를 사용. 빠른 패널의 열기·해제도 `resetPanelState` 하나로.
+4. **스타일시트**: 내용이 같은 규칙 3쌍을 합침(`.pm-quickbar-name`·`.pm-quickbar-labelname`, `.pm-manager-editorscreen`·`.pm-full`, `.pm-manager-headingbox`·관리자 화면의 새 그룹 줄), 편집 칸과 고쳐 쓰기 칸의 같은 선언 공유.
+5. 다른 모듈이 쓰지 않는 export 4개를 모듈 안으로. 중복·낡은 주석 정리.
+
 ## 0.3.11: 관리 시작 옆에서 설명문 넣는 방식 선택 (2026-11-08)
 
 - **관리 시작 단추 바로 아래에 `설명문 넣는 방식` 선택 상자** (`quickbar.js`·`manager.js` `adoptModeRow`, `state.js` `setAdoptMode`): 빠른 패널과 관리자 화면 모두. 설정 서랍의 같은 설정을 바꾸므로 고른 방식이 다음 관리 시작에도 유지.

@@ -183,6 +183,11 @@ function scheduleAbsorb() {
     }, ABSORB_DELAY_MS);
 }
 
+function absorbIfDiverged() {
+    const s = getState();
+    if (s?.diverged && s.settings?.autoAbsorbOutside !== false) scheduleAbsorb();
+}
+
 function stopChatObserver() {
     chatObserver?.disconnect();
     chatObserver = null;
@@ -206,7 +211,7 @@ async function init() {
     // Again, now that the precise api can tell same-named personas apart.
     refresh();
     // Edited in SillyTavern while the extension was off.
-    if (getState()?.diverged && getState()?.settings?.autoAbsorbOutside !== false) scheduleAbsorb();
+    absorbIfDiverged();
     // Read before the fetch, whose listing is for this persona.
     const assetsAvatar = getState()?.avatar ?? null;
     await refreshAssets();
@@ -244,7 +249,7 @@ async function init() {
     };
     const onPersona = async origin => {
         refresh();
-        if (getState()?.diverged && getState()?.settings?.autoAbsorbOutside !== false) scheduleAbsorb();
+        absorbIfDiverged();
         if (origin !== 'settings') scheduleGreetingSync();
         const avatar = getState()?.avatar ?? null;
         if (avatar !== lastAvatar) {

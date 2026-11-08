@@ -87,6 +87,11 @@ export function expireOldHistory(root, settings, now = Date.now()) {
     return dropped;
 }
 
+// Both global caps, as every snapshot write applies them; answers how many entries went.
+export function capHistory(root, settings, now) {
+    return expireOldHistory(root, settings, now) + enforceGlobalBudget(root, settings, now);
+}
+
 export function enforceGlobalBudget(root, settings, now = Date.now()) {
     const limit = settings.historyMaxBytes ?? Infinity;
     // Measured once, then a running total: rescanning per evicted entry freezes the UI.

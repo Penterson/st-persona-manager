@@ -1,12 +1,12 @@
 // The quick switch bar: one icon in #leftSendForm and a panel on body.
 // DOM code only; the testable logic lives in quickbar-pure.js.
-import { MODULE_NAME, getPersona, findVersion, liveVariant, TILE_SHAPES, VIEW_MODES, makeId, ADOPT_MODES } from './store.js';
+import { MODULE_NAME, getPersona, findVersion, TILE_SHAPES, VIEW_MODES, makeId, ADOPT_MODES } from './store.js';
 import {
-    getState, saveAndCompose, adopt, setAdoptMode, getPreciseApi, getRoot, adoptFor, refresh, KEEP_DESCRIPTION_KINDS,
+    getState, saveAndCompose, adopt, setAdoptMode, getPreciseApi, getRoot, adoptFor, refresh, KEEP_DESCRIPTION_KINDS, applyAbsorb, logFor,
 } from './state.js';
-import { freshContext } from './ctx.js';
+import { freshContext, saveSettings } from './ctx.js';
 import { compose, planAbsorb } from './compose.js';
-import { addLog, snapshot, enforceGlobalBudget, expireOldHistory } from './history.js';
+import { addLog } from './history.js';
 import { toggleMember, SORT_KEYS, livingLabels } from './roster.js';
 import {
     pickPersonaCommand, quoteArg, describeSelection, waitFor, schedulerTurn, divergedActions,
@@ -279,7 +279,6 @@ function forgetSizing() {
 function sizeToViewport() {
     const panel = document.getElementById(PANEL_ID);
     if (!panel) return;
-    // vh does not shrink for the on-screen keyboard; the visual viewport does.
     const vv = globalThis.visualViewport;
     const height = vv?.height ?? globalThis.innerHeight ?? 0;
     if (!height) return;
@@ -304,21 +303,26 @@ function togglePanel() {
     else openPanel();
 }
 
-// Exported so closing the manager steps back to this panel.
-export function openPanel() {
-    if (document.getElementById(PANEL_ID)) return;
-    // A new panel element has none of the old one's inline geometry.
-    forgetSizing();
+// What one panel's life sets, cleared when the next opens and on teardown. A fold opened while
+// the data was unwritable belongs to that panel, not the stored choice; a new panel may repeat
+// the empty-section toast once.
+function resetPanelState() {
     bannerDismissed = false;
-    // A fold opened while the data was unwritable belongs to that panel, not the stored choice.
     versionFold.reset();
     namesFold.reset();
     editMode = false;
     selectMode = false;
     selectedAvatars = [];
     expandedAvatar = null;
-    // A new panel may repeat the empty-section toast once.
     lastMissing = null;
+}
+
+// Exported so closing the manager steps back to this panel.
+export function openPanel() {
+    if (document.getElementById(PANEL_ID)) return;
+    // A new panel element has none of the old one's inline geometry.
+    forgetSizing();
+    resetPanelState();
     // A hold left from the previous panel would swallow this one's first redraw.
     drawHold.held = false;
     panelAvatar = getState()?.avatar ?? null;
@@ -448,6 +452,14 @@ export function pagerRow({ page, pages }, ui, redraw) {
     return row;
 }
 
+// Asks manager.js to open a tab. The dispatch is synchronous, so a mounted manager has marked
+// it handled by the time this answers; the caller words the failure.
+export function requestManager(tab, search = false) {
+    const detail = { tab, search, handled: false };
+    document.dispatchEvent(new CustomEvent('pm:open-manager', { detail }));
+    return detail.handled;
+}
+
 // The manager asks when it opens: it returns to this panel only if it replaced it.
 export function isPanelOpen() {
     return typeof document !== 'undefined' && !!document.getElementById(PANEL_ID);
@@ -524,7 +536,7 @@ function commit(kind, detail, { outside, force } = {}) {
     if (persona) {
         addLog(persona, kind, detail, Date.now());
         // writeDescription already saved, so this line needs a save of its own.
-        freshContext()?.saveSettingsDebounced?.();
+        saveSettings();
     }
     if (result.keptOutside) notify('warning', STRINGS.common.outsideKept(result.keptOutside.section));
     // A kept description emits no PERSONA_UPDATED, so the icon hears it from here.
@@ -789,7 +801,7 @@ export async function runBoundImageWrite(avatarId, versionId, force, known) {
         if (result.backup && kept && !kept.avatarBackup) {
             kept.avatarBackup = result.backup;
             addLog(kept, 'image-apply', result.backup.label, Date.now());
-            freshContext()?.saveSettingsDebounced?.();
+            saveSettings();
         }
         return result;
     }
@@ -808,23 +820,25 @@ export async function runBoundImageWrite(avatarId, versionId, force, known) {
     persona.avatarWritten = writtenKey(label, crop);
     // Stamped when the write finished, so it sorts after edits made meanwhile.
     addLog(persona, 'image-apply', label, Date.now());
-    freshContext()?.saveSettingsDebounced?.();
+    saveSettings();
     scheduleDraw();
     return { ...result, backedUp: !!result.backup };
+}
+
+// A failed runBoundImageWrite, told to the user the same way from both screens.
+export function notifyBoundImageFailure(result) {
+    if (result.error === 'missing') notify('warning', STRINGS.manager.imageAssetMissing(result.detail));
+    else if (result.error === 'backup') notify('error', STRINGS.manager.imageBackupFailed(result.detail));
+    else if (result.error === 'decode') notify('error', STRINGS.manager.framingDecodeFailed(result.detail));
+    else notify('error', STRINGS.manager.imageApplyFailed(result.detail ?? result.error));
 }
 
 // The panel's half: this screen closes on apply, so only failures get a message.
 async function runBoundImageFromPanel(avatarId, versionId) {
     const result = await runBoundImageWrite(avatarId, versionId, false, null);
     if (!result || result.skipped) return;
-    if (result.ok) {
-        if (result.unrecorded) notify('warning', STRINGS.manager.imageAppliedUnrecorded);
-        return;
-    }
-    if (result.error === 'missing') { notify('warning', STRINGS.manager.imageAssetMissing(result.detail)); return; }
-    if (result.error === 'backup') { notify('error', STRINGS.manager.imageBackupFailed(result.detail)); return; }
-    if (result.error === 'decode') { notify('error', STRINGS.manager.framingDecodeFailed(result.detail)); return; }
-    notify('error', STRINGS.manager.imageApplyFailed(result.detail ?? result.error));
+    if (!result.ok) notifyBoundImageFailure(result);
+    else if (result.unrecorded) notify('warning', STRINGS.manager.imageAppliedUnrecorded);
 }
 
 function saveAsVersion() {
@@ -852,26 +866,11 @@ function absorbOutsideEdit() {
         notify(plan.reason === 'noItem' ? 'error' : 'warning', absorbRefusal(plan.reason));
         return;
     }
-    const now = Date.now();
-    const changed = [];
-    for (const write of plan.writes) {
-        const section = (s.persona.sections ?? []).find(sec => sec.id === write.sectionId);
-        const variant = section ? liveVariant(s.persona, section) : null;
-        if (!variant || (variant.text ?? '') === write.text) continue;
-        // Into history first, forced: inside the merge window a plain snapshot is skipped.
-        snapshot(s.persona, variant.id, variant.text ?? '', now, s.settings, { force: true });
-        variant.text = write.text;
-        variant.updatedAt = now;
-        changed.push(section.name ?? '');
-    }
-    // The per-variant cap does not bound the total in settings.json, and a snapshot is the
-    // only time it grows, so the global cap is enforced here.
-    expireOldHistory(s.root, s.settings, now);
-    enforceGlobalBudget(s.root, s.settings, now);
+    const changed = applyAbsorb(s.root, s.persona, plan, Date.now(), true);
     commit('diverge-absorb', changed.join(', '), { outside: 'discard' });
 }
 
-export function absorbRefusal(reason) {
+function absorbRefusal(reason) {
     if (reason === 'noTitles') return STRINGS.quick.absorbNoTitles;
     if (reason === 'noMatch') return STRINGS.quick.absorbNoMatch;
     return STRINGS.quick.absorbNoItem;
@@ -885,7 +884,7 @@ function setRosterSetting(key, value, fallback, firstPage) {
     if ((s.root.settings[key] ?? fallback) === value) return;
     s.root.settings[key] = value;
     if (firstPage) roster.page = 1;
-    freshContext()?.saveSettingsDebounced?.();
+    saveSettings();
     scheduleDraw();
 }
 
@@ -898,7 +897,7 @@ function toggleLabelMembership(labelId, avatarId) {
     const label = s.root.labels.find(entry => entry.id === labelId);
     const before = living(label);
     toggleMember(s.root.labels, labelId, avatarId);
-    freshContext()?.saveSettingsDebounced?.();
+    saveSettings();
     // The checkbox already shows the change; redraw only if the list or the chips can change.
     const filtering = (s.root.settings?.activeLabelId ?? null) !== null;
     if (filtering || (before === 0) !== (living(label) === 0)) scheduleDraw();
@@ -937,7 +936,7 @@ function createLabel(name, avatarId) {
     s.root.labels.push({ id, name: trimmed, members: [] });
     // Made in a row's editor, so it joins that persona at once.
     toggleMember(s.root.labels, id, avatarId);
-    freshContext()?.saveSettingsDebounced?.();
+    saveSettings();
     scheduleDraw();
 }
 
@@ -1061,7 +1060,7 @@ export async function applyPersonaName(avatar, name, { closeOnDone = true, toCha
     // Put it back: a map that disagrees with the chat is worse than no rename.
     const back = freshContext()?.powerUserSettings?.personas;
     if (back && back[avatar] === name) back[avatar] = previous;
-    freshContext()?.saveSettingsDebounced?.();
+    saveSettings();
     return { ok: false, reason: 'switch-failed', previous };
 }
 
@@ -1117,11 +1116,7 @@ async function runAutoName() {
     if (!result?.ok) return;
     if (gen !== autoNameGen) return;
     // Logged, since nobody asked for this rename.
-    const persona = getPersona(getRoot(), avatar);
-    if (persona) {
-        addLog(persona, 'name-auto', `${STRINGS.common.languageNames[lang] ?? lang}: ${name}`, Date.now());
-        freshContext()?.saveSettingsDebounced?.();
-    }
+    logFor(avatar, 'name-auto', `${STRINGS.common.languageNames[lang] ?? lang}: ${name}`);
     notify('info', STRINGS.quick.autoNameApplied(name));
 }
 
@@ -1136,13 +1131,21 @@ function adoptHere() {
     if (count > 1) notify('success', STRINGS.common.adoptSplit(count));
 }
 
-// Beside 관리 시작: how this start takes the description in (settings.adoptSplitMode).
-function adoptModeRow(s, writable) {
-    const row = el('div', 'pm-row pm-quickbar-adoptmode');
-    row.append(el('span', 'pm-quickbar-adoptlabel', STRINGS.common.adoptModeLabel));
+// 관리 시작 and, beside it, how that start takes the description in (settings.adoptSplitMode).
+function adoptRows(box, s, writable) {
+    box.append(rowOf(STRINGS.quick.adoptRow, writable ? () => { adoptHere(); scheduleDraw(); } : null));
+    box.append(adoptModeRow(s, writable, ['pm-row pm-quickbar-adoptmode', 'pm-quickbar-adoptlabel', 'pm-quickbar-sort'],
+        () => document.dispatchEvent(new CustomEvent('pm:changed'))));
+    return box;
+}
+
+// The adopt-mode label and select, in each screen's classes; onSet runs once a pick is stored.
+export function adoptModeRow(s, writable, [rowClass, labelClass, selectClass], onSet) {
+    const row = el('div', rowClass);
+    row.append(el('span', labelClass, STRINGS.common.adoptModeLabel));
     const current = ADOPT_MODES.includes(s?.settings?.adoptSplitMode) ? s.settings.adoptSplitMode : ADOPT_MODES[0];
-    const select = selectOf('pm-quickbar-sort', ADOPT_MODES.map(mode => [mode, STRINGS.settings.adoptModeNames[mode]]), current, mode => {
-        if (setAdoptMode(mode)) document.dispatchEvent(new CustomEvent('pm:changed'));
+    const select = selectOf(selectClass, ADOPT_MODES.map(mode => [mode, STRINGS.settings.adoptModeNames[mode]]), current, mode => {
+        if (setAdoptMode(mode)) onSet();
     });
     select.disabled = !writable;
     select.setAttribute('aria-label', STRINGS.common.adoptModeAria);
@@ -1302,11 +1305,7 @@ function versionGroup(s, writable) {
     const open = versionFold.isOpen(s);
     box.append(foldHead(STRINGS.quick.headVersion, open, () => versionFold.toggle()));
     if (!open) return box;
-    if (!s.persona) {
-        box.append(rowOf(STRINGS.quick.adoptRow, writable ? () => { adoptHere(); scheduleDraw(); } : null));
-        box.append(adoptModeRow(s, writable));
-        return box;
-    }
+    if (!s.persona) return adoptRows(box, s, writable);
     const versions = s.persona.versions ?? [];
     if (!versions.length) box.append(emptyBlock(STRINGS.quick.noVersions));
     versions.forEach((version, index) => {
@@ -1428,7 +1427,7 @@ function toggleAutoName() {
     const s = getState();
     if (!rosterWritable(s)) { notify('error', STRINGS.quick.namesNeedWritable); return; }
     s.root.settings.autoLocalName = !s.root.settings.autoLocalName;
-    freshContext()?.saveSettingsDebounced?.();
+    saveSettings();
     // On acts on the current chat right away; off cancels whatever was queued.
     if (s.root.settings.autoLocalName) scheduleAutoName();
     else cancelAutoName();
@@ -1470,11 +1469,7 @@ async function applyLocalNameNow(lang, name) {
         scheduleDraw();
         return;
     }
-    const persona = getPersona(getRoot(), startAvatar);
-    if (persona) {
-        addLog(persona, 'name-apply', `${STRINGS.common.languageNames[lang] ?? lang}: ${name}`, Date.now());
-        freshContext()?.saveSettingsDebounced?.();
-    }
+    logFor(startAvatar, 'name-apply', `${STRINGS.common.languageNames[lang] ?? lang}: ${name}`);
     notify('info', STRINGS.manager.localNameApplied(name));
     scheduleDraw();
 }
@@ -1484,11 +1479,7 @@ function namesGroup(s, writable) {
     const open = namesFold.isOpen(s);
     box.append(foldHead(STRINGS.quick.headNames, open, () => namesFold.toggle()));
     if (!open) return box;
-    if (!s.persona) {
-        box.append(rowOf(STRINGS.quick.adoptRow, writable ? () => { adoptHere(); scheduleDraw(); } : null));
-        box.append(adoptModeRow(s, writable));
-        return box;
-    }
+    if (!s.persona) return adoptRows(box, s, writable);
     const current = freshContext()?.powerUserSettings?.personas?.[s.avatar] ?? '';
     const names = s.persona.names ?? {};
     const listed = NAME_LANGUAGES
@@ -1497,9 +1488,7 @@ function namesGroup(s, writable) {
     if (!listed.length) {
         box.append(emptyBlock(STRINGS.quick.noLocalNames));
         box.append(rowOf(STRINGS.quick.localNamesElsewhere, () => {
-            const detail = { tab: 'compose', search: false, handled: false };
-            document.dispatchEvent(new CustomEvent('pm:open-manager', { detail }));
-            if (!detail.handled) notify('info', STRINGS.quick.managerMissing);
+            if (!requestManager('compose')) notify('info', STRINGS.quick.managerMissing);
         }));
         return box;
     }
@@ -1563,7 +1552,7 @@ function bulkWritableRoot() {
 }
 
 function bulkSave() {
-    freshContext()?.saveSettingsDebounced?.();
+    saveSettings();
     // refresh() first: pm:changed redraws from getState(), which could hold a deleted persona.
     refresh();
     if (typeof document !== 'undefined') document.dispatchEvent(new CustomEvent('pm:changed'));
@@ -1945,14 +1934,13 @@ function fillRosterList(container, prebuilt) {
     // Edit mode uses the list layout: the editor unfolds under a full-width row.
     if ((viewMode === 'tiles' || viewMode === 'tilesNamed') && !editMode) {
         const grid = el('div', 'pm-quickbar-tiles');
-        const columns = Number(s.root?.settings?.rosterTileColumns ?? 0);
-        if (columns >= 2) grid.style.gridTemplateColumns = `repeat(${columns}, minmax(0, 1fr))`;
+        if (cols >= 2) grid.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
         for (const entry of paged.slice) grid.append(personaTile(ctx, entry, s, viewMode === 'tilesNamed'));
         container.append(grid);
     } else {
         const mode = {
-            count: s.root?.settings?.rosterShowVersionCount === true,
-            names: s.root?.settings?.rosterShowVersionNames === true,
+            count: settings.rosterShowVersionCount === true,
+            names: settings.rosterShowVersionNames === true,
         };
         for (const entry of paged.slice) {
             // getPersona only reads, so drawing never adopts a persona.
@@ -2042,10 +2030,7 @@ function footer() {
     ];
     for (const [label, tab, search] of SHORTCUTS) {
         box.append(button('pm-quickbar-btn', label, () => {
-            // Dispatch is synchronous: an existing listener has marked it handled.
-            const detail = { tab, search, handled: false };
-            document.dispatchEvent(new CustomEvent('pm:open-manager', { detail }));
-            if (!detail.handled) notify('info', STRINGS.quick.managerMissing);
+            if (!requestManager(tab, search)) notify('info', STRINGS.quick.managerMissing);
         }));
     }
     return box;
@@ -2134,16 +2119,9 @@ export function unmountQuickbar() {
     runCleanups(cleanups);
     if (typeof document !== 'undefined') document.getElementById(BUTTON_ID)?.remove();
     mounted = false;
-    bannerDismissed = false;
-    editMode = false;
-    selectMode = false;
-    selectedAvatars = [];
-    expandedAvatar = null;
-    lastMissing = null;
     // No module state survives teardown; the popup is measured again on re-enable.
+    resetPanelState();
     probePromise = null;
-    versionFold.reset();
-    namesFold.reset();
     focusRosterSearch = false;
     popupNeedsDrop = false;
     thumbBumps.clear();

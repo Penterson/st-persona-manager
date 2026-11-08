@@ -199,7 +199,8 @@
     gap: 8px;
 }
 
-.pm-quickbar-name {
+.pm-quickbar-name,
+.pm-quickbar-labelname {
     flex: 1 1 auto;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -397,13 +398,6 @@
 /* The whole row is the hit target, so the row shows the press. */
 .pm-quickbar-labelrow:active {
     background: color-mix(in srgb, currentColor 10%, transparent);
-}
-
-.pm-quickbar-labelname {
-    flex: 1 1 auto;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
 }
 
 .pm-quickbar-newlabel {
@@ -787,8 +781,10 @@
     border-top: 1px solid color-mix(in srgb, currentColor 10%, transparent);
 }
 
-/* Opening a body hides the list and this fills the panel. */
-.pm-manager-editorscreen {
+/* Opening a body (or the full description, one body per box in prompt order) hides the list
+   and this fills the panel. */
+.pm-manager-editorscreen,
+.pm-full {
     padding: 6px 12px 0;
 }
 
@@ -815,16 +811,20 @@
     border-top: var(--pm-rule-strong);
 }
 
-.pm-manager-editor-text {
+.pm-manager-editor-text,
+.pm-revise-input {
     box-sizing: border-box;
     width: 100%;
-    min-height: 240px;
     resize: vertical;
     color: var(--SmartThemeBodyColor);
     padding: 8px;
     font: inherit;
     user-select: text;
     -webkit-user-select: text;
+}
+
+.pm-manager-editor-text {
+    min-height: 240px;
 }
 
 .pm-manager-picks {
@@ -1235,15 +1235,7 @@
 }
 
 .pm-revise-input {
-    box-sizing: border-box;
-    width: 100%;
     min-height: 96px;
-    resize: vertical;
-    color: var(--SmartThemeBodyColor);
-    padding: 8px;
-    font: inherit;
-    user-select: text;
-    -webkit-user-select: text;
 }
 
 /* The floating edit button: filled to read as on top, 44px on the box beside the selection
@@ -1514,7 +1506,8 @@
     color: var(--pm-muted-2);
 }
 
-.pm-manager-headingbox {
+.pm-manager-headingbox,
+.pm-manager-tabbody > .pm-quickbar-newlabel {
     padding: 4px 12px 0;
 }
 
@@ -1566,10 +1559,6 @@
 .pm-manager-tabbody > .pm-manager-actionswrap,
 .pm-manager-tabbody > div:not(.pm-manager-upload):not(.pm-manager-historydetail) > .pm-manager-actionswrap {
     padding: 6px 12px;
-}
-
-.pm-manager-tabbody > .pm-quickbar-newlabel {
-    padding: 4px 12px 0;
 }
 
 .pm-quickbar-tile-active .pm-quickbar-tilelabel {
@@ -2029,11 +2018,7 @@
     color: var(--pm-muted);
 }
 
-/* ── Full description: one body per box, in prompt order ──────────────────── */
-.pm-full {
-    padding: 6px 12px 0;
-}
-
+/* ── Full description ──────────────────────────────────────────────────────── */
 /* A heading that is really sent reads as text, not as a caption. */
 .pm-full-heading {
     text-transform: none;

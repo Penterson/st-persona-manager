@@ -240,6 +240,14 @@ export function findVersion(persona, versionId) {
     return Array.isArray(versions) ? versions.find(entry => entry?.id === versionId) ?? null : null;
 }
 
+export function findSection(persona, sectionId) {
+    return (persona?.sections ?? []).find(entry => entry?.id === sectionId);
+}
+
+export function findVariant(persona, sectionId, variantId) {
+    return (persona?.variants?.[sectionId] ?? []).find(entry => entry?.id === variantId);
+}
+
 // The choice an item currently uses (its live pick), or null.
 export function liveVariant(persona, section) {
     const pick = persona?.activePicks?.[section?.id];

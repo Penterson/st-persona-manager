@@ -277,6 +277,22 @@ export function emptyBlock(text) {
     return box;
 }
 
+// A lazily loaded decorative picture.
+export function lazyImg(className, src) {
+    const img = el('img', className);
+    img.src = src;
+    img.alt = '';
+    img.loading = 'lazy';
+    return img;
+}
+
+// The band under a screen's head: one word, set large.
+export function bandRow(word) {
+    const band = el('div', 'pm-band');
+    band.append(el('span', 'pm-band-word', word));
+    return band;
+}
+
 // pm-mass marks a filled ink block, which the inverted control colours are scoped to.
 // prefix: 'pm-quickbar' or 'pm-manager'.
 export function bannerOf(prefix, className, message) {

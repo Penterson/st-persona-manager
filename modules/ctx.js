@@ -7,6 +7,10 @@ export function freshContext() {
     return globalThis.SillyTavern?.getContext?.() ?? null;
 }
 
+export function saveSettings() {
+    freshContext()?.saveSettingsDebounced?.();
+}
+
 // A direct source is not held to the name check (a list entry may be renamed apart
 // from the chat name on purpose); it need only name a persona SillyTavern has.
 function namesAKnownPersona(candidate, personas) {

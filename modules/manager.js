@@ -8,18 +8,18 @@
 // Writes go to targetAvatar through saveAndComposeFor, which decides from its own live context
 // whether SillyTavern's prompt field is written, so a persona not being played can be edited.
 import {
-    MODULE_NAME, makeId, appendSection, getPersona, findVersion, liveVariant, ensurePersona, HEADING_FORMATS,
-    VIEW_MODES, pickInEveryVersion, ADOPT_MODES,
+    MODULE_NAME, makeId, appendSection, getPersona, findVersion, findSection, findVariant, liveVariant, ensurePersona,
+    HEADING_FORMATS, VIEW_MODES, pickInEveryVersion,
 } from './store.js';
 import {
-    getState, getRoot, adoptFor, saveAndComposeFor, refreshAssets, KEEP_DESCRIPTION_KINDS, setAdoptMode,
+    getState, getRoot, adoptFor, saveAndComposeFor, refreshAssets, KEEP_DESCRIPTION_KINDS, logFor,
 } from './state.js';
-import { freshContext } from './ctx.js';
+import { freshContext, saveSettings } from './ctx.js';
 import {
     compose, composePicked, composeFrom, hasDiverged, headingLine, validTemplate,
     readPlacement, writePlacement, splitFullText, fullTextSplittable,
 } from './compose.js';
-import { addLog, snapshot, enforceGlobalBudget, restore, diffWords, expireOldHistory } from './history.js';
+import { addLog, snapshot, capHistory, restore, diffWords } from './history.js';
 import { toggleMember, modifiedAt } from './roster.js';
 import { itemsWithText, planResplit, applyResplit, splitOwnSections, seedOwnSections, sameText } from './classify.js';
 import {
@@ -32,13 +32,13 @@ import {
 import {
     closePanel, openPanel, isPanelOpen, notify, askConfirm, askChoice, askText, askName,
     thumbnailUrl, markedText, pagerRow, applyShapeClass, listUi, searchRow, rankByQuery, filterChips,
-    applyPersonaName, personaImageChanged, runBoundImageWrite,
+    applyPersonaName, personaImageChanged, runBoundImageWrite, notifyBoundImageFailure, adoptModeRow,
     scheduleAutoName, cancelAutoName, releaseToasts,
 } from './quickbar.js';
 import {
     el, track, runCleanups, blockDrawerClose, makeRowActivatable, checkMark, emptyBlock, bannerOf as sharedBanner,
     frameTask, button, disable, imagePool, selectOf, checkRow, newGroupRow, showHost, openHost, closeHost,
-    trackViewport, typingHold, fieldSnapshot, restoreField, focusMarked,
+    trackViewport, typingHold, fieldSnapshot, restoreField, focusMarked, lazyImg, bandRow,
 } from './dom.js';
 import { rankOf, textContains, detectLanguage, pageOf } from './search-pure.js';
 import {
@@ -64,7 +64,6 @@ import { STRINGS } from './strings.js';
 const HOST_ID = 'pm-manager-host';
 const PANEL_ID = 'pm-manager-panel';
 
-// Stored tab ids; the visible names are STRINGS.manager.tabs, keyed by these.
 const TAB_KEYS = Object.freeze(['compose', 'versions', 'history', 'assets', 'labels']);
 
 const LOG_ROWS = 50;
@@ -150,6 +149,11 @@ const lists = {
     assets: listUi(),
     groups: listUi(),
 };
+// What a list's open search asks for, as typed; '' while its search row is closed.
+function listQuery(key) {
+    return lists[key].open ? lists[key].query : '';
+}
+
 // In place: search and pager handlers hold these objects.
 function resetLists() {
     for (const ui of Object.values(lists)) Object.assign(ui, listUi());
@@ -180,7 +184,6 @@ function forgetSizing() {
 function sizeToViewport() {
     const panel = document.getElementById(PANEL_ID);
     if (!panel) return;
-    // visualViewport, not vh: vh ignores the on-screen keyboard.
     const vv = globalThis.visualViewport;
     const height = vv?.height ?? globalThis.innerHeight ?? 0;
     if (!height) return;
@@ -209,23 +212,11 @@ function openManager(tab) {
     managerTab = wanted;
     // A new panel element carries none of the inline geometry the old one had.
     forgetSizing();
-    openVariant = null;
-    editorDirty = false;
     closeAsked = false;
     drawHold.held = false;
-    pickerOpen = false;
-    historyVariant = null;
-    historyIndex = null;
     historyMode = 'diff';
-    expandedRow = null;
-    lastMissing = null;
     pickerMode = 'target';
-    placementOpen = false;
-    namesOpen = false;
-    personaOpen = false;
-    resetFullText();
-    resetItemSelect();
-    targetAvatar = getState()?.avatar ?? null;
+    moveTarget(getState()?.avatar ?? null);
 
     // The grain sits on the panel, not the scrolling content, so it composites once.
     const panel = el('div', 'pm-panel pm-manager-panel pm-grain');
@@ -320,9 +311,9 @@ function closeManager(reopenPanel = true) {
     // Before the host goes, which may hold SillyTavern's toast container.
     releaseToasts();
     closeHost(HOST_ID);
-    targetAvatar = null;
-    openVariant = null;
-    editorDirty = false;
+    // Unlike drafts, which survive a close on purpose, revise steps and full-text copies go
+    // (requestClose has asked about them).
+    moveTarget(null);
     closeAsked = false;
     lastScreen = null;
     scrollByScreen.clear();
@@ -333,28 +324,14 @@ function closeManager(reopenPanel = true) {
     gestureHeld = false;
     drawWaitingOnGesture = false;
     drawHold.held = false;
-    pickerOpen = false;
-    historyVariant = null;
-    historyIndex = null;
-    expandedRow = null;
-    lastMissing = null;
     diffMemo = null;
     languageMemo.clear();
     clearDragState();
     assetState = { avatar: null, list: [], error: null, loading: false };
-    // Unlike drafts, which survive a close on purpose, revise steps and full-text copies go
-    // (requestClose has asked about them).
-    resetRevise();
-    resetFullText();
-    resetItemSelect();
     pickerMode = 'target';
     focusSearch = null;
     clearListFrames();
-    placementOpen = false;
-    namesOpen = false;
-    personaOpen = false;
     enumCache = null;
-    resetLists();
     // A stale frame would make the schedulers skip every later draw.
     drawTask.cancel();
     sizeTask.cancel();
@@ -411,6 +388,12 @@ async function afterAsking(ask, act) {
     if (after) return act(after, answer, startAvatar);
 }
 
+// An error the screen may now draw differently (a row gone, a refusal), so it redraws too.
+function fail(message) {
+    notify('error', message);
+    scheduleDraw();
+}
+
 // Whether a write must stop because the data is read-only or the active persona unknowable.
 function refusedWrite(s) {
     if (!s.readOnly && !s.ambiguous) return false;
@@ -428,6 +411,13 @@ function refusalMessage(avatar) {
     if (!avatar || !Object.hasOwn(personas, avatar)) return STRINGS.manager.refusalUnknownPersona;
     if (!getPersona(root, avatar)) return STRINGS.manager.notAdopted;
     return STRINGS.common.cannotSaveNow;
+}
+
+// The context an asset request needs, or a throw its caller reports.
+function needContext() {
+    const ctx = freshContext();
+    if (!ctx) throw new Error(STRINGS.manager.noContext);
+    return ctx;
 }
 
 // A hand-edited settings.json may lack a container, and a throw would take the screen down.
@@ -456,7 +446,7 @@ function commit(kind, detail, expectedAvatar, { write } = {}) {
     if (persona) {
         if (kind) addLog(persona, kind, detail, Date.now());
         // writeDescription already saved, so this line needs a save of its own.
-        freshContext()?.saveSettingsDebounced?.();
+        saveSettings();
     }
     if (result.keptOutside) notify('warning', STRINGS.common.outsideKept(result.keptOutside.section));
     // Only the stored copy was written; the prompt keeps the old text until reselected.
@@ -486,8 +476,8 @@ function addSection() {
 
 function renameSection(sectionId, current) {
     return afterAsking(() => askName(STRINGS.manager.itemName, current), (after, name, startAvatar) => {
-        const section = (after.persona.sections ?? []).find(entry => entry.id === sectionId);
-        if (!section) { notify('error', STRINGS.manager.itemGone); scheduleDraw(); return; }
+        const section = findSection(after.persona, sectionId);
+        if (!section) { fail(STRINGS.manager.itemGone); return; }
         section.name = name;
         commit('section-rename', name, startAvatar);
     });
@@ -496,7 +486,7 @@ function renameSection(sectionId, current) {
 function shiftSection(sectionId, delta) {
     const s = guardTarget();
     if (!s) return;
-    const name = (s.persona.sections ?? []).find(entry => entry.id === sectionId)?.name ?? '';
+    const name = findSection(s.persona, sectionId)?.name ?? '';
     if (!moveSection(s.persona, sectionId, delta)) return;
     commit('section-move', name, s.avatar);
 }
@@ -508,13 +498,17 @@ function dropSection(sectionId, name) {
         return askConfirm(STRINGS.manager.confirmDropItem(name));
     }, (after, _, startAvatar) => {
         const gone = removeSection(after.persona, sectionId, Date.now());
-        if (!gone) { notify('error', STRINGS.manager.lastItemKept); scheduleDraw(); return; }
-        if (openVariant?.sectionId === sectionId) { openVariant = null; editorDirty = false; }
-        if (gone.variantIds.includes(historyVariant)) { historyVariant = null; historyIndex = null; }
-        // Drafts of removed bodies would be unreachable text until teardown.
-        for (const variantId of gone.variantIds) takeDraft(startAvatar, sectionId, variantId);
+        if (!gone) { fail(STRINGS.manager.lastItemKept); return; }
+        forgetSection(startAvatar, sectionId, gone.variantIds);
         commit(null, gone.name, startAvatar);
     });
+}
+
+// A removed item's editor, history selection and drafts (unreachable text until teardown).
+function forgetSection(avatar, sectionId, variantIds) {
+    if (openVariant?.sectionId === sectionId) { openVariant = null; editorDirty = false; }
+    if (variantIds.includes(historyVariant)) { historyVariant = null; historyIndex = null; }
+    for (const variantId of variantIds) takeDraft(avatar, sectionId, variantId);
 }
 
 function resetItemSelect() {
@@ -531,12 +525,7 @@ function dropSelectedSections() {
     }, (after, _, startAvatar) => {
         const { gone } = removeSections(ensureShape(after.persona), [...selectedItems], freshContext()?.uuidv4, Date.now());
         if (!gone.length) { notify('info', STRINGS.manager.itemDropNothing); scheduleDraw(); return; }
-        for (const item of gone) {
-            if (openVariant?.sectionId === item.id) { openVariant = null; editorDirty = false; }
-            if (item.variantIds.includes(historyVariant)) { historyVariant = null; historyIndex = null; }
-            // Drafts of removed bodies would be unreachable text until teardown.
-            for (const variantId of item.variantIds) takeDraft(startAvatar, item.id, variantId);
-        }
+        for (const item of gone) forgetSection(startAvatar, item.id, item.variantIds);
         resetItemSelect();
         if (commit(null, gone.map(item => item.name).join(', '), startAvatar)) notify('info', STRINGS.manager.itemsDropped(gone.length));
     });
@@ -556,7 +545,7 @@ function itemSelectButton() {
 // Above the list in select mode: select all or none, and delete the checked items.
 function itemSelectActions(persona, writable, reason) {
     // While searching, select all means the items on screen.
-    const query = lists.compose.open ? lists.compose.query.trim() : '';
+    const query = listQuery('compose').trim();
     const ids = (persona.sections ?? []).filter(section => !query || sectionMatchesQuery(persona, section, query)).map(section => section.id);
     const allPicked = ids.length > 0 && ids.every(id => selectedItems.has(id));
     // Deletion takes every checked item, hidden by the search or not.
@@ -580,15 +569,15 @@ function pickVariant(sectionId, variantId) {
     // detached select; it is dropped silently.
     if (!pickApplicable(s.persona, sectionId, variantId)) return;
     s.persona.activePicks = { ...(s.persona.activePicks ?? {}), [sectionId]: variantId };
-    const section = (s.persona.sections ?? []).find(entry => entry?.id === sectionId);
-    const variant = (s.persona.variants?.[sectionId] ?? []).find(entry => entry?.id === variantId);
+    const section = findSection(s.persona, sectionId);
+    const variant = findVariant(s.persona, sectionId, variantId);
     commit('pick', `${section?.name ?? ''}: ${variant?.label ?? ''}`, s.avatar);
 }
 
 function addVariant(sectionId) {
     return afterAsking(() => askName(STRINGS.manager.newChoiceName, ''), (after, label, startAvatar) => {
         const persona = ensureShape(after.persona);
-        if (!Array.isArray(persona.variants[sectionId])) { notify('error', STRINGS.manager.itemGone); scheduleDraw(); return; }
+        if (!Array.isArray(persona.variants[sectionId])) { fail(STRINGS.manager.itemGone); return; }
         persona.variants[sectionId].push({ id: makeId(freshContext()?.uuidv4), label, text: '', updatedAt: Date.now() });
         commit('variant-add', label, startAvatar);
     });
@@ -596,8 +585,8 @@ function addVariant(sectionId) {
 
 function renameVariant(sectionId, variantId, current) {
     return afterAsking(() => askName(STRINGS.manager.choiceName, current), (after, label, startAvatar) => {
-        const variant = (after.persona.variants?.[sectionId] ?? []).find(entry => entry.id === variantId);
-        if (!variant) { notify('error', STRINGS.manager.choiceGone); scheduleDraw(); return; }
+        const variant = findVariant(after.persona, sectionId, variantId);
+        if (!variant) { fail(STRINGS.manager.choiceGone); return; }
         variant.label = label;
         commit('variant-rename', label, startAvatar);
     });
@@ -626,7 +615,7 @@ function dropVariant(sectionId, variantId, label) {
         return askConfirm(STRINGS.manager.confirmDropChoice(label));
     }, (after, _, startAvatar) => {
         const result = deleteVariant(after.persona, sectionId, variantId, Date.now());
-        if (!result) { notify('error', STRINGS.manager.choiceUndeletable); scheduleDraw(); return; }
+        if (!result) { fail(STRINGS.manager.choiceUndeletable); return; }
         if (openVariant?.variantId === variantId) { openVariant = null; editorDirty = false; }
         takeDraft(startAvatar, sectionId, variantId);
         if (historyVariant === variantId) { historyVariant = null; historyIndex = null; }
@@ -647,7 +636,7 @@ function snapshotKeepingIndex(persona, variantId, previous, now, settings, optio
 
 // Applies the history caps after snapshots are written; any trim clears historyIndex.
 function trimHistory(root, settings, now) {
-    if (expireOldHistory(root, settings, now) + enforceGlobalBudget(root, settings, now)) historyIndex = null;
+    if (capHistory(root, settings, now)) historyIndex = null;
 }
 
 // The one path that writes a variant body; the old text goes into history first.
@@ -655,7 +644,7 @@ function saveVariantText(sectionId, variantId, text) {
     const s = guardTarget();
     if (!s) return;
     const startAvatar = targetAvatar;
-    const variant = (s.persona.variants?.[sectionId] ?? []).find(entry => entry.id === variantId);
+    const variant = findVariant(s.persona, sectionId, variantId);
     if (!variant) { notify('error', STRINGS.manager.choiceGone); editorDirty = false; scheduleDraw(); return; }
     const previous = variant.text ?? '';
     if (previous === text) {
@@ -716,7 +705,7 @@ function saveAsVersion() {
 function renameVersion(versionId, current) {
     return afterAsking(() => askName(STRINGS.manager.versionName, current), (after, name, startAvatar) => {
         const version = renameVersionIn(after.persona, versionId, name, Date.now());
-        if (!version) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
+        if (!version) { fail(STRINGS.manager.versionGone); return; }
         commit('version-rename', version.name, startAvatar);
     });
 }
@@ -728,7 +717,7 @@ function duplicateVersion(versionId) {
     const persona = ensureShape(s.persona);
     const uuid = freshContext()?.uuidv4;
     const copy = duplicateVersionIn(persona, versionId, uuid, Date.now());
-    if (!copy) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
+    if (!copy) { fail(STRINGS.manager.versionGone); return; }
     commit('version-duplicate', copy.name, s.avatar);
 }
 
@@ -751,7 +740,7 @@ function shiftVersion(versionId, delta) {
 function overwriteVersion(versionId, name) {
     return afterAsking(() => askConfirm(STRINGS.manager.confirmOverwriteVersion(name)), (after, _, startAvatar) => {
         const version = overwriteVersionPicks(after.persona, versionId, Date.now());
-        if (!version) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
+        if (!version) { fail(STRINGS.manager.versionGone); return; }
         commit('version-overwrite', version.name ?? '', startAvatar);
     });
 }
@@ -763,7 +752,7 @@ function setVersionPick(versionId, sectionId, variantId) {
     // The same stray-event check pickVariant makes, for the same reason.
     if (!pickApplicable(s.persona, sectionId, variantId)) return;
     const version = findVersion(s.persona, versionId);
-    if (!version) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
+    if (!version) { fail(STRINGS.manager.versionGone); return; }
     version.picks = { ...(version.picks ?? {}), [sectionId]: variantId };
     version.updatedAt = Date.now();
     commit('version-repick', version.name ?? '', s.avatar);
@@ -771,7 +760,7 @@ function setVersionPick(versionId, sectionId, variantId) {
 
 function dropVersion(versionId, name) {
     return afterAsking(() => askConfirm(STRINGS.manager.confirmDropVersion(name)), (after, _, startAvatar) => {
-        if (!dropVersionFrom(after.persona, versionId)) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
+        if (!dropVersionFrom(after.persona, versionId)) { fail(STRINGS.manager.versionGone); return; }
         commit('version-delete', name, startAvatar);
     });
 }
@@ -794,12 +783,11 @@ function restoreSnapshot(variantId, index) {
         }
         // Restoring snapshots the current text, so the caps apply; the selection clears either
         // way, as its snapshot is now the live text.
-        expireOldHistory(after.root, after.settings, now);
-        enforceGlobalBudget(after.root, after.settings, now);
+        capHistory(after.root, after.settings, now);
         historyIndex = null;
         if (openVariant?.variantId === variantId) { openVariant = null; editorDirty = false; }
         // A draft would be restored over the restored text.
-        const found = findVariant(after.persona, variantId);
+        const found = locateVariant(after.persona, variantId);
         if (found) takeDraft(startAvatar, found.section.id, variantId);
         commit(null, '', startAvatar);
     });
@@ -814,9 +802,7 @@ async function loadAssets(avatar) {
     // resolveFolderKey stores nothing, so listing works for a persona not yet adopted.
     const key = resolveFolderKey(root, avatar);
     try {
-        const ctx = freshContext();
-        if (!ctx) throw new Error(STRINGS.manager.noContext);
-        const list = await listAssets(ctx, key);
+        const list = await listAssets(needContext(), key);
         // The screen may have moved to another persona meanwhile.
         if (assetState.avatar !== avatar) return;
         assetState = { avatar, list, error: null, loading: false };
@@ -834,15 +820,13 @@ async function uploadAssets(files) {
     if (s.readOnly || s.ambiguous) { notify('error', refusalMessage(targetAvatar)); return; }
     const startAvatar = targetAvatar;
     // Claimed once for the whole batch; guardTarget proved the entry exists.
-    const key = claimFolderKey(s.root, startAvatar, () => freshContext()?.saveSettingsDebounced?.());
+    const key = claimFolderKey(s.root, startAvatar, saveSettings);
     let ok = 0;
     // Shared by this selection's files (see uploadAsset).
     const batch = {};
     for (const file of files) {
         try {
-            const ctx = freshContext();
-            if (!ctx) throw new Error(STRINGS.manager.noContext);
-            await uploadAsset(ctx, key, file, batch);
+            await uploadAsset(needContext(), key, file, batch);
             ok++;
         } catch (e) {
             // One toast per file: each failed for its own reason.
@@ -850,11 +834,7 @@ async function uploadAssets(files) {
         }
     }
     if (ok) {
-        const after = getPersona(getRoot(), startAvatar);
-        if (after) {
-            addLog(after, 'asset-upload', STRINGS.manager.assetUploadedLog(ok), Date.now());
-            freshContext()?.saveSettingsDebounced?.();
-        }
+        logFor(startAvatar, 'asset-upload', STRINGS.manager.assetUploadedLog(ok));
         notify('success', STRINGS.manager.assetUploaded(ok));
     }
     await refreshAssetViews(startAvatar);
@@ -877,9 +857,7 @@ async function dropAsset(label) {
     if (!root) { notify('error', refusalMessage(startAvatar)); return; }
     const key = resolveFolderKey(root, startAvatar);
     try {
-        const ctx = freshContext();
-        if (!ctx) throw new Error(STRINGS.manager.noContext);
-        await deleteAsset(ctx, key, label);
+        await deleteAsset(needContext(), key, label);
         // A backup record naming a deleted file would keep every later overwrite from backing up.
         const persona = getPersona(root, startAvatar);
         if (persona?.avatarBackup?.label === label) persona.avatarBackup = null;
@@ -894,11 +872,7 @@ async function dropAsset(label) {
         notify('error', STRINGS.manager.assetDeleteFailed(String(e?.message ?? e)));
         return;
     }
-    const persona = getPersona(getRoot(), startAvatar);
-    if (persona) {
-        addLog(persona, 'asset-delete', label, Date.now());
-        freshContext()?.saveSettingsDebounced?.();
-    }
+    logFor(startAvatar, 'asset-delete', label);
     await refreshAssetViews(startAvatar);
 }
 
@@ -917,7 +891,7 @@ function toggleVersionAsset(versionId, filename) {
     const s = guardTarget();
     if (!s) return;
     const version = findVersion(s.persona, versionId);
-    if (!version) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
+    if (!version) { fail(STRINGS.manager.versionGone); return; }
     toggleAssetSelection(version, filename, assetLabels());
     version.updatedAt = Date.now();
     commit('asset-select', version.name ?? '', s.avatar);
@@ -947,8 +921,8 @@ async function editLabel(labelId, current) {
     if (!name || !name.trim()) return;
     const after = getState();
     if (!rosterWritable(after)) return refuseRoster();
-    if (!renameLabel(after.root?.labels, labelId, name)) { notify('error', STRINGS.manager.groupGone); scheduleDraw(); return; }
-    freshContext()?.saveSettingsDebounced?.();
+    if (!renameLabel(after.root?.labels, labelId, name)) { fail(STRINGS.manager.groupGone); return; }
+    saveSettings();
     scheduleDraw();
 }
 
@@ -957,8 +931,8 @@ async function dropLabel(labelId, name) {
     if (!(await askConfirm(STRINGS.manager.confirmDropGroup(name)))) return;
     const after = getState();
     if (!rosterWritable(after)) return refuseRoster();
-    if (!deleteLabel(after.root?.labels, labelId)) { notify('error', STRINGS.manager.groupGone); scheduleDraw(); return; }
-    freshContext()?.saveSettingsDebounced?.();
+    if (!deleteLabel(after.root?.labels, labelId)) { fail(STRINGS.manager.groupGone); return; }
+    saveSettings();
     scheduleDraw();
 }
 
@@ -971,7 +945,7 @@ function addLabel(name) {
     const uuid = freshContext()?.uuidv4;
     if (!Array.isArray(s.root.labels)) s.root.labels = [];
     s.root.labels.push({ id: makeId(uuid), name: trimmed, members: [] });
-    freshContext()?.saveSettingsDebounced?.();
+    saveSettings();
     scheduleDraw();
     return true;
 }
@@ -981,15 +955,15 @@ function toggleLabelMembership(labelId, avatarId) {
     if (!rosterWritable(s)) return refuseRoster();
     if (!Array.isArray(s.root.labels)) s.root.labels = [];
     toggleMember(s.root.labels, labelId, avatarId);
-    freshContext()?.saveSettingsDebounced?.();
+    saveSettings();
     // The group's own row carries its count and the attach/detach button.
     if (!redrawRows([rowKey('group', labelId)])) scheduleDraw();
 }
 
 /* Target selection */
 
-// The screen state that belongs to one persona, reset for another: working copies, folds,
-// search and selections.
+// The screen state that belongs to one persona, reset for another and on open and close:
+// working copies, folds, search and selections.
 function moveTarget(avatar) {
     resetFullText();
     resetItemSelect();
@@ -1048,8 +1022,7 @@ function stashDraft() {
     const text = readEditorText();
     if (text === null) return;
     // Typed and taken back: nothing to keep.
-    const stored = getPersona(getRoot(), targetAvatar)?.variants?.[openVariant.sectionId]
-        ?.find(variant => variant?.id === openVariant.variantId)?.text ?? '';
+    const stored = findVariant(getPersona(getRoot(), targetAvatar), openVariant.sectionId, openVariant.variantId)?.text ?? '';
     if (text === stored) { takeDraft(targetAvatar, openVariant.sectionId, openVariant.variantId); return; }
     putDraft(targetAvatar, openVariant.sectionId, openVariant.variantId, text);
 }
@@ -1080,11 +1053,16 @@ function actionsRow(buttons) {
     return wrap;
 }
 
+// The sticky button row under an editing screen (sticky within .pm-scroll).
+function editorFoot(buttons) {
+    const foot = el('div', 'pm-manager-editorfoot');
+    foot.append(actionsRow(buttons));
+    return foot;
+}
+
 function noteOf(text) {
     return el('div', 'pm-manager-note', text);
 }
-
-function emptyOf(text) { return emptyBlock(text); }
 
 // Why writes are blocked, in the write path's own wording; empty when nothing blocks.
 function writeReason(s) {
@@ -1245,9 +1223,9 @@ function pendingDraft(sectionId, variant) {
 // The body the editor is open on, or null if it was deleted meanwhile.
 function openBody(persona) {
     if (!openVariant) return null;
-    const section = (persona?.sections ?? []).find(entry => entry.id === openVariant.sectionId);
+    const section = findSection(persona, openVariant.sectionId);
     if (!section) return null;
-    const variant = (persona?.variants?.[section.id] ?? []).find(entry => entry.id === openVariant.variantId);
+    const variant = findVariant(persona, section.id, openVariant.variantId);
     return variant ? { section, variant } : null;
 }
 
@@ -1298,10 +1276,7 @@ function variantEditor(section, variant, writable, reason) {
         editorDirty = false;
         scheduleDraw();
     }, true, STRINGS.manager.editorCloseTitle));
-    // Sticky within .pm-scroll, which this screen is drawn inside.
-    const foot = el('div', 'pm-manager-editorfoot');
-    foot.append(actionsRow(buttons));
-    box.append(foot);
+    box.append(editorFoot(buttons));
     return box;
 }
 
@@ -1317,7 +1292,7 @@ function variantRow(persona, section, variant, writable, reason) {
     };
     const parts = [
         checkMark(persona.activePicks?.[section.id] === variant.id),
-        markedText('pm-manager-name', variant.label ?? '', lists.compose.open ? lists.compose.query : ''),
+        markedText('pm-manager-name', variant.label ?? '', listQuery('compose')),
     ];
     if (pendingDraft(section.id, variant) !== null) {
         parts.push(el('span', 'pm-manager-count', STRINGS.manager.pendingDraft));
@@ -1374,7 +1349,7 @@ function sectionBlock(persona, section, index, writable, reason) {
         head.append(check);
     }
     const headParts = [
-        markedText('pm-manager-name', section.name ?? '', lists.compose.open ? lists.compose.query : ''),
+        markedText('pm-manager-name', section.name ?? '', listQuery('compose')),
         el('span', 'pm-manager-count', STRINGS.manager.choiceCount(variants.length)),
     ];
     // A closed item hides its choices, so their unsaved-typing mark moves up to it.
@@ -1494,7 +1469,7 @@ function versionLanguage(persona, version, stamp) {
 function addTagTo(kindLabel, getOwner) {
     return afterAsking(() => askName(STRINGS.manager.tagAddPrompt, ''), (after, tag, startAvatar) => {
         const owner = getOwner(ensureShape(after.persona));
-        if (!owner) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
+        if (!owner) { fail(STRINGS.manager.versionGone); return; }
         const stored = addTag(owner, tag);
         if (!stored) { notify('info', STRINGS.manager.tagDuplicate); return; }
         commit('tag-add', kindLabel ? `${kindLabel}: ${stored}` : stored, startAvatar);
@@ -1504,7 +1479,7 @@ function addTagTo(kindLabel, getOwner) {
 function removeTagFrom(kindLabel, tag, getOwner) {
     return afterAsking(() => askConfirm(STRINGS.manager.confirmDropTag(tag)), (after, _, startAvatar) => {
         const owner = getOwner(ensureShape(after.persona));
-        if (!owner) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
+        if (!owner) { fail(STRINGS.manager.versionGone); return; }
         if (!removeTag(owner, tag)) { notify('info', STRINGS.manager.tagGone); scheduleDraw(); return; }
         commit('tag-remove', kindLabel ? `${kindLabel}: ${tag}` : tag, startAvatar);
     });
@@ -1550,12 +1525,12 @@ function fillComposeList(container, s, writable, reason) {
     }
     if (expandedRow !== null && !live.has(expandedRow)) expandedRow = null;
 
-    if (!(persona.sections ?? []).length) { container.append(emptyOf(STRINGS.manager.noItems)); return; }
+    if (!(persona.sections ?? []).length) { container.append(emptyBlock(STRINGS.manager.noItems)); return; }
 
-    const query = lists.compose.open ? lists.compose.query.trim() : '';
+    const query = listQuery('compose').trim();
     let sections = persona.sections ?? [];
     if (query) sections = sections.filter(section => sectionMatchesQuery(persona, section, query));
-    if (!sections.length) { container.append(emptyOf(STRINGS.common.searchNoHits)); return; }
+    if (!sections.length) { container.append(emptyBlock(STRINGS.common.searchNoHits)); return; }
     for (const section of sections) {
         // Index in the full list, which the move arrows reorder.
         container.append(sectionBlock(persona, section, persona.sections.indexOf(section), writable, reason));
@@ -1643,7 +1618,7 @@ function doOwnSplit() {
     }, (after, _, startAvatar) => {
         if (hasUnsavedBody(startAvatar, after.persona)) { notify('warning', STRINGS.manager.resplitDraft); return; }
         const again = ownSplitSource(after.persona);
-        if (!again || again.variant.text !== body) { notify('error', STRINGS.manager.ownSplitNotOnly); scheduleDraw(); return; }
+        if (!again || again.variant.text !== body) { fail(STRINGS.manager.ownSplitNotOnly); return; }
         const persona = ensureShape(after.persona);
         const now = Date.now();
         const oldVariantId = again.variant.id;
@@ -1843,7 +1818,7 @@ function saveFullText() {
     if (!plan.writes.length) { reopenRaw(); notify('info', STRINGS.manager.nothingChanged); return; }
     const now = Date.now();
     for (const write of plan.writes) {
-        const variant = (s.persona.variants?.[write.sectionId] ?? []).find(entry => entry.id === write.variantId);
+        const variant = findVariant(s.persona, write.sectionId, write.variantId);
         if (!variant) continue;
         snapshotKeepingIndex(s.persona, write.variantId, write.before, now, s.settings);
         variant.text = write.after;
@@ -1929,6 +1904,11 @@ function undoFullClear() {
     scheduleDraw();
 }
 
+// A text box tall enough for its text (a line per 44 characters), within min and max.
+function rowsFor(text, min, max) {
+    return Math.min(max, Math.max(min, text.split('\n').length + Math.floor(text.length / 44)));
+}
+
 // Each body under the heading it is printed with, or a caption naming the item and choice.
 function fullTextScreen(s, writable, reason) {
     const wrap = el('div', 'pm-full');
@@ -1959,6 +1939,12 @@ function fullTextScreen(s, writable, reason) {
     toggles.append(actionButton(STRINGS.manager.fullClear, () => clearFullText(), writable, STRINGS.manager.fullClearTitle, reason));
     const undoButton = () => actionButton(STRINGS.manager.fullClearUndo(fullUndo.length), () => undoFullClear(), writable, '', reason);
     if (fullUndo.length) toggles.append(undoButton());
+    // Save, the undo again (the top one can be a screen away), and back.
+    const fullFoot = () => editorFoot([
+        actionButton(STRINGS.manager.fullTextSave, () => saveFullText(), writable, '', reason),
+        ...(fullUndo.length ? [undoButton()] : []),
+        actionButton(STRINGS.manager.editorBackToList, () => leaveFullText(), true),
+    ]);
     wrap.append(toggles);
     const format = persona.headingFormat;
     if (fullView === 'raw' && fullRaw) {
@@ -1966,18 +1952,12 @@ function fullTextScreen(s, writable, reason) {
         wrap.append(noteOf(STRINGS.manager.fullViewRawGuide));
         const area = el('textarea', 'pm-full-text pm-full-raw-text');
         area.value = fullRaw.text;
-        area.rows = Math.min(30, Math.max(8, fullRaw.text.split('\n').length + Math.floor(fullRaw.text.length / 44)));
+        area.rows = rowsFor(fullRaw.text, 8, 30);
         area.disabled = !writable;
         area.setAttribute('aria-label', STRINGS.manager.fullRawAria);
         area.addEventListener('input', () => scheduleSizeUpdate());
         wrap.append(area);
-        const foot = el('div', 'pm-manager-editorfoot');
-        foot.append(actionsRow([
-            actionButton(STRINGS.manager.fullTextSave, () => saveFullText(), writable, '', reason),
-            ...(fullUndo.length ? [undoButton()] : []),
-            actionButton(STRINGS.manager.editorBackToList, () => leaveFullText(), true),
-        ]));
-        wrap.append(foot);
+        wrap.append(fullFoot());
         return wrap;
     }
     if (fullView === 'raw') {
@@ -1986,20 +1966,18 @@ function fullTextScreen(s, writable, reason) {
         const { box, inner } = textBox('pm-full-raw');
         inner.textContent = composeFrom(persona, blocks, fullTexts) || STRINGS.manager.previewEmpty;
         wrap.append(box);
-        const foot = el('div', 'pm-manager-editorfoot');
-        foot.append(actionsRow([
+        wrap.append(editorFoot([
             actionButton(STRINGS.manager.fullTextSave, () => saveFullText(), writable && fullDirtyCount() > 0, '',
                 fullDirtyCount() > 0 ? reason : STRINGS.manager.nothingChanged),
             actionButton(STRINGS.manager.editorBackToList, () => leaveFullText(), true),
         ]));
-        wrap.append(foot);
         return wrap;
     }
     if (headingLine(format, 'x', persona.headingTemplate)) wrap.append(noteOf(STRINGS.manager.fullTextHeadingNote));
     const untitled = new Set((persona.sections ?? []).filter(section => section?.untitled).map(section => section.id));
     blocks.forEach((block, index) => {
         const head = untitled.has(block.sectionId) ? '' : headingLine(format, block.sectionName, persona.headingTemplate);
-        const variant = (persona.variants?.[block.sectionId] ?? []).find(entry => entry.id === block.variantId);
+        const variant = findVariant(persona, block.sectionId, block.variantId);
         const caption = head || STRINGS.manager.editorHeading(block.sectionName, variant?.label ?? '');
         const itemHead = el('div', 'pm-full-itemhead');
         itemHead.append(el('div', `pm-revise-caption${head ? ' pm-full-heading' : ''}`, caption));
@@ -2011,19 +1989,13 @@ function fullTextScreen(s, writable, reason) {
         area.dataset.pmBlock = String(index);
         const value = fullTexts?.[index] ?? block.text;
         area.value = value;
-        area.rows = Math.min(20, Math.max(4, value.split('\n').length + Math.floor(value.length / 44)));
+        area.rows = rowsFor(value, 4, 20);
         area.disabled = !writable;
         area.setAttribute('aria-label', STRINGS.manager.fullTextAria(block.sectionName));
         area.addEventListener('input', () => scheduleSizeUpdate());
         wrap.append(area);
     });
-    const foot = el('div', 'pm-manager-editorfoot');
-    foot.append(actionsRow([
-        actionButton(STRINGS.manager.fullTextSave, () => saveFullText(), writable, '', reason),
-        ...(fullUndo.length ? [undoButton()] : []),
-        actionButton(STRINGS.manager.editorBackToList, () => leaveFullText(), true),
-    ]));
-    wrap.append(foot);
+    wrap.append(fullFoot());
     return wrap;
 }
 
@@ -2247,7 +2219,7 @@ function editLocalName(lang) {
         }
         const stored = localName(after.persona, lang, '');
         addLog(after.persona, 'name-local', `${langName}: ${stored || STRINGS.manager.placementUnset}`, Date.now());
-        freshContext()?.saveSettingsDebounced?.();
+        saveSettings();
         notify('info', stored ? STRINGS.manager.localNameSaved : STRINGS.manager.localNameRemoved);
         scheduleDraw();
     });
@@ -2309,7 +2281,7 @@ async function applyNameWithScope(name, toChat, detail) {
     }
     const persona = getPersona(getRoot(), startAvatar);
     if (persona) addLog(persona, 'name-apply', detail ?? name, Date.now());
-    freshContext()?.saveSettingsDebounced?.();
+    saveSettings();
     notify('info', toChat
         ? STRINGS.manager.localNameApplied(name)
         : STRINGS.manager.listNameApplied(name));
@@ -2388,13 +2360,7 @@ function personaBox(ctx, s, writable, reason) {
     });
     imageRow.append(el('span', 'pm-manager-picklabel', STRINGS.manager.imageLabel));
     const url = thumbnailUrl(ctx, s.avatar);
-    if (url) {
-        const img = el('img', 'pm-manager-targetimg');
-        img.src = url;
-        img.alt = '';
-        img.loading = 'lazy';
-        imageRow.append(img);
-    }
+    if (url) imageRow.append(lazyImg('pm-manager-targetimg', url));
     imageRow.append(el('span', 'pm-manager-value', ''));
     imageRow.append(actionButton(STRINGS.manager.imageButton, () => input.click(), writable,
         STRINGS.manager.changeImage, reason));
@@ -2422,7 +2388,7 @@ function toggleAutoName() {
     // Acts on the open chat now; off cancels anything already queued.
     if (root.settings.autoLocalName) scheduleAutoName();
     else cancelAutoName();
-    freshContext()?.saveSettingsDebounced?.();
+    saveSettings();
     // The settings drawer's checkbox syncs on this event.
     document.dispatchEvent(new CustomEvent('pm:changed'));
     scheduleDraw();
@@ -2521,7 +2487,7 @@ function restoreTargetImage() {
         if (live) {
             live.avatarWritten = null;
             addLog(live, 'image-restore', label, Date.now());
-            freshContext()?.saveSettingsDebounced?.();
+            saveSettings();
         }
         notify('info', STRINGS.manager.imageRestored);
     });
@@ -2567,7 +2533,7 @@ async function uploadTargetImage(startAvatar, file, crop) {
         const live = getPersona(getRoot(), startAvatar);
         if (live && live.avatarWritten !== null) {
             live.avatarWritten = null;
-            freshContext()?.saveSettingsDebounced?.();
+            saveSettings();
         }
     });
     if (result.ok) {
@@ -2605,11 +2571,8 @@ async function runBoundImage(avatarId, versionId, force) {
         if (result.backedUp) notify('info', STRINGS.manager.imageBackupMade);
         return;
     }
-    if (result.error === 'listing') { notify('warning', STRINGS.manager.imageListingFailed(result.detail)); return; }
-    if (result.error === 'missing') { notify('warning', STRINGS.manager.imageAssetMissing(result.detail)); return; }
-    if (result.error === 'backup') { notify('error', STRINGS.manager.imageBackupFailed(result.detail)); return; }
-    if (result.error === 'decode') { notify('error', STRINGS.manager.framingDecodeFailed(result.detail)); return; }
-    notify('error', STRINGS.manager.imageApplyFailed(result.detail ?? result.error));
+    if (result.error === 'listing') notify('warning', STRINGS.manager.imageListingFailed(result.detail));
+    else notifyBoundImageFailure(result);
 }
 
 async function pickBoundAsset(versionId) {
@@ -2629,7 +2592,7 @@ async function pickBoundAsset(versionId) {
     const after = guardTarget(startAvatar);
     if (!after) return;
     const version = findVersion(after.persona, versionId);
-    if (!version) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
+    if (!version) { fail(STRINGS.manager.versionGone); return; }
     if (bindAsset(version, choice, Date.now())) commit('image-bind', `${version.name ?? ''} / ${choice}`, startAvatar);
 }
 
@@ -2637,7 +2600,7 @@ function clearBoundAsset(versionId) {
     const s = guardTarget();
     if (!s) return;
     const version = findVersion(s.persona, versionId);
-    if (!version) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
+    if (!version) { fail(STRINGS.manager.versionGone); return; }
     if (bindAsset(version, null, Date.now())) commit('image-bind', version.name ?? '', targetAvatar);
 }
 
@@ -2727,7 +2690,7 @@ function openFraming(versionId) {
     const version = findVersion(s.persona, versionId);
     const label = boundAsset(version);
     const path = findAsset(assetState.list, label, bindingIsExact(version))?.path;
-    if (!version || !label || !path) { notify('error', STRINGS.manager.versionGone); scheduleDraw(); return; }
+    if (!version || !label || !path) { fail(STRINGS.manager.versionGone); return; }
     const avatar = targetAvatar;
     // Measured fresh: the path carries the listing's freshness token.
     const probe = new Image();
@@ -2935,13 +2898,20 @@ async function mintPersona(command, label, manyFoundMessage) {
     return added[0];
 }
 
-async function duplicateTargetPersona() {
-    if (!(await confirmDropWorking())) return;
+// The checks both ways of minting a persona start with; answers the source and the command.
+async function readyToMint(noCommandMessage) {
+    if (!(await confirmDropWorking())) return null;
     const s = guardTarget();
-    if (!s || refusedWrite(s)) return;
-    const startAvatar = targetAvatar;
+    if (!s || refusedWrite(s)) return null;
     const command = pickPersonaCommand(freshContext()?.SlashCommandParser?.commands, DUPLICATE_COMMANDS);
-    if (!command) { notify('error', STRINGS.manager.duplicateNoCommand); return; }
+    if (!command) { notify('error', noCommandMessage); return null; }
+    return { startAvatar: targetAvatar, command };
+}
+
+async function duplicateTargetPersona() {
+    const ready = await readyToMint(STRINGS.manager.duplicateNoCommand);
+    if (!ready) return;
+    const { startAvatar, command } = ready;
     const personas = freshContext()?.powerUserSettings?.personas ?? {};
     const label = personas[startAvatar] ?? startAvatar;
     if (!(await askConfirm(STRINGS.manager.confirmDuplicatePersona(label)))) return;
@@ -2956,7 +2926,7 @@ async function duplicateTargetPersona() {
     // A refusal is reported, not rolled back: the persona exists either way. outside 'discard':
     // SillyTavern's copied description is no outside edit to keep.
     const composed = copy ? saveAndComposeFor(destAvatar, { outside: 'discard' }) : null;
-    freshContext()?.saveSettingsDebounced?.();
+    saveSettings();
     const newName = freshContext()?.powerUserSettings?.personas?.[destAvatar] ?? destAvatar;
     // Onto the copy, which the user will edit next.
     landOnPersona(destAvatar);
@@ -2969,12 +2939,9 @@ async function duplicateTargetPersona() {
    since saveAndComposeFor refuses while two personas share a name, then given a blank default
    composition. The image stays inherited. */
 async function createTargetPersona() {
-    if (!(await confirmDropWorking())) return;
-    const s = guardTarget();
-    if (!s || refusedWrite(s)) return;
-    const startAvatar = targetAvatar;
-    const command = pickPersonaCommand(freshContext()?.SlashCommandParser?.commands, DUPLICATE_COMMANDS);
-    if (!command) { notify('error', STRINGS.manager.createNoCommand); return; }
+    const ready = await readyToMint(STRINGS.manager.createNoCommand);
+    if (!ready) return;
+    const { startAvatar, command } = ready;
     const name = (await askText(STRINGS.manager.createNamePrompt, ''))?.trim();
     if (!name) return;
     // Checked before anything is minted.
@@ -2997,7 +2964,7 @@ async function createTargetPersona() {
         addLog(persona, 'persona-create', name, Date.now());
         composed = saveAndComposeFor(destAvatar, { outside: 'discard' });
     }
-    freshContext()?.saveSettingsDebounced?.();
+    saveSettings();
     landOnPersona(destAvatar);
     if (!seeded || !composed) {
         // The persona exists but still carries the copied description.
@@ -3045,7 +3012,7 @@ async function copyOnto(destAvatar) {
     const previous = after.root.personas?.[destAvatar] ?? null;
     const copy = copyPersonaOnto(after.root, startAvatar, destAvatar,
         freshContext()?.uuidv4, Date.now(), STRINGS.manager.copyLogDetail(fromName));
-    if (!copy) { notify('error', STRINGS.manager.copyFailed); scheduleDraw(); return; }
+    if (!copy) { fail(STRINGS.manager.copyFailed); return; }
     const result = saveAndComposeFor(destAvatar);
     if (!result) {
         if (previous) after.root.personas[destAvatar] = previous;
@@ -3054,7 +3021,7 @@ async function copyOnto(destAvatar) {
         scheduleDraw();
         return;
     }
-    freshContext()?.saveSettingsDebounced?.();
+    saveSettings();
     landOnPersona(destAvatar);
     notify('info', STRINGS.manager.copyDone(toName));
     scheduleDraw();
@@ -3107,20 +3074,6 @@ function composeTab(s, writable, reason) {
     box.append(actionsRow([actionButton(STRINGS.manager.addItem, () => addSection(), writable, '', reason)]));
     box.append(placementBox(s, writable, reason));
     return box;
-}
-
-// Beside 관리 시작: how adopting takes the description in (the drawer's same setting).
-function adoptModeRow(s, writable) {
-    const row = el('div', 'pm-row pm-manager-headingrow');
-    row.append(el('span', 'pm-manager-name', STRINGS.common.adoptModeLabel));
-    const current = ADOPT_MODES.includes(s?.settings?.adoptSplitMode) ? s.settings.adoptSplitMode : ADOPT_MODES[0];
-    const select = selectOf('pm-manager-select', ADOPT_MODES.map(mode => [mode, STRINGS.settings.adoptModeNames[mode]]), current, mode => {
-        if (setAdoptMode(mode)) scheduleDraw();
-    });
-    select.disabled = !writable;
-    select.setAttribute('aria-label', STRINGS.common.adoptModeAria);
-    row.append(select);
-    return row;
 }
 
 // Changing this rewrites the prompt, so it goes through commit.
@@ -3178,7 +3131,7 @@ function versionRow(persona, version, writable, reason) {
     const head = rowHead();
     head.append(rowName(key, [
         checkMark(version.id === persona.activeVersionId),
-        markedText('pm-manager-name', version.name ?? '', lists.versions.open ? lists.versions.query : ''),
+        markedText('pm-manager-name', version.name ?? '', listQuery('versions')),
     ], versionSummaryLine(persona, version)));
     // Picks naming something deleted would drop that item, so apply points at the repair.
     const applicable = versionApplicable(persona, version.id);
@@ -3449,13 +3402,11 @@ function reviseScreen(writable, reason) {
     }
     // Hidden until a selection positions it.
     wrap.append(button('pm-revise-popup pm-hidden', STRINGS.manager.revisePopup, () => openReviseBox()));
-    const foot = el('div', 'pm-manager-editorfoot');
-    foot.append(actionsRow([
+    wrap.append(editorFoot([
         actionButton(STRINGS.manager.reviseUndo, () => undoRevise(), reviseSteps.length > 0 && !reviseEditing),
         actionButton(STRINGS.manager.reviseSaveVersion, () => saveRevise(), writable && !reviseEditing, '', reason),
         actionButton(STRINGS.manager.editorBackToList, () => leaveRevise(), true),
     ]));
-    wrap.append(foot);
     return wrap;
 }
 
@@ -3466,7 +3417,7 @@ function fillVersionList(container, s, writable, reason) {
     const versions = persona.versions ?? [];
     const live = new Set(versions.map(version => rowKey('version', version.id)));
     if (expandedRow !== null && !live.has(expandedRow)) expandedRow = null;
-    if (!versions.length) { container.append(emptyOf(STRINGS.manager.noVersionsHere)); return; }
+    if (!versions.length) { container.append(emptyBlock(STRINGS.manager.noVersionsHere)); return; }
 
     const ui = lists.versions;
     let list = versions;
@@ -3482,7 +3433,7 @@ function fillVersionList(container, s, writable, reason) {
         list = filterChips(container, ui, versions, list, { langOf, tagsOf, chip: filterChip, redraw: scheduleDraw });
         const query = ui.query.trim();
         if (query) list = rankByQuery(list, query, version => [version.name ?? '', ...tagsOf(version)]);
-        if (!list.length) { container.append(emptyOf(STRINGS.common.searchNoHits)); return; }
+        if (!list.length) { container.append(emptyBlock(STRINGS.common.searchNoHits)); return; }
     }
 
     const paged = pageOf(list, ui.page, s.root?.settings?.pageSizeVersions ?? 20);
@@ -3529,15 +3480,16 @@ function clearLog() {
         // Counted again: a save may have added lines while the question was up.
         const cleared = (after.persona.log ?? []).length;
         after.persona.log = [];
-        freshContext()?.saveSettingsDebounced?.();
+        saveSettings();
         notify('info', STRINGS.manager.logCleared(cleared));
         scheduleDraw();
     });
 }
 
-function findVariant(persona, variantId) {
+// A choice by id alone, with the item holding it.
+function locateVariant(persona, variantId) {
     for (const section of persona?.sections ?? []) {
-        const variant = (persona.variants?.[section.id] ?? []).find(entry => entry.id === variantId);
+        const variant = findVariant(persona, section.id, variantId);
         if (variant) return { section, variant };
     }
     return null;
@@ -3616,7 +3568,7 @@ function diffBlock(before, after) {
 
 function historyDetail(persona, variantId, snapshotText, writable, reason) {
     const box = el('div', 'pm-manager-historydetail');
-    const found = findVariant(persona, variantId);
+    const found = locateVariant(persona, variantId);
     const current = found?.variant?.text ?? '';
 
     const toggles = el('div', 'pm-manager-actions');
@@ -3664,11 +3616,11 @@ function historyTab(s, writable, reason) {
     box.append(picker);
 
     if (!historyVariant) {
-        box.append(emptyOf(STRINGS.manager.historyPickFirst));
+        box.append(emptyBlock(STRINGS.manager.historyPickFirst));
     } else {
         const list = persona.history?.[historyVariant] ?? [];
         if (!list.length) {
-            box.append(emptyOf(STRINGS.manager.historyEmpty));
+            box.append(emptyBlock(STRINGS.manager.historyEmpty));
         } else {
             // Picked out of historyView, so ordering and previews follow one rule.
             const entry = historyView(persona, null, historyVariant)
@@ -3767,12 +3719,8 @@ function assetRow(item, key, writable, reason, styleClass) {
     const head = rowHead();
     // An element rather than buildImgHtml's HTML string, which would need DOMPurify:
     // the path is assigned as a property, so there is nothing to sanitise.
-    const img = el('img', styleClass);
-    img.src = item.path;
-    img.alt = '';
-    img.loading = 'lazy';
-    head.append(img);
-    head.append(rowName(rowId, [markedText('pm-manager-name', item.label, lists.assets.open ? lists.assets.query : '')]));
+    head.append(lazyImg(styleClass, item.path));
+    head.append(rowName(rowId, [markedText('pm-manager-name', item.label, listQuery('assets'))]));
     head.append(actionButton(STRINGS.manager.assetInsert, () => insertIntoSendBox(insertTagText(key, item.label)), true,
         STRINGS.manager.assetInsertTitle));
     head.append(moreButton(rowId));
@@ -3860,7 +3808,7 @@ function assetsTab(s, writable, reason) {
 
     const key = resolveFolderKey(s.root, targetAvatar);
     box.append(noteOf(STRINGS.manager.assetFolder(key)));
-    if (!visibleAssets().length) box.append(emptyOf(STRINGS.manager.assetNone));
+    if (!visibleAssets().length) box.append(emptyBlock(STRINGS.manager.assetNone));
     box.append(uploadRow(writable, reason));
     if (visibleAssets().length) {
         box.append(actionsRow([listSearchButton('assets')]));
@@ -3887,7 +3835,7 @@ function fillAssetList(container, s, writable, reason) {
     const query = ui.open ? ui.query.trim() : '';
     if (query) {
         list = rankByQuery(list, query, item => [item.label ?? '']);
-        if (!list.length) { container.append(emptyOf(STRINGS.common.searchNoHits)); return; }
+        if (!list.length) { container.append(emptyBlock(STRINGS.common.searchNoHits)); return; }
     }
     const paged = pageOf(list, ui.page, s.root?.settings?.pageSizeAssets ?? 20);
     ui.page = paged.page;
@@ -3926,12 +3874,12 @@ function fillGroupList(container, s) {
     // but never deleted: a persona removed by mistake is sometimes restored.
     const live = new Set(labels.map(label => rowKey('group', label.id)));
     if (expandedRow !== null && !live.has(expandedRow)) expandedRow = null;
-    if (!labels.length) { container.append(emptyOf(STRINGS.manager.groupsEmpty)); return; }
+    if (!labels.length) { container.append(emptyBlock(STRINGS.manager.groupsEmpty)); return; }
     let list = labels;
-    const query = lists.groups.open ? lists.groups.query.trim() : '';
+    const query = listQuery('groups').trim();
     if (query) {
         list = rankByQuery(labels, query, label => [label.name ?? '']);
-        if (!list.length) { container.append(emptyOf(STRINGS.common.searchNoHits)); return; }
+        if (!list.length) { container.append(emptyBlock(STRINGS.common.searchNoHits)); return; }
     }
     for (const label of list) container.append(groupRow(label, query, writable));
 }
@@ -3977,13 +3925,7 @@ function personaPickerButton(ctx) {
     const btn = el('button', 'pm-manager-target');
     btn.type = 'button';
     const url = thumbnailUrl(ctx, targetAvatar);
-    if (url) {
-        const img = el('img', 'pm-manager-targetimg');
-        img.src = url;
-        img.alt = '';
-        img.loading = 'lazy';
-        btn.append(img);
-    }
+    if (url) btn.append(lazyImg('pm-manager-targetimg', url));
     const name = (targetAvatar && ctx?.powerUserSettings?.personas?.[targetAvatar]) || targetAvatar || STRINGS.manager.noPersona;
     btn.append(el('span', 'pm-manager-name', name));
     btn.append(el('span', 'pm-manager-caret', pickerOpen ? '▲' : '▼'));
@@ -4011,11 +3953,17 @@ function pickerViewSelect() {
             const root = getRoot();
             if (!root || root.readOnly) { scheduleDraw(); return; }
             root.settings.pickerViewMode = value;
-            freshContext()?.saveSettingsDebounced?.();
+            saveSettings();
             scheduleDraw();
         });
     select.setAttribute('aria-label', STRINGS.quick.viewCaption);
     return select;
+}
+
+// A picker tap: copy onto the persona in copy mode, otherwise make it the target.
+function pickPersona(avatar) {
+    if (pickerMode === 'copy') copyOnto(avatar);
+    else selectTarget(avatar);
 }
 
 // The quick panel's tile markup and classes, without its select mode and switching.
@@ -4032,10 +3980,7 @@ function pickerTile(ctx, avatar, name, query, named) {
     if (url) imgbox.append(pickerThumbs.take('pm-quickbar-tileimg', url));
     tile.append(imgbox);
     if (named) tile.append(markedText('pm-quickbar-tilelabel', name, query));
-    tile.addEventListener('click', () => {
-        if (pickerMode === 'copy') copyOnto(avatar);
-        else selectTarget(avatar);
-    });
+    tile.addEventListener('click', () => pickPersona(avatar));
     return tile;
 }
 
@@ -4080,7 +4025,7 @@ function fillPickerList(container, ctx) {
     const query = ui.open ? ui.query.trim() : '';
     if (query) {
         entries = rankByQuery(entries, query, ([avatar, name]) => [String(name ?? ''), ...(getPersona(root, avatar)?.tags ?? [])]);
-        if (!entries.length) { container.append(emptyOf(STRINGS.common.searchNoHits)); return; }
+        if (!entries.length) { container.append(emptyBlock(STRINGS.common.searchNoHits)); return; }
     }
     // The picker shares the roster's page size.
     const paged = pageOf(entries, ui.page, root?.settings?.pageSizeRoster ?? 20);
@@ -4104,10 +4049,7 @@ function fillPickerList(container, ctx) {
             // getPersona only reads: listing must not create entries.
             if (!getPersona(root, avatar)) row.append(el('span', 'pm-manager-count', STRINGS.manager.notAdoptedTag));
             row.append(checkMark(avatar === targetAvatar));
-            makeRowActivatable(row, () => {
-                if (pickerMode === 'copy') copyOnto(avatar);
-                else selectTarget(avatar);
-            });
+            makeRowActivatable(row, () => pickPersona(avatar));
             container.append(row);
         }
     }
@@ -4260,15 +4202,7 @@ function dropSectionAt(sectionId, target) {
     const adjusted = onto > from ? onto - 1 : onto;
     const toIndex = target?.after ? adjusted + 1 : adjusted;
     if (!reorderSection(persona, sectionId, toIndex)) { scheduleDraw(); return; }
-    const name = (persona.sections ?? []).find(sec => sec.id === sectionId)?.name ?? '';
-    commit('section-move', name);
-}
-
-// The band under the tab strip: the tab's name, set large.
-function bandRow(word) {
-    const band = el('div', 'pm-band');
-    band.append(el('span', 'pm-band-word', word));
-    return band;
+    commit('section-move', findSection(persona, sectionId)?.name ?? '');
 }
 
 function headerRow(ctx) {
@@ -4400,7 +4334,8 @@ function drawManager() {
     if (!s.persona) {
         body.append(noteOf(STRINGS.manager.notAdopted));
         body.append(actionsRow([actionButton(STRINGS.manager.adoptButton, () => adoptTarget(), writable, '', reason)]));
-        body.append(adoptModeRow(s, writable));
+        // Beside 관리 시작: how adopting takes the description in (the drawer's same setting).
+        body.append(adoptModeRow(s, writable, ['pm-row pm-manager-headingrow', 'pm-manager-name', 'pm-manager-select'], scheduleDraw));
         return;
     }
 

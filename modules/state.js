@@ -1,10 +1,13 @@
 // Which persona is active and what its data is; everything the UI needs goes through here.
-import { MODULE_NAME, migrate, getPersona, ensurePersona, liveVariant, usageBytes, textSignature, makeId, ADOPT_MODES, appendSection } from './store.js';
+import {
+    MODULE_NAME, migrate, getPersona, ensurePersona, liveVariant, findSection, usageBytes, textSignature, makeId, ADOPT_MODES,
+    appendSection,
+} from './store.js';
 import {
     resolveAvatar, findDuplicateNames, loadPreciseApi, freshContext, selectedAvatarFromDom,
 } from './ctx.js';
 import { writeDescription, hasDiverged, compose, markComposed, baselineSignature, planAbsorb } from './compose.js';
-import { addLog, snapshot, expireOldHistory, enforceGlobalBudget } from './history.js';
+import { addLog, snapshot, capHistory } from './history.js';
 import { splitDescription, seedFromSplit, splitOwnSections, seedOwnSections, sameText } from './classify.js';
 import { STRINGS } from './strings.js';
 import { clearSearchCaches } from './search-pure.js';
@@ -154,6 +157,14 @@ function createRecord(ctx, root, avatarId) {
     return persona;
 }
 
+// A log line on the avatar's record, if it still has one, saved.
+export function logFor(avatarId, kind, detail) {
+    const persona = getPersona(getRoot(), avatarId);
+    if (!persona) return;
+    addLog(persona, kind, detail, Date.now());
+    provider()?.saveSettingsDebounced?.();
+}
+
 // How the next 관리 시작 takes in a description, chosen beside the button or in the drawer.
 export function setAdoptMode(mode) {
     const root = getRoot();
@@ -266,14 +277,18 @@ export function saveAndCompose(expectedAvatar, { write = true, outside = 'keep',
     return writeOrKeep(ctx, s.avatar, s.persona, active.avatar, { write, outside, force });
 }
 
+// The writable root, for an avatar SillyTavern lists (never one it does not), or null.
+function writableRootFor(ctx, avatarId) {
+    const root = getRoot();
+    if (!root || root.readOnly) return null;
+    return Object.hasOwn(ctx.powerUserSettings?.personas ?? {}, avatarId) ? root : null;
+}
+
 // adopt() for any persona SillyTavern knows, not only the active one (the manager picker).
 export function adoptFor(avatarId) {
     const ctx = provider();
-    if (!ctx) return null;
-    const root = getRoot();
-    if (!root || root.readOnly) return null;
-    // Never for an avatar SillyTavern does not list.
-    if (!Object.hasOwn(ctx.powerUserSettings?.personas ?? {}, avatarId)) return null;
+    const root = ctx ? writableRootFor(ctx, avatarId) : null;
+    if (!root) return null;
     return getPersona(root, avatarId) || createRecord(ctx, root, avatarId);
 }
 
@@ -281,10 +296,8 @@ export function adoptFor(avatarId) {
 // only if it is the live active one.
 export function saveAndComposeFor(avatarId, { write = true, outside = 'keep', force = false } = {}) {
     const ctx = provider();
-    if (!ctx) return null;
-    const root = getRoot();
-    if (!root || root.readOnly) return null;
-    if (!Object.hasOwn(ctx.powerUserSettings?.personas ?? {}, avatarId)) return null;
+    const root = ctx ? writableRootFor(ctx, avatarId) : null;
+    if (!root) return null;
     const persona = getPersona(root, avatarId);
     if (!persona) return null;
     const active = resolveActive(ctx);
@@ -293,6 +306,24 @@ export function saveAndComposeFor(avatarId, { write = true, outside = 'keep', fo
     const result = writeOrKeep(ctx, avatarId, persona, active.avatar, { write, outside, force });
     // No persona confirmed active: only the stored copy was written, which the caller reports.
     return !result.kept && !active.avatar ? { ...result, activeUnknown: true } : result;
+}
+
+// Writes planAbsorb's bodies into the live choices, old text into history first; answers the
+// names of the items that changed. Shared with the diverged banner's 가져오기, which forces
+// the snapshots (inside the merge window a plain one is skipped).
+export function applyAbsorb(root, persona, plan, now, force = false) {
+    const changed = [];
+    for (const write of plan.writes) {
+        const section = findSection(persona, write.sectionId);
+        const variant = section ? liveVariant(persona, section) : null;
+        if (!variant || (variant.text ?? '') === write.text) continue;
+        snapshot(persona, variant.id, variant.text ?? '', now, root.settings, { force });
+        variant.text = write.text;
+        variant.updatedAt = now;
+        changed.push(section.name ?? '');
+    }
+    capHistory(root, root.settings, now);
+    return changed;
 }
 
 /* An edit made in SillyTavern's own persona box, taken into the active persona's items as it
@@ -313,18 +344,7 @@ export function autoAbsorbOutside() {
     const plan = planAbsorb(persona, text);
     if (!plan.ok) return plan;
     const now = Date.now();
-    const changed = [];
-    for (const write of plan.writes) {
-        const section = (persona.sections ?? []).find(entry => entry.id === write.sectionId);
-        const variant = section ? liveVariant(persona, section) : null;
-        if (!variant || (variant.text ?? '') === write.text) continue;
-        snapshot(persona, variant.id, variant.text ?? '', now, root.settings);
-        variant.text = write.text;
-        variant.updatedAt = now;
-        changed.push(section.name ?? '');
-    }
-    expireOldHistory(root, root.settings, now);
-    enforceGlobalBudget(root, root.settings, now);
+    const changed = applyAbsorb(root, persona, plan, now);
     if (changed.length) addLog(persona, 'diverge-auto', changed.join(', '), now);
     markComposed(persona, text);
     ctx.saveSettingsDebounced?.();
