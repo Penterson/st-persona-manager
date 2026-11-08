@@ -126,6 +126,9 @@ let fullTexts = null;
 // in one box and divided back along its title lines (fullRaw: { text, start }).
 let fullView = 'items';
 let fullRaw = null;
+// The working copies as they were before the last clear-all, for its undo; kept across a
+// save so a saved clear can still be taken back (and saved again).
+let fullUndo = null;
 // Item select mode on the compose tab: checkboxes on the rows, deleted together.
 let itemSelecting = false;
 let selectedItems = new Set();
@@ -1732,6 +1735,7 @@ function resetFullText() {
     fullActive = false;
     fullView = 'items';
     fullRaw = null;
+    fullUndo = null;
     fullBlocks = null;
     fullTexts = null;
     if (sizeTimer) { clearTimeout(sizeTimer); sizeTimer = 0; }
@@ -1865,6 +1869,53 @@ function saveFullText() {
     scheduleDraw();
 }
 
+// Working copies back into the fields on screen: a draw harvests the fields first, so state
+// changed from code must reach them or the draw would read the old text back.
+function pushFullToFields() {
+    const panel = document.getElementById(PANEL_ID);
+    if (!panel) return;
+    const raw = panel.querySelector('.pm-full-raw-text');
+    if (raw && fullRaw) raw.value = fullRaw.text;
+    for (const area of panel.querySelectorAll('.pm-full-text')) {
+        const index = Number(area.dataset.pmBlock);
+        if (Number.isInteger(index) && typeof fullTexts?.[index] === 'string') area.value = fullTexts[index];
+    }
+}
+
+// Empties every body on the screen at once, without asking: undoFullClear takes it back.
+// Nothing is written until the save.
+function clearFullText() {
+    if (!fullActive || !Array.isArray(fullTexts)) return;
+    harvestFullTexts();
+    const rawText = fullRaw ? fullRaw.text : null;
+    if (!fullTexts.some(text => String(text ?? '').trim()) && !(rawText ?? '').trim()) {
+        notify('info', STRINGS.manager.fullClearNothing);
+        return;
+    }
+    fullUndo = { texts: [...fullTexts], raw: fullRaw ? { ...fullRaw } : null };
+    fullTexts = fullTexts.map(() => '');
+    if (fullRaw) fullRaw.text = '';
+    pushFullToFields();
+    notify('info', STRINGS.manager.fullCleared);
+    scheduleDraw();
+}
+
+function undoFullClear() {
+    if (!fullUndo) return;
+    harvestFullTexts();
+    const s = targetState();
+    fullTexts = [...fullUndo.texts];
+    if (fullRaw && s?.persona) {
+        // Same text as start: the working copies alone carry what differs from the bodies.
+        const text = composeFrom(s.persona, fullBlocks, fullTexts);
+        fullRaw = { text, start: text };
+    }
+    fullUndo = null;
+    pushFullToFields();
+    notify('info', STRINGS.manager.fullClearUndone);
+    scheduleDraw();
+}
+
 // Each body under the heading it is printed with, or a caption naming the item and choice.
 function fullTextScreen(s, writable, reason) {
     const wrap = el('div', 'pm-full');
@@ -1892,6 +1943,8 @@ function fullTextScreen(s, writable, reason) {
         btn.setAttribute('aria-pressed', active ? 'true' : 'false');
         toggles.append(btn);
     }
+    toggles.append(actionButton(STRINGS.manager.fullClear, () => clearFullText(), writable, STRINGS.manager.fullClearTitle, reason));
+    if (fullUndo) toggles.append(actionButton(STRINGS.manager.fullClearUndo, () => undoFullClear(), writable, '', reason));
     wrap.append(toggles);
     const format = persona.headingFormat;
     if (fullView === 'raw' && fullRaw) {

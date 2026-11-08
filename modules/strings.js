@@ -404,6 +404,13 @@ export const STRINGS = deepFreeze({
         // Shown instead when the joined text has no title lines to divide along.
         fullViewRawLocked: '항목 제목 형식이 없음이라 나눌 기준 없음. 수정은 항목별 보기에서',
         fullRawAria: '설명문 전문',
+        // Clear-all on the full-text screen: no question asked, an undo instead.
+        fullClear: '전체 비우기',
+        fullClearTitle: '모든 항목 본문 비우기. [전체 저장] 전까지 미반영',
+        fullClearUndo: '되돌리기',
+        fullCleared: '모든 항목 본문 비우기 완료. [되돌리기]로 복구 가능',
+        fullClearNothing: '비울 본문 없음',
+        fullClearUndone: '비우기 이전 본문으로 복구 완료',
         fullRawMissing: name => `제목 줄 없음: ${name}. 항목을 비우려면 제목 줄은 두고 본문만 지우기`,
         fullRawOrder: name => `제목 줄 순서 변경 또는 중복: ${name}. 항목 순서는 편집 탭에서 변경`,
         fullRawStray: '첫 제목 줄 앞의 글은 들어갈 항목 없음. 제목 줄 아래로 옮기기',

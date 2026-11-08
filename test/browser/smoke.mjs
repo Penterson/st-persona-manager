@@ -235,9 +235,34 @@ async function tour(width, label, light) {
         await page.locator('.pm-full .pm-manager-editorfoot .pm-manager-btn', { hasText: '전체 저장' }).click();
         await page.waitForTimeout(250);
         expect(`${label} joined edit undone`, (await readDescription()) === saved.replace(/\nPM-SMOKE-RAW\s*$/, ''), await readDescription());
+        // Clear-all asks nothing; its undo brings the text back, even after a save.
+        const kept = await readDescription();
+        const fullBtn = text => page.locator('.pm-full .pm-manager-btn', { hasText: text });
+        await fullBtn('전체 비우기').click();
+        await page.waitForTimeout(150);
+        expect(`${label} clear-all empties the joined box`, (await page.locator('.pm-full-raw-text').inputValue()) === '');
+        await fullBtn('전체 저장').click();
+        await page.waitForTimeout(250);
+        expect(`${label} saved clear-all empties the description`, (await readDescription()) === '', await readDescription());
+        await fullBtn('되돌리기').click();
+        await page.waitForTimeout(150);
+        expect(`${label} undo refills the joined box`, (await page.locator('.pm-full-raw-text').inputValue()) === kept);
+        await shot('08c-fulltext-undo');
+        await fullBtn('전체 저장').click();
+        await page.waitForTimeout(250);
+        expect(`${label} undone clear saves back`, (await readDescription()) === kept, await readDescription());
+        expect(`${label} undo is spent once used`, await fullBtn('되돌리기').count() === 0);
         await page.locator('.pm-full .pm-manager-actions .pm-manager-btn', { hasText: '항목별' }).click();
         await page.waitForTimeout(150);
         expect(`${label} joined view returns to the item boxes`, await page.locator('.pm-full-raw-text').count() === 0);
+        const boxes = () => page.locator('.pm-full-text').evaluateAll(areas => areas.map(area => area.value));
+        const filled = await boxes();
+        await page.locator('.pm-full .pm-manager-btn', { hasText: '전체 비우기' }).click();
+        await page.waitForTimeout(150);
+        expect(`${label} clear-all empties every item box`, (await boxes()).every(value => value === ''), await boxes());
+        await page.locator('.pm-full .pm-manager-btn', { hasText: '되돌리기' }).click();
+        await page.waitForTimeout(150);
+        expect(`${label} undo refills every item box`, JSON.stringify(await boxes()) === JSON.stringify(filled), [filled, await boxes()]);
     }
     await page.locator('.pm-manager-editorfoot .pm-manager-btn', { hasText: '목록으로' }).click();
     await page.waitForTimeout(100);

@@ -133,3 +133,8 @@ test('nothing selected changes nothing', () => {
     assert.deepEqual(removeSections(p, [], ids, 1), { gone: [], added: null });
     assert.equal(p.sections.length, 3);
 });
+
+test('a joined text cleared down to nothing empties every item', () => {
+    const { p, blocks, texts } = setup('markdown', null, true);
+    assert.deepEqual(splitFullText(p, blocks, '  \n\n', texts), { ok: true, texts: texts.map(() => '') });
+});

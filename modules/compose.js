@@ -173,6 +173,8 @@ export function splitFullText(persona, blocks, text, current) {
         };
     });
     if (!list.length) return { ok: true, texts: [] };
+    // Everything cleared, titles included: every item is emptied.
+    if (!String(text ?? '').trim()) return { ok: true, texts: list.map(() => '') };
     // A block with no title line can only be the first, holding the text above every title.
     const headless = list.find((block, index) => index > 0 && !block.head);
     if (headless) return { ok: false, reason: 'missing', name: headless.name };
