@@ -727,10 +727,10 @@ export const STRINGS = deepFreeze({
         defaultHeadingFormat: '새 페르소나의 항목 제목',
         defaultHeadingFormatHint: '관리를 새로 시작하는 페르소나가 쓸 형식. 이미 만든 페르소나는 편집 탭에서 각각 변경',
         splitOnAdopt: '관리 시작 시 설명문 가져오기',
-        splitOnAdoptHint: '원래 항목 그대로: 설명문에 이미 있는 제목의 이름·순서·모양으로 항목 구성, 설명문 글자 변경 없음. 같은 모양의 제목이 2개 미만이거나 그대로 재현되지 않는 설명문은 첫 항목에 전체 배치. 한 항목에 통째로: 항상 첫 항목에 전체 배치. 기본 항목에 맞춰 분류: 외모·성격 같은 기본 항목으로 이동',
+        splitOnAdoptHint: '전문 항목 하나에 통째로: 설명문 전체를 "전문" 항목 하나에 배치, 제목 기준 나누기 없음. 나누기는 편집 탭의 [원래 항목으로 재구성]·[제목별 분류]로 직접. 원래 항목 그대로: 설명문에 이미 있는 제목의 이름·순서·모양으로 항목 구성, 설명문 글자 변경 없음. 같은 모양의 제목이 2개 미만이거나 그대로 재현되지 않는 설명문은 전문 항목 하나에 배치. 기본 항목에 맞춰 분류: 외모·성격 같은 기본 항목으로 이동',
         adoptModeNames: Object.freeze({
             own: '원래 항목 그대로',
-            whole: '한 항목에 통째로',
+            whole: '전문 항목 하나에 통째로 (기본)',
             defaults: '기본 항목에 맞춰 분류',
         }),
         autoAbsorbOutside: 'SillyTavern에서 고친 설명문 자동 반영',
@@ -856,6 +856,8 @@ export const STRINGS = deepFreeze({
     classify: {
         // The text before the first title, kept as its own section and printed without a title.
         preambleName: '머리말',
+        // The one item a description is adopted into whole (the default).
+        wholeName: '전문',
         titleAliases: {
             '기본 정보': ['기본정보', '프로필', '개요', 'profile', 'basic info', 'basic information', 'basics', 'overview', 'info'],
             '외모': ['외형', '외관', '생김새', 'appearance', 'looks', 'physical appearance', 'physical'],

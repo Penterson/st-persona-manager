@@ -67,3 +67,32 @@ test('an edit that cannot be divided is left for the banner, and the switch turn
     assert.equal(autoAbsorbOutside(), null);
     assert.deepEqual(off.live(), ['검은 머리', '조용함']);
 });
+
+/* Adopting a persona: the whole description into one 전문 item */
+
+import { adopt } from '../modules/state.js';
+
+function fresh(description, settings = {}) {
+    const pu = { personas: { [AVATAR]: 'Me' }, persona_descriptions: { [AVATAR]: { description } }, persona_description: description };
+    const ctx = {
+        name1: 'Me', powerUserSettings: pu,
+        extensionSettings: { 'persona-manager': { schemaVersion: 3, personas: {}, labels: [], settings: { defaultHeadingFormat: 'markdown', ...settings } } },
+        saveSettingsDebounced() {}, eventSource: { emit() {} }, event_types: {},
+    };
+    setContextProvider(() => ctx);
+    refresh();
+    return adopt();
+}
+
+test('adopting puts the whole description, titles and all, into one 전문 item, unchanged', () => {
+    const description = '## 외모\n검은 머리\n\n## 성격\n조용함';
+    const s = fresh(description);
+    assert.deepEqual(s.persona.sections.map(section => section.name), ['전문']);
+    assert.equal(compose(s.persona).text, description, 'no title printed even with a markdown default');
+    assert.equal(s.diverged, false);
+});
+
+test('dividing by titles on adopt is the user\'s choice', () => {
+    const s = fresh('## 외모\n검은 머리\n\n## 성격\n조용함', { adoptSplitMode: 'own', adoptDefault: 'whole' });
+    assert.deepEqual(s.persona.sections.map(section => section.name), ['외모', '성격']);
+});

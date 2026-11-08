@@ -37,8 +37,9 @@ export const DEFAULT_SETTINGS = Object.freeze({
     // Edits in SillyTavern's own persona box flow into the items (state.js autoAbsorbOutside).
     autoAbsorbOutside: true,
     defaultHeadingFormat: 'none',
-    // How adopt seeds a description (state.js seedDescription).
-    adoptSplitMode: 'own',
+    // How adopt seeds a description (state.js seedDescription): whole, into one 전문 item.
+    // Dividing by titles is the user's own step (the edit tab's buttons, or this setting).
+    adoptSplitMode: 'whole',
     assetStyle: 'plain',
     assetPromptTemplate: STRINGS.settings.assetPromptDefault,
     warnBytes: 524288,
@@ -170,6 +171,12 @@ export function migrate(root) {
     }
     if (Object.hasOwn(root.settings, 'adoptSplitMode') && !ADOPT_MODES.includes(root.settings.adoptSplitMode)) {
         delete root.settings.adoptSplitMode;
+    }
+    // 'own' shipped as the default up to 0.3.9 and was saved into every root, so a stored 'own'
+    // without this marker says nothing about the user; it takes the new default once.
+    if (root.settings.adoptDefault !== 'whole') {
+        if (root.settings.adoptSplitMode === 'own') delete root.settings.adoptSplitMode;
+        root.settings.adoptDefault = 'whole';
     }
     for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) {
         if (!Object.hasOwn(root.settings, k)) root.settings[k] = v;

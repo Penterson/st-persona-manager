@@ -112,6 +112,25 @@ async function tour(width, label, light) {
     await openPanel(page);
     expect(`${label} panel opens`, await page.evaluate(() => !!document.getElementById('pm-quickbar-panel')));
     await shot('01-panel');
+    // The default: the whole description in one 전문 item, divided by nothing.
+    await adopt(page);
+    const wholeRoot = await page.evaluate(() => window.SillyTavern.getContext().extensionSettings['persona-manager']);
+    const wholeNames = (wholeRoot?.personas?.[ALICE] ?? wholeRoot?.personas?.['1700000000000-alice.png'])?.sections?.map(section => section.name);
+    expect(`${label} adopt puts everything in one 전문 item by default`, JSON.stringify(wholeNames) === '["전문"]', wholeNames);
+    const wholeText = (await ctxEval(page)).powerUserSettings.persona_descriptions[ALICE].description;
+    expect(`${label} whole adopt leaves the description untouched`, wholeText === '## 외모\n검은 머리, 큰 키\n\n## 성격\n조용하고 침착함', wholeText);
+    await shot('01b-adopt-whole');
+    // Dividing on adopt is a choice; the rest of the tour works on the divided persona.
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(100);
+    await page.evaluate(async a => {
+        const c = window.SillyTavern.getContext();
+        const root = c.extensionSettings['persona-manager'];
+        delete root.personas[a];
+        root.settings.adoptSplitMode = 'own';
+        await c.eventSource.emit(c.event_types.PERSONA_CHANGED);
+    }, ALICE);
+    await openPanel(page);
     await adopt(page);
     const root = await page.evaluate(() => window.SillyTavern.getContext().extensionSettings['persona-manager']);
     const alice = root?.personas?.[ALICE];

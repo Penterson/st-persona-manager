@@ -1,5 +1,5 @@
 // Which persona is active and what its data is; everything the UI needs goes through here.
-import { MODULE_NAME, migrate, getPersona, ensurePersona, liveVariant, usageBytes, textSignature, makeId, ADOPT_MODES } from './store.js';
+import { MODULE_NAME, migrate, getPersona, ensurePersona, liveVariant, usageBytes, textSignature, makeId, ADOPT_MODES, appendSection } from './store.js';
 import {
     resolveAvatar, findDuplicateNames, loadPreciseApi, freshContext, selectedAvatarFromDom,
 } from './ctx.js';
@@ -109,7 +109,7 @@ export function refresh() {
 /* Seeds a record per settings.adoptSplitMode ('own' keeps the description's own sections only if
    they compose back to the same text); returns items filled, 0 when it went in whole. */
 function seedDescription(persona, description, makeIdFn, settings) {
-    const mode = ADOPT_MODES.includes(settings?.adoptSplitMode) ? settings.adoptSplitMode : 'own';
+    const mode = ADOPT_MODES.includes(settings?.adoptSplitMode) ? settings.adoptSplitMode : 'whole';
     if (mode === 'own') {
         const own = splitOwnSections(description);
         if (own) {
@@ -126,6 +126,15 @@ function seedDescription(persona, description, makeIdFn, settings) {
         ? splitDescription(description, persona.sections.map(section => section.name))
         : null;
     if (split) return seedFromSplit(persona, split, makeIdFn, settings?.defaultHeadingFormat);
+    if (mode !== 'defaults') {
+        // One item, 전문, in place of the shipped names. Untitled, so no heading format ever
+        // prints a title over it: the description stays exactly as written.
+        persona.sections = [];
+        persona.variants = {};
+        persona.activePicks = {};
+        appendSection(persona, { name: STRINGS.classify.wholeName, untitled: true }, makeIdFn, description, 0);
+        return 0;
+    }
     persona.variants[persona.sections[0].id][0].text = description;
     // Whole means exactly: a heading format would prefix a title on the first write.
     if (String(description ?? '').trim()) persona.headingFormat = 'none';

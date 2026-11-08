@@ -159,6 +159,8 @@ function fakeContext(description) {
 
 test('with an outside edit pending, a write that changes nothing of ours leaves SillyTavern\'s text alone', () => {
     const ctx = fakeContext('## 외모\n키 큼\n\n## 성격\n착함');
+    // Divided on adopt by choice, so the text sits in two items.
+    ctx.extensionSettings['persona-manager'] = { settings: { adoptSplitMode: 'own', adoptDefault: 'whole' } };
     setContextProvider(() => ctx);
     try {
         const p = adoptFor('mina.png');

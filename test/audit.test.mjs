@@ -92,18 +92,25 @@ test('an unreadable choice list is not taken for an empty persona', () => {
     assert.equal(isEmptyPersona({ variants: { s: {} } }), false);
 });
 
-test('adopt keeps the description own items by default; old switches fold into the mode', () => {
-    assert.equal(DEFAULT_SETTINGS.adoptSplitMode, 'own');
+test('adopt takes the description whole by default; old switches fold into the mode', () => {
+    assert.equal(DEFAULT_SETTINGS.adoptSplitMode, 'whole');
     const legacy = migrate({ schemaVersion: 2, settings: { splitOnAdopt: true }, personas: {} });
     assert.equal('splitOnAdopt' in legacy.settings, false);
-    assert.equal(legacy.settings.adoptSplitMode, 'own', 'the old always-on value says nothing');
+    assert.equal(legacy.settings.adoptSplitMode, 'whole', 'the old always-on value says nothing');
     const chose = migrate({ schemaVersion: 2, settings: { autoSplitOnAdopt: true }, personas: {} });
     assert.equal(chose.settings.adoptSplitMode, 'defaults', '0.3.1 on meant the shipped names');
     assert.equal('autoSplitOnAdopt' in chose.settings, false);
     const off = migrate({ schemaVersion: 2, settings: { autoSplitOnAdopt: false }, personas: {} });
-    assert.equal(off.settings.adoptSplitMode, 'own');
+    assert.equal(off.settings.adoptSplitMode, 'whole');
     const bad = migrate({ schemaVersion: 2, settings: { adoptSplitMode: 'x' }, personas: {} });
-    assert.equal(bad.settings.adoptSplitMode, 'own');
+    assert.equal(bad.settings.adoptSplitMode, 'whole');
+    // The old default saved into every root moves once; chosen after the move, it stays.
+    const old = migrate({ schemaVersion: 3, settings: { adoptSplitMode: 'own' }, personas: {} });
+    assert.equal(old.settings.adoptSplitMode, 'whole');
+    old.settings.adoptSplitMode = 'own';
+    assert.equal(migrate(old).settings.adoptSplitMode, 'own');
+    const picked = migrate({ schemaVersion: 3, settings: { adoptSplitMode: 'defaults' }, personas: {} });
+    assert.equal(picked.settings.adoptSplitMode, 'defaults');
 });
 
 /* 원래 항목 그대로 */
