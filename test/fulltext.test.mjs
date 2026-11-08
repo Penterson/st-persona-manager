@@ -138,3 +138,25 @@ test('a joined text cleared down to nothing empties every item', () => {
     const { p, blocks, texts } = setup('markdown', null, true);
     assert.deepEqual(splitFullText(p, blocks, '  \n\n', texts), { ok: true, texts: texts.map(() => '') });
 });
+
+/* Outside edits mapped back onto the items (manual import and the automatic pass) */
+
+import { planAbsorb, compose } from '../modules/compose.js';
+
+test('an outside edit over several filled items maps each part to its item', () => {
+    const p = persona('markdown', null, false);
+    const plan = planAbsorb(p, compose(p).text.replace('조용함', '다정함'));
+    assert.ok(plan.ok);
+    assert.deepEqual(plan.writes.find(w => w.sectionId === 'b'), { sectionId: 'b', text: '다정함' });
+});
+
+test('an outside edit that lost a title, or has no titles to split by, is refused', () => {
+    assert.deepEqual(planAbsorb(persona('markdown', null, false), '## 외모\n검은 머리\n\n다정함'), { ok: false, reason: 'noMatch' });
+    assert.deepEqual(planAbsorb(persona('none', null, false), '아무 글'), { ok: false, reason: 'noTitles' });
+});
+
+test('with one filled item the whole outside text goes there, its own title stripped', () => {
+    const p = persona('markdown', null, false);
+    p.variants.b[0].text = '';
+    assert.deepEqual(planAbsorb(p, '## 외모\n새 글\n둘째 줄'), { ok: true, writes: [{ sectionId: 'a', text: '새 글\n둘째 줄' }] });
+});

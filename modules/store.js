@@ -34,6 +34,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
     injectAssetMacros: true,
     // Acts only on personas with a name registered for the chat's language.
     autoLocalName: true,
+    // Edits in SillyTavern's own persona box flow into the items (state.js autoAbsorbOutside).
+    autoAbsorbOutside: true,
     defaultHeadingFormat: 'none',
     // How adopt seeds a description (state.js seedDescription).
     adoptSplitMode: 'own',

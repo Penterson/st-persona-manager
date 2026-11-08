@@ -320,6 +320,8 @@ async function tour(width, label, light) {
         p.variants[p.sections[0].id][0].text = '검은 머리';
         p.variants[p.sections[1].id][0].text = '조용함';
         p.headingFormat = 'markdown';
+        // The banner's manual buttons first; the automatic pass is driven below.
+        c.extensionSettings['persona-manager'].settings.autoAbsorbOutside = false;
     });
     await page.evaluate(() => document.dispatchEvent(new CustomEvent('pm:changed')));
     await openPanel(page);
@@ -396,6 +398,50 @@ async function tour(width, label, light) {
     expect(`${label} absorb clears the banner`, await page.locator('.pm-quickbar-banner', { hasText: '외부' }).count() === 0);
     await page.keyboard.press('Escape');
     await page.waitForTimeout(100);
+
+    /* Automatic pass: typing in SillyTavern's persona box reaches the items after a pause,
+       and SillyTavern's text stays as typed. */
+    await page.evaluate(() => {
+        const c = window.SillyTavern.getContext();
+        const p = c.extensionSettings['persona-manager'].personas['1700000000000-alice.png'];
+        c.extensionSettings['persona-manager'].settings.autoAbsorbOutside = true;
+        p.variants[p.sections[0].id][0].text = '검은 머리';
+        p.variants[p.sections[1].id][0].text = '조용함';
+        p.headingFormat = 'markdown';
+    });
+    await page.evaluate(() => document.dispatchEvent(new CustomEvent('pm:changed')));
+    await openPanel(page);
+    await ensureOpen(page, 0);
+    await page.locator('.pm-quickbar-row', { hasText: 'v1' }).first().click();
+    await page.waitForTimeout(200);
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(100);
+    const typedInST = '## 외모\n검은 머리, 큰 키\n\n## 성격\n조용하고 다정함\n';
+    // Two keystrokes' worth of events, as SillyTavern emits one per input.
+    await outside('## 외모\n검은 머리, 큰\n\n## 성격\n조용함');
+    await page.waitForTimeout(100);
+    await outside(typedInST);
+    await page.waitForTimeout(1000);
+    const auto = await liveTexts();
+    expect(`${label} an edit in SillyTavern reaches the items by itself`, auto[0] === '검은 머리, 큰 키' && auto[1] === '조용하고 다정함', auto);
+    const stText = await page.evaluate(() => window.SillyTavern.getContext().powerUserSettings.persona_descriptions['1700000000000-alice.png'].description);
+    expect(`${label} SillyTavern's text stays as typed`, stText === typedInST, stText);
+    await openPanel(page);
+    await page.waitForTimeout(100);
+    expect(`${label} an absorbed edit shows no banner`, await page.locator('.pm-quickbar-banner', { hasText: '외부' }).count() === 0);
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(100);
+    await outside('## 외모\n검은 머리\n\n제목이 지워진 글');
+    await page.waitForTimeout(1000);
+    await openPanel(page);
+    await page.waitForTimeout(100);
+    expect(`${label} a refused automatic pass says why on the banner`, await page.locator('.pm-quickbar-banner', { hasText: '자동 반영 불가' }).count() === 1);
+    await shot('15c-auto-refused');
+    await page.locator('.pm-quickbar-banner .pm-quickbar-btn', { hasText: '되돌리기' }).click();
+    await page.waitForTimeout(200);
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(100);
+    await page.evaluate(() => { window.SillyTavern.getContext().extensionSettings['persona-manager'].settings.autoAbsorbOutside = false; });
 
     /* Several items deleted at once; deleting all of them leaves one empty item */
     await openPanel(page);

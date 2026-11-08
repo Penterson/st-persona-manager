@@ -3,8 +3,8 @@ import { MODULE_NAME, migrate, getPersona, ensurePersona, liveVariant, usageByte
 import {
     resolveAvatar, findDuplicateNames, loadPreciseApi, freshContext, selectedAvatarFromDom,
 } from './ctx.js';
-import { writeDescription, hasDiverged, compose, markComposed, baselineSignature } from './compose.js';
-import { addLog } from './history.js';
+import { writeDescription, hasDiverged, compose, markComposed, baselineSignature, planAbsorb } from './compose.js';
+import { addLog, snapshot, expireOldHistory, enforceGlobalBudget } from './history.js';
 import { splitDescription, seedFromSplit, splitOwnSections, seedOwnSections, sameText } from './classify.js';
 import { STRINGS } from './strings.js';
 import { clearSearchCaches } from './search-pure.js';
@@ -275,6 +275,43 @@ export function saveAndComposeFor(avatarId, { write = true, outside = 'keep', fo
     const result = writeOrKeep(ctx, avatarId, persona, active.avatar, { write, outside, force });
     // No persona confirmed active: only the stored copy was written, which the caller reports.
     return !result.kept && !active.avatar ? { ...result, activeUnknown: true } : result;
+}
+
+/* An edit made in SillyTavern's own persona box, taken into the active persona's items as it
+   happens (settings.autoAbsorbOutside). SillyTavern's text is left exactly as typed: it
+   becomes the new baseline, so nothing is written back into the box while the user types.
+   Snapshots are not forced, so a burst of typing keeps one history entry per merge window.
+   Returns null when there is nothing to do, else planAbsorb's refusal or { ok, changed }. */
+export function autoAbsorbOutside() {
+    const ctx = provider();
+    if (!ctx) return null;
+    const root = getRoot();
+    if (!root || root.readOnly || root.settings?.autoAbsorbOutside === false) return null;
+    const active = resolveActive(ctx);
+    if (active.ambiguous || !active.avatar) return null;
+    const persona = getPersona(root, active.avatar);
+    if (!persona || !hasDiverged(ctx, active.avatar, persona)) return null;
+    const text = ctx.powerUserSettings?.persona_descriptions?.[active.avatar]?.description ?? '';
+    const plan = planAbsorb(persona, text);
+    if (!plan.ok) return plan;
+    const now = Date.now();
+    const changed = [];
+    for (const write of plan.writes) {
+        const section = (persona.sections ?? []).find(entry => entry.id === write.sectionId);
+        const variant = section ? liveVariant(persona, section) : null;
+        if (!variant || (variant.text ?? '') === write.text) continue;
+        snapshot(persona, variant.id, variant.text ?? '', now, root.settings);
+        variant.text = write.text;
+        variant.updatedAt = now;
+        changed.push(section.name ?? '');
+    }
+    expireOldHistory(root, root.settings, now);
+    enforceGlobalBudget(root, root.settings, now);
+    if (changed.length) addLog(persona, 'diverge-auto', changed.join(', '), now);
+    markComposed(persona, text);
+    ctx.saveSettingsDebounced?.();
+    refreshWith(ctx);
+    return { ok: true, changed };
 }
 
 export async function refreshAssets() {

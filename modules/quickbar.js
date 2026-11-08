@@ -5,7 +5,7 @@ import {
     getState, saveAndCompose, adopt, getPreciseApi, getRoot, adoptFor, refresh, KEEP_DESCRIPTION_KINDS,
 } from './state.js';
 import { freshContext } from './ctx.js';
-import { compose, headingLine, closingLine, splitByComposition } from './compose.js';
+import { compose, planAbsorb } from './compose.js';
 import { addLog, snapshot, enforceGlobalBudget, expireOldHistory } from './history.js';
 import { toggleMember, SORT_KEYS, livingLabels } from './roster.js';
 import {
@@ -842,84 +842,39 @@ function revertOutsideEdit() {
     commit('diverge-revert', '', { outside: 'keep', force: true });
 }
 
-// The own-format closing line at the very end, stripped like the leading heading.
-function stripTrailingLine(text, closing) {
-    const source = String(text ?? '');
-    if (!closing) return source;
-    const trimmed = source.replace(/\s+$/, '');
-    if (!trimmed.endsWith(closing)) return source;
-    const rest = trimmed.slice(0, -closing.length);
-    if (rest && !/\n[ \t]*$/.test(rest)) return source;
-    return rest.replace(/\s+$/, '');
-}
-
-function stripLeadingHeading(text, heading) {
-    const source = String(text ?? '');
-    if (!heading) return source;
-    const trimmed = source.replace(/^\s+/, '');
-    if (!trimmed.startsWith(heading)) return source;
-    const rest = trimmed.slice(heading.length);
-    // Whole lines only, so a heading never eats the start of text beginning with it.
-    if (rest && !/^[ \t]*(\r?\n|$)/.test(rest)) return source;
-    return rest.replace(/^[ \t]*\r?\n/, '');
-}
-
 function absorbOutsideEdit() {
     const s = guardAvatar();
     if (!s?.persona) return;
     const text = freshContext()?.powerUserSettings?.persona_descriptions?.[s.avatar]?.description ?? '';
-    const sections = s.persona.sections ?? [];
-    /* The outside edit goes back into the items. With several filled items it is
-       split along the composed title lines (splitByComposition), refused if one is
-       missing or out of order; otherwise it all goes into the filled item, or the
-       first, as import does. */
-    const liveBody = sec => liveVariant(s.persona, sec);
-    const filled = sections.filter(sec => !!(liveBody(sec)?.text ?? '').trim());
-    if (filled.length > 1) {
-        // With no titles printed (the default) there is nothing to divide along.
-        if (!headingLine(s.persona.headingFormat, 'x', s.persona.headingTemplate)) {
-            notify('warning', STRINGS.quick.absorbNoTitles);
-            return;
-        }
-        const parts = splitByComposition(s.persona, text);
-        if (!parts) { notify('warning', STRINGS.quick.absorbNoMatch); return; }
-        const now = Date.now();
-        const changed = [];
-        for (const part of parts) {
-            const section = sections.find(sec => sec.id === part.sectionId);
-            const variant = section ? liveBody(section) : null;
-            if (!variant || (variant.text ?? '') === part.text) continue;
-            // Into history first, forced past the merge window, as below.
-            snapshot(s.persona, variant.id, variant.text ?? '', now, s.settings, { force: true });
-            variant.text = part.text;
-            variant.updatedAt = now;
-            changed.push(section.name ?? '');
-        }
-        expireOldHistory(s.root, s.settings, now);
-        enforceGlobalBudget(s.root, s.settings, now);
-        commit('diverge-absorb', changed.join(', '), { outside: 'discard' });
+    // The same mapping the automatic pass uses (compose.js planAbsorb).
+    const plan = planAbsorb(s.persona, text);
+    if (!plan.ok) {
+        notify(plan.reason === 'noItem' ? 'error' : 'warning', absorbRefusal(plan.reason));
         return;
     }
-    const target = filled[0] ?? sections[0] ?? null;
-    const variant = target ? liveBody(target) : null;
-    if (!target || !variant) { notify('error', STRINGS.quick.absorbNoItem); return; }
     const now = Date.now();
-    // The overwritten text goes into history first; forced, because inside the merge
-    // window a plain snapshot is skipped.
-    snapshot(s.persona, variant.id, variant.text ?? '', now, s.settings, { force: true });
-    // The per-variant cap does not bound the total in settings.json, and a
-    // snapshot is the only time it grows, so the global cap is enforced here.
+    const changed = [];
+    for (const write of plan.writes) {
+        const section = (s.persona.sections ?? []).find(sec => sec.id === write.sectionId);
+        const variant = section ? liveVariant(s.persona, section) : null;
+        if (!variant || (variant.text ?? '') === write.text) continue;
+        // Into history first, forced: inside the merge window a plain snapshot is skipped.
+        snapshot(s.persona, variant.id, variant.text ?? '', now, s.settings, { force: true });
+        variant.text = write.text;
+        variant.updatedAt = now;
+        changed.push(section.name ?? '');
+    }
+    // The per-variant cap does not bound the total in settings.json, and a snapshot is the
+    // only time it grows, so the global cap is enforced here.
     expireOldHistory(s.root, s.settings, now);
     enforceGlobalBudget(s.root, s.settings, now);
-    // The outside text is composed, so it carries this item's heading; stored as is,
-    // every absorb would stack one more.
-    const format = s.persona.headingFormat;
-    const name = target.name ?? '';
-    variant.text = target.untitled ? text : stripTrailingLine(
-        stripLeadingHeading(text, headingLine(format, name, s.persona.headingTemplate)),
-        closingLine(format, name, s.persona.headingTemplate));
-    variant.updatedAt = now;
-    commit('diverge-absorb', target.name ?? '', { outside: 'discard' });
+    commit('diverge-absorb', changed.join(', '), { outside: 'discard' });
+}
+
+export function absorbRefusal(reason) {
+    if (reason === 'noTitles') return STRINGS.quick.absorbNoTitles;
+    if (reason === 'noMatch') return STRINGS.quick.absorbNoMatch;
+    return STRINGS.quick.absorbNoItem;
 }
 
 /* Label and settings writes are not tied to the persona the panel opened on, so they check
@@ -1193,8 +1148,17 @@ function rowOf(text, onClick) {
 
 function bannerOf(className, message) { return sharedBanner('pm-quickbar', className, message); }
 
+// With the automatic pass on, a banner still showing means it was refused: say why.
+function divergedMessage() {
+    const s = getState();
+    if (!s?.persona || s.settings?.autoAbsorbOutside === false) return STRINGS.quick.divergedBanner;
+    const text = freshContext()?.powerUserSettings?.persona_descriptions?.[s.avatar]?.description ?? '';
+    const plan = planAbsorb(s.persona, text);
+    return plan.ok ? STRINGS.quick.divergedBanner : STRINGS.quick.divergedBannerAuto(absorbRefusal(plan.reason));
+}
+
 function divergedBanner(writable) {
-    const box = bannerOf('pm-quickbar-warn', STRINGS.quick.divergedBanner);
+    const box = bannerOf('pm-quickbar-warn', divergedMessage());
     const actions = el('div', 'pm-quickbar-actions');
     const handlers = {
         revert: () => revertOutsideEdit(),

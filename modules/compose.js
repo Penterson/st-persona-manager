@@ -145,6 +145,52 @@ export function splitByComposition(persona, text) {
     return out;
 }
 
+// The own-format closing line at the very end, stripped like the leading heading.
+export function stripTrailingLine(text, closing) {
+    const source = String(text ?? '');
+    if (!closing) return source;
+    const trimmed = source.replace(/\s+$/, '');
+    if (!trimmed.endsWith(closing)) return source;
+    const rest = trimmed.slice(0, -closing.length);
+    if (rest && !/\n[ \t]*$/.test(rest)) return source;
+    return rest.replace(/\s+$/, '');
+}
+
+export function stripLeadingHeading(text, heading) {
+    const source = String(text ?? '');
+    if (!heading) return source;
+    const trimmed = source.replace(/^\s+/, '');
+    if (!trimmed.startsWith(heading)) return source;
+    const rest = trimmed.slice(heading.length);
+    // Whole lines only, so a heading never eats the start of text beginning with it.
+    if (rest && !/^[ \t]*(\r?\n|$)/.test(rest)) return source;
+    return rest.replace(/^[ \t]*\r?\n/, '');
+}
+
+/* An outside edit (SillyTavern's own persona box) mapped back onto the items, without
+   changing anything: { ok: true, writes: [{ sectionId, text }] } or { ok: false, reason }.
+   With several filled items it is split along the composed title lines, refused when one is
+   missing or out of order ('noMatch') or none are printed ('noTitles'); otherwise it all goes
+   to the filled item, or the first, its own title stripped. */
+export function planAbsorb(persona, text) {
+    const sections = persona?.sections ?? [];
+    const filled = sections.filter(section => !!(liveVariant(persona, section)?.text ?? '').trim());
+    if (filled.length > 1) {
+        if (!headingLine(persona.headingFormat, 'x', persona.headingTemplate)) return { ok: false, reason: 'noTitles' };
+        const parts = splitByComposition(persona, text);
+        if (!parts) return { ok: false, reason: 'noMatch' };
+        return { ok: true, writes: parts.map(part => ({ sectionId: part.sectionId, text: part.text })) };
+    }
+    const target = filled[0] ?? sections[0] ?? null;
+    if (!target || !liveVariant(persona, target)) return { ok: false, reason: 'noItem' };
+    const format = persona.headingFormat;
+    const name = target.name ?? '';
+    const body = target.untitled ? String(text ?? '') : stripTrailingLine(
+        stripLeadingHeading(text, headingLine(format, name, persona.headingTemplate)),
+        closingLine(format, name, persona.headingTemplate));
+    return { ok: true, writes: [{ sectionId: target.id, text: body }] };
+}
+
 /* The full-text screen's joined view, edited and divided back into its blocks (from
    buildReplaceBlocks, empty bodies included). current holds the working texts the view
    was joined from: a block printed there must keep its title line; an empty one is filled

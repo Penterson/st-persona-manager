@@ -1,7 +1,7 @@
 // The settings screen: an inline drawer among the other extensions' settings, toggled by its own
 // handler (see buildPanel). Handlers look everything up when they run.
 import { MODULE_NAME, makeId, pruneEmpty, HEADING_FORMATS, TILE_SHAPES, ADOPT_MODES } from './store.js';
-import { getRoot, getState, readUsageBytes, refresh } from './state.js';
+import { getRoot, getState, readUsageBytes, refresh, autoAbsorbOutside } from './state.js';
 import { freshContext, getPrecisePath, avatarBlockReport } from './ctx.js';
 import { addLog, expireOldHistory, enforceGlobalBudget } from './history.js';
 import { resolveFolderKey, buildImgHtml, withoutBackups } from './assets.js';
@@ -94,6 +94,10 @@ function toggleField(key, labelText, hint) {
             else cancelAutoName();
         }
         save();
+        // A pending outside edit is taken in as soon as the switch goes on.
+        if (key === 'autoAbsorbOutside' && input.checked && autoAbsorbOutside()?.ok) {
+            document.dispatchEvent(new CustomEvent('pm:changed'));
+        }
         syncFields();
     });
     return rowOf(labelText, input, hint);
@@ -534,6 +538,7 @@ function buildPanel() {
     content.append(numberField('historyCoalesceMinutes', STRINGS.settings.historyCoalesceMinutes, STRINGS.settings.historyCoalesceMinutesHint));
 
     content.append(sectionHead(sections.text));
+    content.append(toggleField('autoAbsorbOutside', STRINGS.settings.autoAbsorbOutside, STRINGS.settings.autoAbsorbOutsideHint));
     content.append(toggleField('autoLocalName', STRINGS.settings.autoLocalName, STRINGS.settings.autoLocalNameHint));
     // How adopting a persona takes in its description (state.js seedDescription).
     content.append(selectField('adoptSplitMode', named(ADOPT_MODES, STRINGS.settings.adoptModeNames),
