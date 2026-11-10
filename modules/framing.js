@@ -1,7 +1,7 @@
 // Framing a version's picture: a crop stored as fractions, sent as SillyTavern's crop query.
 
-/* SillyTavern covers avatars to 512 x 768 when resizing, so a crop of any other shape would
-   be cropped again around its centre; 2:3 is only scaled. */
+/* SillyTavern covers avatars to 512 x 768, so a crop of any other shape would be cut again at
+   its centre; 2:3 is only scaled. */
 const FRAME_ASPECT = 512 / 768;
 
 // The crop never gets narrower than a fifth of the largest the picture allows.
@@ -15,14 +15,14 @@ export function validCrop(crop) {
     if (!crop || typeof crop !== 'object') return null;
     const { x, y, w, h } = crop;
     if (![x, y, w, h].every(finite)) return null;
-    // A rounding hair past an edge is still the edge (a frame against the left edge gives -2e-17).
+    // A rounding hair past an edge is the edge (a frame against the left edge gives -2e-17).
     if (w <= 0 || h <= 0 || x < -0.000001 || y < -0.000001) return null;
     if (x + w > 1.000001 || y + h > 1.000001) return null;
     return { x: Math.max(0, x), y: Math.max(0, y), w, h };
 }
 
-// The largest frame-shaped rectangle the picture holds, in pixels: what zoom 1
-// shows, and what the server's cover would have taken from the centre.
+// The largest frame-shaped rectangle the picture holds, in pixels: what zoom 1 shows and the
+// server's cover takes.
 export function coverSize(nw, nh, aspect = FRAME_ASPECT) {
     if (!(nw > 0 && nh > 0)) return null;
     return nw / nh > aspect ? { w: nh * aspect, h: nh } : { w: nw, h: nw / aspect };
@@ -40,7 +40,7 @@ export function clampView(nw, nh, view, aspect = FRAME_ASPECT) {
     return { zoom, cx, cy };
 }
 
-// The clamped view and the frame it shows, in picture pixels.
+// The clamped view and its frame, in picture pixels.
 function frameOf(nw, nh, view, aspect) {
     const v = clampView(nw, nh, view, aspect);
     if (!v) return null;

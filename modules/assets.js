@@ -68,9 +68,9 @@ export function labelOf(filename) {
     return String(filename ?? '').replace(/\.[^.]*$/, '');
 }
 
-/* The asset's real name: the file name without extension, from the server's path. The
-   server's own label is lowercased and cut at the first dash or dot (grouping for the
-   expressions extension), so it cannot serve as an identity. */
+/* The asset's real name: the file name without extension, from the server's path. The server's
+   own label is lowercased and cut at the first dash or dot (grouping for the expressions
+   extension), so it is no identity. */
 export function assetNameFromPath(path) {
     const raw = String(path ?? '').split('?')[0].split('#')[0];
     const file = raw.slice(raw.lastIndexOf('/') + 1);
@@ -277,9 +277,7 @@ const TAG_RE = /\{\{pimg::(.*?)\}\}/gi;
 
 export function findTags(text) {
     const hits = [];
-    TAG_RE.lastIndex = 0;
-    let m;
-    while ((m = TAG_RE.exec(String(text ?? ''))) !== null) {
+    for (const m of String(text ?? '').matchAll(TAG_RE)) {
         const parsed = parseTag(m[1]);
         if (parsed) hits.push({ raw: m[0], start: m.index, end: m.index + m[0].length, parsed });
     }
@@ -366,9 +364,8 @@ export function renderInElement(el, resolvePath, style) {
     return replaced;
 }
 
-/* ── Per-version persona images ─────────────────────────────────────────────
-   Moves bytes between our sprite folder and SillyTavern's avatar file. Nothing here talks to
-   the user; callers decide what to say. */
+/* Per-version persona images: bytes between our sprite folder and SillyTavern's avatar file.
+   Nothing here talks to the user; callers decide what to say. */
 
 async function fetchBlob(url) {
     const res = await fetch(url, { cache: 'no-store' });
@@ -477,9 +474,9 @@ export async function imageSize(file) {
     } finally { URL.revokeObjectURL(url); }
 }
 
-/* Puts a version's bound asset onto the avatar file. Never throws (callers run it with void),
-   so a picture that fails to move cannot undo a version apply. Answers a skipped/error code or
-   ok, and every answer past the backup step carries backup. */
+/* Puts a version's bound asset onto the avatar file. Never throws (callers run it with void), so
+   a picture that fails to move cannot undo a version apply. Answers skipped, an error code or
+   ok; every answer past the backup step carries backup. */
 export async function applyBoundImage({ ctx, root, persona, avatarId, label, exact = false, crop, force, known, now }) {
     if (!label) return { skipped: 'none' };
     // Keyed on label and crop: the same picture framed anew is written again.
@@ -576,11 +573,10 @@ export function unregisterAssetMacros(ctx) {
     for (const name of MACROS) ctx.unregisterMacro(name);
 }
 
-/* ── Persona avatars ─────────────────────────────────────────────────────────
-   SillyTavern's own persona picture, drawn everywhere for the persona. */
+// Persona avatars: SillyTavern's own persona picture, drawn everywhere for the persona.
 
-/* Drops the browser's cached copy, as SillyTavern does after its own upload. Bounded, so a
-   slow server cannot hold up the repaint that follows. */
+/* Drops the browser's cached copy, as SillyTavern does after its own upload; bounded, so a slow
+   server cannot hold up the repaint. */
 const BUST_TIMEOUT_MS = 3000;
 
 async function bustPersonaImage(ctx, avatarId) {

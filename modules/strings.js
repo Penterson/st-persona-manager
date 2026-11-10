@@ -89,7 +89,6 @@ export const STRINGS = deepFreeze({
         // show a combination the prompt does not contain.
         deletedChoiceOption: '(삭제된 선택지)',
         popupBlocked: '현재 브라우저에서 확인 창 차단 또는 취소. 변경 사항 없음',
-        // Boot-time warning from index.js.
         noRegisterMacro: '현재 빌드에 매크로 등록 기능이 없어 에셋 매크로 사용 불가. 나머지 기능은 정상 동작',
         copySuffix: name => `${name} 복사본`,
         // The one separator for every single-line list.
@@ -116,7 +115,6 @@ export const STRINGS = deepFreeze({
         // Icon label with no version selected, and the suffix once picks move off it.
         iconNoVersion: '버전 없음',
         iconModifiedSuffix: ' (수정 있음)',
-        // The diverged banner's three controls.
         divergeRevert: '되돌리기',
         divergeAbsorb: '가져오기',
         divergeLater: '나중에',
@@ -185,7 +183,6 @@ export const STRINGS = deepFreeze({
         sortCaption: '정렬:',
         rosterUnavailable: '페르소나 목록 불러오기 실패',
         footerAssets: '에셋',
-        // The panel footer reaches every manager tab directly.
         footerCompose: '편집',
         footerVersions: '버전',
         footerHistory: '이력',
@@ -304,7 +301,6 @@ export const STRINGS = deepFreeze({
         noContext: 'SillyTavern 연결 실패',
 
         /* Compose tab */
-        // Tags: the chip row at the top of the compose tab.
         personaTagsHead: '태그',
         tagAdd: '+ 태그',
         tagAddPrompt: '새 태그',
@@ -323,7 +319,6 @@ export const STRINGS = deepFreeze({
         // The description's own title style, shown as the pattern it prints.
         headingFormatOwn: open => `원래 형식 (${String(open ?? '').split('{name}').join('이름')})`,
         headingFormatHint: '각 항목 본문 앞에 항목 이름을 넣는 형식. 없음이면 본문만 연결. 원래 형식은 가져온 설명문의 제목 모양 그대로',
-        // Fill in default sections.
         fillDefaults: '기본 항목 채우기',
         confirmFillDefaults: n => `기본 항목 ${n}개 추가`,
         fillDefaultsNothing: '추가할 기본 항목 없음',
@@ -461,7 +456,6 @@ export const STRINGS = deepFreeze({
         editValue: '수정',
         connectValue: '연결',
 
-        // Per-language names, stored on our record (see setLocalName).
         localNamesHead: '언어별 이름',
         localNamesEmpty: '등록된 다른 이름 없음',
         localNameEditHint: '언어 행 누르기 → 이름 수정',
@@ -488,7 +482,6 @@ export const STRINGS = deepFreeze({
         confirmApplyNameClash: to => `채팅 이름 "${to}" 적용 (대화 속 동명 인물 있음)`,
         listNameApplied: name => `목록 이름 "${name}" 변경 완료`,
         autoNameClashSkipped: name => `대화 속 동명 인물 있음. 자동 적용 생략: ${name}`,
-        // The auto-apply switch, here as well as in the drawer, where names are entered.
         autoNameRow: '자동 적용',
         autoNameTurnOn: '켜기',
         autoNameTurnOff: '끄기',
@@ -510,7 +503,6 @@ export const STRINGS = deepFreeze({
         // The upload uses SillyTavern's own controls; a build lacking one names which.
         changeImageNoControl: id => `SillyTavern 업로드 칸 없음: ${id}`,
         changeImageDone: '이미지 교체 완료',
-        // Carries the server's status for the upload.
         changeImageFailed: detail => `이미지 교체 실패: ${detail}`,
         // The fallback ends in SillyTavern's crop dialog, whose outcome we cannot see.
         changeImageHandedOver: 'SillyTavern 자르기 창에서 계속 진행',
@@ -532,7 +524,6 @@ export const STRINGS = deepFreeze({
         createRenameFailed: name => `생성 완료. 이름 변경 실패로 "${name}" 유지`,
         createDone: name => `"${name}" 생성 완료`,
 
-        // Copy onto an existing persona (see copyPersonaOnto).
         copyOpen: '다른 페르소나로 복사',
         copyHead: '복사 대상 고르기',
         copyGuide: 'SillyTavern에 이미 있는 페르소나로만 복사 가능. 새 페르소나는 [새 페르소나 생성]',
@@ -703,7 +694,6 @@ export const STRINGS = deepFreeze({
         title: APP_NAME,
         // Set large in the band, so it must stay short enough for a phone.
         bandWord: '설정',
-        // Captions over the drawer's groups of rows.
         sections: {
             display: '표시',
             list: '페르소나 목록',

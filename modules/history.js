@@ -1,15 +1,14 @@
-// Edit history: snapshots, caps, global eviction and restore.
-// Per variant caps alone do not bound total size.
+// Edit history: snapshots, per-variant and global caps, restore and the word diff.
 import { STRINGS } from './strings.js';
 
 const LOG_CAP = 200;
 
-// Self-reported kinds that can recur on every save; a repeat of the last line only
-// moves its time, so copies cannot push the user's own record out of the cap.
+// Self-reported kinds that can recur on every save: a repeat only moves the last line's time, so
+// copies cannot push the user's own record out of the cap.
 const REPEATING_KINDS = new Set(['compose-missing', 'history-evicted', 'history-expired']);
 
 export function addLog(persona, kind, detail, now) {
-    // Hand-edited settings.json can hold any shape, and a throw here is in the save path.
+    // Hand-edited settings.json can hold any shape, and this runs in the save path.
     if (!Array.isArray(persona.log)) persona.log = [];
     const last = persona.log[persona.log.length - 1];
     if (REPEATING_KINDS.has(kind) && last?.kind === kind && last.detail === detail) {
@@ -20,14 +19,14 @@ export function addLog(persona, kind, detail, now) {
     if (persona.log.length > LOG_CAP) persona.log.splice(0, persona.log.length - LOG_CAP);
 }
 
-// force skips only the merge window: a write that moves text out of a body (split by
-// title) must leave the replaced body in history, as its success message promises.
+// force skips only the merge window: a split by title must leave the replaced body in history, as
+// its success message promises.
 export function snapshot(persona, variantId, previousText, now, settings, { force = false } = {}) {
     const cap = settings.historyPerVariant ?? 0;
     if (cap <= 0) return false;
 
     if (!persona.history) persona.history = {};
-    // Array.isArray, not ?? []: an unreadable value (hand edit) is replaced, not pushed onto.
+    // An unreadable value (hand edit) is replaced, not pushed onto.
     const stored = persona.history[variantId];
     const list = Array.isArray(stored) ? stored : [];
     const last = list[list.length - 1];
@@ -42,7 +41,7 @@ export function snapshot(persona, variantId, previousText, now, settings, { forc
     return true;
 }
 
-// A snapshot's share of the budget: its text plus a fixed allowance for the record around it.
+// A snapshot's share of the budget: its text plus a fixed allowance for the record.
 const encoder = new TextEncoder();
 const entryBytes = entry => encoder.encode(String(entry?.text ?? '')).length + 24;
 
@@ -58,33 +57,47 @@ export function historyBytes(root) {
     return total;
 }
 
-// Age-based expiry, run before the byte budget so that has less to evict. 0 (default)
-// never expires; snapshots without a usable timestamp are kept (a missing at is our bug).
-export function expireOldHistory(root, settings, now = Date.now()) {
-    const days = Number(settings?.historyMaxDays ?? 0);
-    if (!Number.isFinite(days) || days <= 0) return 0;
-    const cutoff = now - days * 86400000;
+// Keeps keep(list) of every variant's snapshots and answers how many went. Each persona that lost
+// some gets a log line, or the loss reads as data loss.
+function pruneHistory(root, keep, kind, detail, now) {
     let dropped = 0;
     for (const persona of Object.values(root?.personas ?? {})) {
         const history = persona?.history;
         if (!history || typeof history !== 'object') continue;
-        let personaDropped = 0;
+        let lost = 0;
         for (const [variantId, list] of Object.entries(history)) {
             if (!Array.isArray(list)) continue;
-            const kept = list.filter(entry => {
-                const at = Number(entry?.at);
-                return !Number.isFinite(at) || at >= cutoff;
-            });
+            const kept = keep(list);
             if (kept.length === list.length) continue;
-            dropped += list.length - kept.length;
-            personaDropped += list.length - kept.length;
+            lost += list.length - kept.length;
             if (kept.length) history[variantId] = kept;
             else delete history[variantId];
         }
-        // History that vanishes without a log line is indistinguishable from data loss.
-        if (personaDropped) addLog(persona, 'history-expired', STRINGS.manager.logDetails.expired(personaDropped), now);
+        if (lost) addLog(persona, kind, detail(lost), now);
+        dropped += lost;
     }
     return dropped;
+}
+
+// Age-based expiry, run before the byte budget so that has less to evict. 0 (default) never
+// expires; snapshots without a usable timestamp are kept.
+export function expireOldHistory(root, settings, now = Date.now()) {
+    const days = Number(settings?.historyMaxDays ?? 0);
+    if (!Number.isFinite(days) || days <= 0) return 0;
+    const cutoff = now - days * 86400000;
+    return pruneHistory(root, list => list.filter(entry => {
+        const at = Number(entry?.at);
+        return !Number.isFinite(at) || at >= cutoff;
+    }), 'history-expired', STRINGS.manager.logDetails.expired, now);
+}
+
+// A lowered per-variant cap applied to stored history, oldest first (snapshot enforces it only on
+// the variant it writes).
+export function trimPerVariant(root, settings, now = Date.now()) {
+    const cap = Number(settings?.historyPerVariant ?? 0);
+    if (!Number.isFinite(cap) || cap < 0) return 0;
+    return pruneHistory(root, list => (list.length > cap ? list.slice(list.length - cap) : list),
+        'history-evicted', STRINGS.manager.logDetails.trimmed, now);
 }
 
 // Both global caps, as every snapshot write applies them; answers how many entries went.
@@ -94,11 +107,11 @@ export function capHistory(root, settings, now) {
 
 export function enforceGlobalBudget(root, settings, now = Date.now()) {
     const limit = settings.historyMaxBytes ?? Infinity;
-    // Measured once, then a running total: rescanning per evicted entry freezes the UI.
+    // Measured once, then a running total: rescanning per eviction freezes the UI.
     let total = historyBytes(root);
     if (total <= limit) return 0;
 
-    // Flatten every snapshot with its location so we can evict globally oldest first.
+    // Every snapshot with its location, to evict the globally oldest first.
     const all = [];
     for (const persona of Object.values(root.personas ?? {})) {
         if (!persona || typeof persona !== 'object') continue;
@@ -109,7 +122,7 @@ export function enforceGlobalBudget(root, settings, now = Date.now()) {
     }
     all.sort((a, b) => a.at - b.at);
 
-    // Per-persona counts, so each log reports its own loss, not the global total.
+    // Per persona, so each log line reports its own loss.
     const lost = new Map();
     let evicted = 0;
     for (const item of all) {
@@ -133,7 +146,7 @@ export function restore(persona, variantId, index, now, settings) {
     if (index < 0 || index >= list.length) throw new RangeError(`history index ${index} out of range`);
     const wanted = list[index].text;
 
-    // Restoring is not destructive: the text we are leaving becomes recoverable too.
+    // Restoring is not destructive: the text being left becomes a snapshot too.
     const section = (persona.sections ?? []).find(s => (persona.variants[s.id] ?? []).some(v => v.id === variantId));
     const variant = section ? persona.variants[section.id].find(v => v.id === variantId) : null;
     if (variant) {
@@ -145,19 +158,19 @@ export function restore(persona, variantId, index, now, settings) {
     return wanted;
 }
 
-// Word level diff for the history view. Tokens keep their trailing whitespace so
-// that concatenating the same and del parts reproduces the original exactly.
+// Word tokens keep their whitespace, so joining the same and del parts reproduces the original
+// exactly.
 function tokenize(text) {
     return (text ?? '').match(/\s+|[^\s]+/g) ?? [];
 }
 
-// Line tokens for the fallback; each keeps its newline, so the same round trip holds.
+// Line tokens for the fallback keep their newline, for the same round trip.
 function tokenizeLines(text) {
     return String(text ?? '').match(/[^\n]*\n|[^\n]+/g) ?? [];
 }
 
-// Cells in the (a+1)*(b+1) Uint32 LCS table: a transient 16MB ceiling. At about one
-// token per two Korean characters, that is roughly 4000 characters a side.
+// Cells in the (a+1)*(b+1) Uint32 LCS table: a transient 16MB ceiling, roughly 4000 Korean
+// characters a side.
 const MAX_DIFF_CELLS = 4000000;
 
 function lcsTable(a, b) {
@@ -170,8 +183,8 @@ function lcsTable(a, b) {
     return table;
 }
 
-/* Shared leading and trailing tokens, so the table covers only the changed middle of
-   two copies of one body. Shared ends belong to every LCS, so the result stays optimal. */
+/* The table covers only the changed middle: shared ends belong to every LCS, so the result stays
+   optimal. */
 function commonEnds(a, b) {
     let start = 0;
     while (start < a.length && start < b.length && a[start] === b[start]) start++;
@@ -225,17 +238,17 @@ export function diffWords(before, after) {
     const b = tokenize(after);
     if (fitsTable(a, b)) return withLevel(lcsParts(a, b), false);
 
-    // Too many words: lines are far fewer, and still show which paragraphs changed.
+    // Too many words: lines are far fewer and still show which paragraphs changed.
     const la = tokenizeLines(before);
     const lb = tokenizeLines(after);
     if (fitsTable(la, lb)) {
         const parts = lcsParts(la, lb);
-        // Nothing shared looks exactly like the whole tier, so it is labelled 'whole'
-        // (as is every single-line body too long for words).
+        // With nothing shared it looks exactly like the whole tier, so it is labelled that (as is a
+        // single-line body too long for words).
         return withLevel(parts, parts.some(part => part.type === 'same') ? 'line' : 'whole');
     }
 
-    // Even the lines do not fit; joined tokens still reproduce both sides exactly.
+    // Even the lines do not fit; the joined tokens still reproduce both sides.
     const parts = [];
     if (a.length) parts.push({ type: 'del', text: a.join('') });
     if (b.length) parts.push({ type: 'add', text: b.join('') });

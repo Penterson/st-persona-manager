@@ -3,10 +3,10 @@
 import { MODULE_NAME, makeId, pruneEmpty, HEADING_FORMATS, TILE_SHAPES, ADOPT_MODES } from './store.js';
 import { getRoot, getState, readUsageBytes, refresh, autoAbsorbOutside } from './state.js';
 import { freshContext, saveSettings, getPrecisePath, avatarBlockReport } from './ctx.js';
-import { addLog, expireOldHistory, enforceGlobalBudget } from './history.js';
+import { addLog, expireOldHistory, enforceGlobalBudget, trimPerVariant } from './history.js';
 import { resolveFolderKey, buildImgHtml, withoutBackups } from './assets.js';
 import { notify, askConfirm, scheduleAutoName, cancelAutoName, requestManager } from './quickbar.js';
-import { el, track, runCleanups, blockDrawerClose, isComposingKey, selectOf, bandRow } from './dom.js';
+import { el, track, runCleanups, blockDrawerClose, isComposingKey, selectOf, bandRow, button } from './dom.js';
 import { invalidateManagerCaches } from './manager.js';
 import { clampSetting, SETTING_RANGES, TILE_COLUMN_CHOICES, serializeRoot, parseImportedRoot } from './manager-pure.js';
 import { STRINGS } from './strings.js';
@@ -17,7 +17,7 @@ const CONTENT_ID = `${PANEL_ID}_content`;
 const HOST_ID = 'extensions_settings2';
 
 let mounted = false;
-let cleanups = [];
+const cleanups = [];
 
 function save() {
     saveSettings();
@@ -27,29 +27,6 @@ function save() {
 
 function panel() {
     return typeof document === 'undefined' ? null : document.getElementById(PANEL_ID);
-}
-
-// Applies a lowered per-variant cap to existing history (history.js only enforces it on a
-// snapshot), oldest first.
-function trimPerVariant(root, settings, now = Date.now()) {
-    const cap = Number(settings?.historyPerVariant ?? 0);
-    if (!Number.isFinite(cap) || cap < 0) return 0;
-    let dropped = 0;
-    for (const persona of Object.values(root?.personas ?? {})) {
-        const history = persona?.history;
-        if (!history || typeof history !== 'object') continue;
-        let mine = 0;
-        for (const [variantId, list] of Object.entries(history)) {
-            if (!Array.isArray(list) || list.length <= cap) continue;
-            mine += list.length - cap;
-            if (cap === 0) delete history[variantId];
-            else list.splice(0, list.length - cap);
-        }
-        // Deleted history always gets a log line, or it reads as data loss.
-        if (mine) addLog(persona, 'history-evicted', STRINGS.manager.logDetails.trimmed(mine), now);
-        dropped += mine;
-    }
-    return dropped;
 }
 
 // Whether a new history cap can delete stored history. historyMaxDays 0 means never expire.
@@ -136,7 +113,6 @@ function numberField(key, labelText, hint) {
                 + trimPerVariant(after, after.settings, now)
                 + enforceGlobalBudget(after, after.settings, now);
         }
-        // Show the stored, clamped value rather than what was typed.
         input.value = String(value);
         save();
         if (dropped) notify('info', STRINGS.settings.historyTrimmed(dropped));
@@ -191,10 +167,8 @@ function templateField() {
 /* Buttons */
 
 function buttonOf(label, onClick, writes) {
-    const btn = el('button', 'pm-manager-btn', label);
-    btn.type = 'button';
+    const btn = button('pm-manager-btn', label, onClick);
     if (writes) btn.dataset.pmWrites = '1';
-    btn.addEventListener('click', onClick);
     return btn;
 }
 
@@ -225,8 +199,8 @@ function doPrune() {
     notify('info', removed.length ? STRINGS.settings.pruneDone(removed.length) : STRINGS.settings.pruneNothing);
 }
 
-// Confirms, then runs clear(persona, now), which answers how many entries it dropped, on every
-// record. The root is re-read after the await.
+// Confirms, then runs clear(persona, now) on every record (it answers how many entries it dropped),
+// re-reading the root after the await.
 async function clearEveryPersona(question, clear, done, nothing) {
     const writable = root => root && !root.readOnly;
     if (!writable(getRoot())) { notify('error', STRINGS.settings.clearHistoryReadOnly); return; }
@@ -367,7 +341,6 @@ async function doImportSettings(file) {
     const parsed = parseImportedRoot(text);
     if (!parsed.ok) { notify('error', parsed.message); return; }
     if (!(await askConfirm(STRINGS.settings.confirmImport))) return;
-    // Re-read after the await, as in doClearHistory.
     const ctx = freshContext();
     if (!ctx) { notify('error', STRINGS.settings.importNoContext); return; }
     const after = getRoot();
@@ -431,8 +404,8 @@ function refreshIdentify() {
     evidence.classList.remove('pm-hidden');
 }
 
-// The usage figure stringifies the whole root, so it is computed only on open, on request and
-// after storage changes, deferred so a burst computes once.
+// The usage figure stringifies the whole root, so it is computed only on open, on request and after
+// storage changes, once per burst.
 let usageTimer = 0;
 
 function refreshSettings() {
@@ -536,7 +509,6 @@ function buildPanel() {
     content.append(sectionHead(sections.text));
     content.append(toggleField('autoAbsorbOutside', STRINGS.settings.autoAbsorbOutside, STRINGS.settings.autoAbsorbOutsideHint));
     content.append(toggleField('autoLocalName', STRINGS.settings.autoLocalName, STRINGS.settings.autoLocalNameHint));
-    // How adopting a persona takes in its description (state.js seedDescription).
     content.append(selectField('adoptSplitMode', named(ADOPT_MODES, STRINGS.settings.adoptModeNames),
         STRINGS.settings.splitOnAdopt, STRINGS.settings.splitOnAdoptHint));
     content.append(selectField('defaultHeadingFormat', named(HEADING_FORMATS, STRINGS.manager.headingFormatNames),

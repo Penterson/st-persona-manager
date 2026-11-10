@@ -1,5 +1,5 @@
-// Search (chosung, sparse and typo-tolerant, graded ranking), language detection and
-// list paging. Pure: no DOM, no getContext, so Node tests can import it.
+// Search (chosung, sparse and typo-tolerant, graded ranking), language detection and list paging.
+// Pure.
 
 const CHO = ['ㄱ', 'ㄲ', 'ㄴ', 'ㄷ', 'ㄸ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅃ', 'ㅅ', 'ㅆ', 'ㅇ', 'ㅈ', 'ㅉ', 'ㅊ', 'ㅋ', 'ㅌ', 'ㅍ', 'ㅎ'];
 const SYL_FIRST = 0xAC00;
@@ -76,8 +76,8 @@ function approxDistance(text, q) {
 // Per-text cache (cleared past 5000 entries) and a last-query-only cache, which is
 // what a per-keystroke filter re-asks.
 const textCache = new Map();
-/* Three forms of one text; only the normalised one is built up front. The chosung form
-   and position table are built on first use, as body searches rarely need them. */
+/* Only the normalised form is built up front; the chosung form and position table wait for first
+   use, as body searches rarely need them. */
 function prepText(text) {
     let c = textCache.get(text);
     if (!c) {
@@ -250,9 +250,9 @@ export function detectLanguage(text) {
 const CHAT_LANGUAGE_SCAN_CHARS = 800;
 const CHAT_LANGUAGE_SCAN_MESSAGES = 6;
 
-/* ── Context-aware language ──────────────────────────────────────────────────
-   Each source votes with its weight, scaled by how much text backs it (FULL_AT); the
-   top language wins with at least MIN_EVIDENCE. Macros, markup and links never vote. */
+/* Context-aware language: each source votes with its weight, scaled by how much text backs it
+   (FULL_AT); the top language wins with at least MIN_EVIDENCE. Macros, markup and links never
+   vote. */
 const LANGUAGE_WEIGHTS = Object.freeze({
     user: 5,
     reply: 3,

@@ -1,6 +1,5 @@
-// Splits a description at its title lines into items, matched by name. Pure: no
-// document, no context, so the node suite runs it as is.
-import { makeId, appendSection, liveVariant, pickInEveryVersion } from './store.js';
+// Splits a description at its title lines into items, matched by name. Pure.
+import { makeId, appendSection, liveVariant, pickInEveryVersion, linesOf } from './store.js';
 import { STRINGS } from './strings.js';
 
 /* Title lines are whole lines: ## Name (a space after the marks, so #hashtag is content),
@@ -62,7 +61,7 @@ function matchTitle(title, names, keys) {
     if (whole !== -1) return whole;
     const bare = String(title ?? '')
         .replace(/^\s*\d{1,3}\s*[.)．]\s*/, '')
-        .replace(/\s*[(（\[][^)）\]]*[)）\]]\s*$/, '');
+        .replace(/\s*[(（[][^)）\]]*[)）\]]\s*$/, '');
     return matchKey(normalizeTitle(bare), names, keys);
 }
 
@@ -70,10 +69,9 @@ function matchTitle(title, names, keys) {
    else { preamble, parts: [{ title, index (-1: no such item), body }], format }, format
    being 'markdown', 'plain', or null for mixed styles compose cannot write. */
 export function splitDescription(text, sectionNames, home = 0) {
-    const source = String(text ?? '').replace(/\r\n?/g, '\n');
     const names = Array.isArray(sectionNames) ? sectionNames : [];
     const keys = keysFor(names);
-    const lines = source.split('\n');
+    const lines = linesOf(text);
     // First pass: what each line would be as a title, before deciding which ones are.
     const found = lines.map(raw => {
         const line = raw.trim();
@@ -182,15 +180,14 @@ export function itemsWithText(persona) {
     }).length;
 }
 
-/* ── Split by title, for a persona already managed ──────────────────────────
-   Moves titled parts of each live body to the items they name (or new ones). Nothing
-   is lost or leaves the prompt: moved text is appended, a target with no live pick
-   gets its first choice picked, and every changed body is snapshotted. */
+/* Split by title, for a persona already managed: titled parts of each live body move to the
+   items they name (or new ones). Nothing is lost or leaves the prompt: moved text is appended, a
+   target with no live pick gets its first choice picked, and every changed body is snapshotted. */
 
 // Removes an item's own title from the first line of its body; nothing else changes.
 export function stripSelfTitle(text, name) {
     const source = String(text ?? '');
-    const lines = source.replace(/\r\n?/g, '\n').split('\n');
+    const lines = linesOf(source);
     const first = lines.findIndex(line => line.trim());
     if (first === -1) return source;
     const line = lines[first].trim();
@@ -319,17 +316,17 @@ export function applyResplit(persona, plan, makeIdFn, now, defaultFormat, snapsh
     return [...before.keys()];
 }
 
-/* ── A description's own division ──────────────────────────────────────────
-   Its own titles become the items, as written and in order. Only the first style in
-   OWN_ORDER used at least twice counts (markdown at its shallowest such level).
-   Returns null or { preamble, parts, template }; callers require a round trip (sameText). */
+/* A description's own division: its own titles become the items, as written and in order. Only
+   the first style in OWN_ORDER used at least twice counts (markdown at its shallowest such
+   level). Returns null or { preamble, parts, template }; callers require a round trip
+   (sameText). */
 const OWN_FORMS = [
     { kind: 'markdown', re: /^(#{1,6})\s+(.+?)\s*$/ },
     { kind: 'angle', re: /^()<\s*([^<>/=]+?)\s*>$/ },
     { kind: 'bracket', re: /^()\[\s*([^\][:：,，{}]+?)\s*\]$/ },
     { kind: 'bracket', re: /^()【\s*(.+?)\s*】$/ },
     { kind: 'bold', re: /^()\*\*\s*([^*:：]+?)\s*[:：]?\s*\*\*$/ },
-    { kind: 'plain', re: /^()([^:：#*\[\]<>]{1,30}?)\s*[:：]$/ },
+    { kind: 'plain', re: /^()([^:：#*[\]<>]{1,30}?)\s*[:：]$/ },
 ];
 const OWN_ORDER = ['markdown', 'angle', 'bracket', 'bold', 'plain'];
 
@@ -347,7 +344,7 @@ function ownTitle(line) {
 }
 
 export function splitOwnSections(text) {
-    const lines = String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
+    const lines = linesOf(text);
     const titles = lines.map(ownTitle);
     const closes = lines.map(line => /^<\/\s*([^<>]+?)\s*>$/.exec(line.trim())?.[1]?.trim() ?? null);
     const isTitle = (title, kind, level) => !!title && title.kind === kind && (kind !== 'markdown' || title.level === level);
@@ -414,8 +411,7 @@ export function seedOwnSections(persona, split, makeIdFn, now = Date.now()) {
 // Line-for-line equality ignoring blank lines and trailing spaces, which the prompt does
 // not care about and the composer normalises anyway.
 export function sameText(a, b) {
-    const lines = text => String(text ?? '').replace(/\r\n?/g, '\n').split('\n')
-        .map(line => line.replace(/[ \t]+$/, '')).filter(line => line.trim() !== '');
+    const lines = text => linesOf(text).map(line => line.replace(/[ \t]+$/, '')).filter(line => line.trim() !== '');
     const left = lines(a);
     const right = lines(b);
     return left.length === right.length && left.every((line, i) => line === right[i]);

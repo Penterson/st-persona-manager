@@ -1,5 +1,4 @@
-// Persona list sorting and label membership.
-// Pure functions only: no DOM, no getContext, no SillyTavern imports.
+// Persona list sorting and label membership. Pure: no DOM, no getContext.
 
 // Four measures, each readable from both ends, in the settings dropdown's order.
 export const SORT_KEYS = Object.freeze([
@@ -36,8 +35,8 @@ export function modifiedAt(persona) {
     return latest;
 }
 
-// Names can tie (duplicates, or collator-equal), so the unique avatar id decides,
-// keeping the order stable between renders.
+// Names can tie (duplicates or collator-equal), so the unique avatar id keeps the order stable
+// between renders.
 function nameCompare(a, b, collator) {
     const byName = (collator && typeof collator.compare === 'function')
         ? collator.compare(a.name, b.name)
@@ -49,8 +48,8 @@ function nameCompare(a, b, collator) {
     return left < right ? -1 : 1;
 }
 
-// The value used for the three non name sort keys. Missing data becomes
-// negative infinity; sortEntries puts it at the back in either direction.
+// The non-name keys' value. Missing data is -Infinity, which sortEntries puts last in either
+// direction.
 function sortValue(sortBy, entry, deps) {
     if (sortBy === 'recent') {
         const v = deps?.lastUsed?.[entry.avatar];
@@ -61,7 +60,6 @@ function sortValue(sortBy, entry, deps) {
         const modified = modifiedAt(deps?.personas?.[entry.avatar]);
         return modified > 0 ? modified : -Infinity;
     }
-    // created
     const created = createdAtFromAvatar(entry.avatar);
     return created === null ? -Infinity : created;
 }
@@ -83,7 +81,6 @@ export function sortEntries(entries, sortBy, deps) {
     list.sort((a, b) => {
         const va = sortValue(key, a, deps);
         const vb = sortValue(key, b, deps);
-        // No data goes last in either direction.
         const missingA = va === -Infinity;
         const missingB = vb === -Infinity;
         if (missingA !== missingB) return missingA ? 1 : -1;
@@ -102,8 +99,8 @@ export function filterByLabel(entries, labels, activeLabelId) {
     return entries.filter(entry => members.includes(entry.avatar));
 }
 
-// Labels without members missing from personas, for display only. Stored labels keep
-// them, so a persona restored after an accidental deletion keeps its labels.
+// For display, members SillyTavern no longer lists are left out. Stored labels keep them, so a
+// persona restored after an accidental deletion keeps its labels.
 export function livingLabels(labels, personas) {
     const known = personas ?? {};
     return (labels ?? []).map(label => ({

@@ -1,8 +1,7 @@
-// Resolving which persona is active.
-// SillyTavern's getContext() does not expose user_avatar, so this is a fallback chain.
+// Which persona is active. getContext() has no user_avatar, so this is a fallback chain.
 
-// The only caller of getContext(), which copies name1, chat and characterId by value and
-// whose chatMetadata is replaced on chat change: call at the point of use, never store it.
+// The only getContext() caller. Its result copies name1, chat and characterId by value and its
+// chatMetadata is replaced on chat change, so call at the point of use and never keep it.
 export function freshContext() {
     return globalThis.SillyTavern?.getContext?.() ?? null;
 }
@@ -11,14 +10,14 @@ export function saveSettings() {
     freshContext()?.saveSettingsDebounced?.();
 }
 
-// A direct source is not held to the name check (a list entry may be renamed apart
-// from the chat name on purpose); it need only name a persona SillyTavern has.
+// A direct source need only name a persona SillyTavern has: its list name may differ from name1 on
+// purpose.
 function namesAKnownPersona(candidate, personas) {
     return !!candidate && Object.hasOwn(personas ?? {}, candidate);
 }
 
-// SillyTavern fills name1 from the active persona, so a candidate whose registered
-// name differs from it is not the active one.
+// SillyTavern fills name1 from the active persona, so a candidate registered under another name is
+// not it.
 function satisfiesInvariant(candidate, name1, personas) {
     return namesAKnownPersona(candidate, personas) && personas[candidate] === name1;
 }
@@ -39,13 +38,12 @@ export function findDuplicateNames(personas) {
 export function resolveAvatar({ preciseAvatar, domAvatar, lockedAvatar, name1, personas }) {
     const p = personas ?? {};
     const matches = Object.keys(p).filter(k => p[k] === name1);
-    // While name1 is duplicated, only a direct source (precise or dom) can tell the
-    // personas apart; the rest stay ambiguous, which blocks writing rather than guessing.
+    // While name1 is duplicated only a direct source can tell the personas apart; the rest stay
+    // ambiguous, which blocks writes rather than guessing.
     const duplicated = matches.length > 1;
     const settle = (avatar, source) => ({ avatar, source, ambiguous: duplicated && !DIRECT.has(source) });
 
     if (namesAKnownPersona(preciseAvatar, p)) return settle(preciseAvatar, 'precise');
-    // SillyTavern's persona list on screen names the file, like the precise import.
     if (namesAKnownPersona(domAvatar, p)) return settle(domAvatar, 'dom');
     if (satisfiesInvariant(lockedAvatar, name1, p)) return settle(lockedAvatar, 'lock');
 
@@ -53,23 +51,22 @@ export function resolveAvatar({ preciseAvatar, domAvatar, lockedAvatar, name1, p
     return settle(null, 'none');
 }
 
-/* Where personas.js (whose user_avatar is the active persona's file name) may sit
-   relative to this module: four levels up from third-party/<ext>/modules/ normally, but
-   builds differ, so each is tried until one exports a string user_avatar. */
+/* personas.js exports user_avatar (the active persona's file). Its path relative to this module
+   differs between builds, so each candidate is tried. */
 const PRECISE_PATHS = Object.freeze([
     '../../../../personas.js',
     '../../../personas.js',
     '../../../../../personas.js',
 ]);
 
-// Which path answered, shown in the settings diagnostics.
+// Which path answered, for the settings diagnostics.
 let precisePath = null;
 
 export function getPrecisePath() { return precisePath; }
 
 export async function loadPreciseApi() {
-    // Never load-bearing: importing SillyTavern internals can break at any time, so
-    // callers work with null and resolveAvatar falls back to the name lookup.
+    // Never load-bearing: SillyTavern internals can change at any time, so callers cope with null
+    // and resolveAvatar falls back to names.
     for (const path of PRECISE_PATHS) {
         try {
             const mod = await import(/* webpackIgnore: true */ path);
@@ -83,14 +80,13 @@ export async function loadPreciseApi() {
     return null;
 }
 
-/* The import-free route: tiles in #user_avatar_block carry data-avatar-id, and the one
-   SillyTavern marks as current is the answer. The marker class is unverified, so a
-   candidate counts only when it matches exactly one tile; list order is not stable. */
+/* The import-free route: the tile SillyTavern marks current in #user_avatar_block. The marker
+   class is unverified, so a marker counts only when it matches exactly one tile. */
 const SELECTED_MARKERS = Object.freeze([
     '.selected', '.is-selected', '.active', '[data-selected="true"]', '[aria-selected="true"]',
 ]);
 
-// The tiles of SillyTavern's persona list, or null when the list is not on the page.
+// SillyTavern's persona tiles, or null when the list is not on the page.
 function avatarTiles(doc) {
     const block = doc?.getElementById?.('user_avatar_block');
     if (!block?.querySelectorAll) return null;
@@ -113,8 +109,8 @@ export function selectedAvatarFromDom(doc) {
     return null;
 }
 
-/* Diagnostics for the settings screen (phones have no console): the avatar tiles found
-   and their class names, which tell what marker SELECTED_MARKERS is missing. */
+/* Settings diagnostics (phones have no console): the tiles' class names show which marker
+   SELECTED_MARKERS misses. */
 export function avatarBlockReport(doc) {
     const items = avatarTiles(doc);
     if (!items) return { found: false, count: 0, classes: [] };
