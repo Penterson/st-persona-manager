@@ -1,5 +1,4 @@
-// Pure logic behind the manager screen. No DOM, so tests import it in plain Node;
-// the DOM half is manager.js, which tests must never import.
+// Pure logic behind the manager screen; the DOM half is manager.js.
 import { addLog } from './history.js';
 import {
     DEFAULT_SETTINGS, DEFAULT_SECTION_NAMES, SCHEMA_VERSION, makeId, appendSection, findVersion, liveVariant, migrate,
@@ -22,9 +21,9 @@ export function canDeleteSection(persona, sectionId) {
     return sections.some(section => section.id === sectionId);
 }
 
-// Removes a section with its variants, their history and its activePicks entry; returns what
-// went, or null if refused. Version picks keep the dead key on purpose: saved records are
-// never rewritten, and readers ignore sections that no longer exist.
+// Removes a section with its variants, their history and its live pick; answers what went, or null
+// if refused. Version picks keep the dead key: saved records are never rewritten, and readers skip
+// missing sections.
 export function removeSection(persona, sectionId, now) {
     if (!canDeleteSection(persona, sectionId)) return null;
     const index = persona.sections.findIndex(section => section.id === sectionId);
@@ -141,8 +140,8 @@ export function versionSummaryLine(persona, version) {
         .join(STRINGS.common.dotSeparator);
 }
 
-// Version writes, shared by the manager and the quick panel. Each takes the persona looked up
-// after the screen's await plus a version id, and answers null when the version is gone.
+// Version writes shared by the manager and the quick panel. Each takes the persona looked up after
+// the screen's await and answers null when the version is gone.
 
 export function renameVersionIn(persona, versionId, name, now) {
     const version = findVersion(persona, versionId);
@@ -197,9 +196,9 @@ export function moveVersion(persona, versionId, delta) {
     return stepById(persona?.versions, versionId, delta);
 }
 
-// Points the live picks at the version's and asks write() to store them. A refused write
-// puts the previous picks back, or the version would show as applied over the old prompt
-// and go out with the next unrelated save. Returns whether the write was accepted.
+// Points the live picks at the version's and asks write() to store them. A refused write puts the
+// previous picks back, or the version would show as applied over the old prompt and go out with the
+// next save. Answers whether the write was accepted.
 export function applyVersionPicks(persona, version, write) {
     const previous = { id: persona.activeVersionId, picks: persona.activePicks };
     persona.activeVersionId = version.id;
@@ -238,8 +237,8 @@ export function rowKey(kind, ...parts) {
 
 /* Drafts: unsaved editor text */
 
-// Text from an editor taken off screen unsaved, restored when the same body reopens. Strings
-// only, so a draft never keeps a stale persona, context or node alive.
+// Text from an editor taken off screen unsaved, restored when the same body reopens. Strings only,
+// so a draft never keeps a persona, context or node alive.
 const drafts = new Map();
 
 // JSON: an avatar id is a file name and may contain any separator.
@@ -492,9 +491,8 @@ export function planFullTextSave(persona, blocks, texts) {
     return { writes, skipped };
 }
 
-// SillyTavern's persona position/role enums, read off its own <select> so values and labels
-// cannot be mispaired; the numbers are never hard-coded. Any malformed option refuses the
-// whole select. Takes anything with options of {value, textContent}.
+// SillyTavern's position/role enums, read off its own <select> so values and labels cannot be
+// mispaired; the numbers are never hard-coded. One malformed option refuses the whole select.
 export function readSelectOptions(select) {
     const raw = select?.options;
     if (!raw) return null;
@@ -541,8 +539,8 @@ export function copyPersonaOnto(root, sourceAvatar, destAvatar, makeIdFn, now, d
         if (dest.avatarBackup) copy.avatarBackup = dest.avatarBackup;
         if (typeof dest.avatarWritten === 'string') copy.avatarWritten = dest.avatarWritten;
     }
-    // And its per-language names: copied, auto naming would rename it to the source's name,
-    // which the source could then never take back (names must be unique).
+    // And its per-language names: copied, auto naming would rename it to the source's name, which
+    // the source could never take back (names are unique).
     copy.names = dest && typeof dest === 'object' && dest.names && typeof dest.names === 'object'
         ? { ...dest.names } : {};
     // Logged on the copy: nothing happened to the source.
@@ -574,9 +572,9 @@ export function applyReplacement(text, start, end, replacement) {
     return source.slice(0, cutFrom) + source.slice(cutTo);
 }
 
-// Saves the revise screen as a new version: each changed section gets a new choice named after
-// the version and picked; nothing existing is overwritten. Logs variant-add only (the caller's
-// commit() logs version-create). Returns { version, changed, skipped }, or null for no name.
+// Saves the revise screen as a new version: each changed section gets a new choice named after the
+// version and picked; nothing is overwritten. Logs variant-add only (the caller logs version-
+// create). Answers { version, changed, skipped }, or null for no name.
 export function makeReplaceVersion(persona, blocks, workingTexts, name, makeIdFn, now) {
     const trimmed = String(name ?? '').trim();
     if (!persona || !trimmed) return null;
@@ -601,8 +599,8 @@ export function makeReplaceVersion(persona, blocks, workingTexts, name, makeIdFn
     return { version: addVersion(persona, trimmed, makeIdFn, now), changed, skipped };
 }
 
-// Captured before makeReplaceVersion runs, so a refused save can be fully undone instead of
-// leaving everything to be duplicated by a retry.
+// Captured before makeReplaceVersion, so a refused save is fully undone rather than duplicated by a
+// retry.
 export function replaceVersionUndo(persona) {
     return {
         // A copy: makeReplaceVersion writes into the picks object in place.
@@ -859,9 +857,9 @@ export function fillDefaultSections(persona, makeIdFn, now) {
 
 /* Per version asset selection */
 
-// assetSelection null means every asset, including future uploads; a list exists only while
-// something is excluded. Names resolve as {{persona_assets}} does (selectedNames), since
-// selections up to 0.2.0 hold ST's lowercased labels. allFilenames is what the screen lists.
+// assetSelection null means every asset, future uploads included; a list exists only while
+// something is excluded. Names resolve as {{persona_assets}} does (selectedNames), since selections
+// up to 0.2.0 hold ST's lowercased labels.
 export function assetSelected(version, filename, allFilenames = []) {
     const selection = version?.assetSelection;
     if (!Array.isArray(selection)) return true;

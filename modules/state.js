@@ -130,8 +130,8 @@ function seedDescription(persona, description, makeIdFn, settings) {
         : null;
     if (split) return seedFromSplit(persona, split, makeIdFn, settings?.defaultHeadingFormat);
     if (mode !== 'defaults') {
-        // One item, 전문, in place of the shipped names. Untitled, so no heading format ever
-        // prints a title over it: the description stays exactly as written.
+        // One untitled 전문 item in place of the shipped names, so no heading format prints a title
+        // over it: the description stays exactly as written.
         persona.sections = [];
         persona.variants = {};
         persona.activePicks = {};
@@ -309,8 +309,8 @@ export function saveAndComposeFor(avatarId, { write = true, outside = 'keep', fo
 }
 
 // Writes planAbsorb's bodies into the live choices, old text into history first; answers the
-// names of the items that changed. Shared with the diverged banner's 가져오기, which forces
-// the snapshots (inside the merge window a plain one is skipped).
+// changed items' names. The banner's 가져오기 forces the snapshots (inside the merge window a plain one
+// is skipped).
 export function applyAbsorb(root, persona, plan, now, force = false) {
     const changed = [];
     for (const write of plan.writes) {
@@ -326,11 +326,10 @@ export function applyAbsorb(root, persona, plan, now, force = false) {
     return changed;
 }
 
-/* An edit made in SillyTavern's own persona box, taken into the active persona's items as it
-   happens (settings.autoAbsorbOutside). SillyTavern's text is left exactly as typed: it
-   becomes the new baseline, so nothing is written back into the box while the user types.
-   Snapshots are not forced, so a burst of typing keeps one history entry per merge window.
-   Returns null when there is nothing to do, else planAbsorb's refusal or { ok, changed }. */
+/* An edit in SillyTavern's own persona box, taken into the active persona's items as it happens
+   (settings.autoAbsorbOutside). The typed text becomes the new baseline, so nothing is written
+   back into the box mid-typing, and unforced snapshots keep one history entry per merge window.
+   Answers null with nothing to do, else planAbsorb's refusal or { ok, changed }. */
 export function autoAbsorbOutside() {
     const ctx = provider();
     if (!ctx) return null;

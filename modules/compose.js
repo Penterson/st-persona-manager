@@ -1,7 +1,7 @@
-// Composes sections into one description and writes it into SillyTavern. The prompt
-// builder reads only the singular persona_description (the active persona's), not the
-// persona_descriptions map, so both are written when the target is the active persona.
-import { textSignature, liveVariant } from './store.js';
+// Composes items into one description and writes it into SillyTavern. The prompt reads only the
+// singular persona_description, so for the active persona both it and the persona_descriptions map
+// are written.
+import { textSignature, liveVariant, linesOf } from './store.js';
 
 // The fingerprint compared against; a pre-schema-2 lastComposed copy is read until migrated.
 export function baselineSignature(persona) {
@@ -15,15 +15,23 @@ export function markComposed(persona, text) {
     delete persona.lastComposed;
 }
 
-/* The 'own' format keeps an adopted description's title pattern: template.open is the
-   title line with {name} (e.g. ### {name}), template.close an optional closing line.
-   An unreadable template prints the markdown title, never nothing. */
+/* The 'own' format keeps an adopted description's title pattern: template.open is the title line
+   with {name} (### {name}), template.close an optional closing line. An unreadable template
+   prints the markdown title, never nothing. */
 export function validTemplate(template) {
     return !!template && typeof template.open === 'string' && template.open.includes('{name}')
         && (template.close === undefined || typeof template.close === 'string');
 }
 
 const fill = (pattern, name) => String(pattern ?? '').split('{name}').join(name);
+
+// Whether a line is the wanted title line, trailing spaces aside.
+const sameLine = (line, wanted) => !!wanted && line.replace(/[ \t]+$/, '') === wanted;
+
+// Items printed without a title line: an own-format preamble or the whole-text item.
+export function untitledIds(persona) {
+    return new Set((persona?.sections ?? []).filter(section => section?.untitled === true).map(section => section.id));
+}
 
 // The title line for a section, or '' when the format adds none. Exported so screens
 // showing the composed text share the prompt's rule.
@@ -57,9 +65,9 @@ function joinBlocks(persona, parts) {
     return out.join('\n\n');
 }
 
-// SillyTavern's prompt-placement fields on persona_descriptions[avatar]. Position values
-// are its enum, treated as opaque numbers: a mismatched label is visible, an invented
-// mapping would silently move the description in the prompt.
+// SillyTavern's prompt placement on persona_descriptions[avatar]. Position is its enum, kept as an
+// opaque number: a mismatched label is visible, an invented mapping would silently move the
+// description in the prompt.
 export function readPlacement(ctx, avatarId) {
     const d = ctx?.powerUserSettings?.persona_descriptions?.[avatarId];
     if (!d) return null;
@@ -110,8 +118,7 @@ export function splitByComposition(persona, text) {
         });
     }
     if (!blocks.length) return null;
-    const lines = String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
-    const same = (line, wanted) => line.replace(/[ \t]+$/, '') === wanted;
+    const lines = linesOf(text);
     // Each block's title line; an untitled block can only be the first.
     const starts = [];
     let cursor = 0;
@@ -122,7 +129,7 @@ export function splitByComposition(persona, text) {
             continue;
         }
         let at = cursor;
-        while (at < lines.length && !same(lines[at], block.head)) at++;
+        while (at < lines.length && !sameLine(lines[at], block.head)) at++;
         if (at >= lines.length) return null;
         starts.push(at);
         cursor = at + 1;
@@ -167,11 +174,11 @@ function stripLeadingHeading(text, heading) {
     return rest.replace(/^[ \t]*\r?\n/, '');
 }
 
-/* An outside edit (SillyTavern's own persona box) mapped back onto the items, without
-   changing anything: { ok: true, writes: [{ sectionId, text }] } or { ok: false, reason }.
-   With several filled items it is split along the composed title lines, refused when one is
-   missing or out of order ('noMatch') or none are printed ('noTitles'); otherwise it all goes
-   to the filled item, or the first, its own title stripped. */
+/* An outside edit (SillyTavern's own persona box) mapped back onto the items without changing
+   anything: { ok: true, writes: [{ sectionId, text }] } or { ok: false, reason }. Several filled
+   items split along the composed title lines, refused when one is missing or out of order
+   ('noMatch') or none are printed ('noTitles'); otherwise it all goes to the filled item, or the
+   first, its own title stripped. */
 export function planAbsorb(persona, text) {
     const sections = persona?.sections ?? [];
     const filled = sections.filter(section => !!(liveVariant(persona, section)?.text ?? '').trim());
@@ -191,22 +198,23 @@ export function planAbsorb(persona, text) {
     return { ok: true, writes: [{ sectionId: target.id, text: body }] };
 }
 
-/* The full-text screen's joined view, edited and divided back into its blocks (from
-   buildReplaceBlocks, empty bodies included). current holds the working texts the view
-   was joined from: a block printed there must keep its title line; an empty one is filled
-   only if its title line is typed in, in item order. Untouched blocks keep their text.
-   Returns { ok: true, texts } or { ok: false, reason: 'missing'|'order'|'stray', name }. */
+/* Whether the full-text screen's joined view can be divided back: every block after the first
+   needs a title line to be found by. */
 export function fullTextSplittable(persona, blocks) {
-    const untitled = new Set((persona?.sections ?? []).filter(section => section?.untitled === true).map(section => section.id));
-    // Every block after the first needs a title line to be found by.
+    const untitled = untitledIds(persona);
     return (blocks ?? []).every((block, index) => index === 0
         || (!untitled.has(block?.sectionId) && !!headingLine(persona?.headingFormat, block?.sectionName ?? '', persona?.headingTemplate)));
 }
 
+/* The joined view, edited, divided back into its blocks (buildReplaceBlocks', empty bodies
+   included). current holds the working texts the view was joined from: a block printed there must
+   keep its title line; an empty one is filled only if its title line is typed in, in item order.
+   Untouched blocks keep their text. Answers { ok: true, texts } or
+   { ok: false, reason: 'missing'|'order'|'stray', name }. */
 export function splitFullText(persona, blocks, text, current) {
     const format = persona?.headingFormat;
     const template = persona?.headingTemplate;
-    const untitled = new Set((persona?.sections ?? []).filter(section => section?.untitled === true).map(section => section.id));
+    const untitled = untitledIds(persona);
     const list = (blocks ?? []).map((block, index) => {
         const name = block?.sectionName ?? '';
         const bare = untitled.has(block?.sectionId);
@@ -224,15 +232,14 @@ export function splitFullText(persona, blocks, text, current) {
     // A block with no title line can only be the first, holding the text above every title.
     const headless = list.find((block, index) => index > 0 && !block.head);
     if (headless) return { ok: false, reason: 'missing', name: headless.name };
-    const lines = String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
-    const same = (line, wanted) => !!wanted && line.replace(/[ \t]+$/, '') === wanted;
+    const lines = linesOf(text);
     const starts = list.map(() => -1);
     let last = -1;
     for (const [at, line] of lines.entries()) {
-        const next = list.findIndex((block, index) => index > last && same(line, block.head));
+        const next = list.findIndex((block, index) => index > last && sameLine(line, block.head));
         if (next === -1) {
             // A title already passed, seen again: moved or doubled, so the division is unsure.
-            const back = list.findIndex((block, index) => index <= last && same(line, block.head));
+            const back = list.findIndex((block, index) => index <= last && sameLine(line, block.head));
             if (back !== -1) return { ok: false, reason: 'order', name: list[back].name };
             continue;
         }
@@ -277,7 +284,7 @@ export function composePicked(persona, picks) {
 // Composition over an editing screen's unsaved working copies: blocks from
 // buildReplaceBlocks, texts index-aligned (missing = stored text).
 export function composeFrom(persona, blocks, texts) {
-    const untitled = new Set((persona?.sections ?? []).filter(section => section?.untitled === true).map(section => section.id));
+    const untitled = untitledIds(persona);
     const parts = (blocks ?? []).map((block, index) => ({
         name: block?.sectionName ?? '',
         text: typeof texts?.[index] === 'string' ? texts[index] : (block?.text ?? ''),

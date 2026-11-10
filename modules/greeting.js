@@ -1,14 +1,14 @@
-// Keeps {{user}} in an unanswered greeting on the playing persona. SillyTavern writes
-// the resolved text back into chat[0].mes and swipes[], baking the name in, so former user
-// names are replaced where the card had {{user}}. Pure except syncGreetingInContext.
+// Keeps {{user}} in an unanswered greeting on the playing persona. SillyTavern bakes the resolved
+// name into chat[0].mes and swipes[], so former user names are replaced where the card had
+// {{user}}. Pure except syncGreetingInContext.
 
-// {{user}} and <USER> in any case, written out so the names beside it in one
-// pattern can stay case-sensitive.
+// {{user}} and <USER> in any case, spelled out so the names sharing the pattern stay case-
+// sensitive.
 const MACRO_SOURCE = '\\{\\{[uU][sS][eE][rR]\\}\\}|<[uU][sS][eE][rR]>';
 const MACRO_ONLY = new RegExp(`^(?:${MACRO_SOURCE})$`, 'u');
 
-// Letters that join a Latin name to its neighbours. Hangul and kana names take
-// particles directly after them, so they get no boundary guard.
+// Letters that join a Latin name to its neighbours. Hangul and kana names take particles right
+// after them, so they get no boundary guard.
 const JOINING = /[\p{Script=Latin}\p{N}_]/u;
 
 function escapeRegExp(text) {
@@ -29,33 +29,21 @@ function cleanNames(names, current) {
     return [...new Set(list)].sort((a, b) => b.length - a.length);
 }
 
-// Every place a name occurs, in order, as [start, end, name].
+// Every place a name occurs, as [start, end, name]. Names are never empty, so no match is.
 function occurrences(text, names) {
     if (!names.length) return [];
-    const re = new RegExp(names.map(namePattern).join('|'), 'gu');
-    const out = [];
-    let m;
-    while ((m = re.exec(text)) !== null) {
-        out.push([m.index, m.index + m[0].length, m[0]]);
-        if (m[0].length === 0) re.lastIndex++;
-    }
-    return out;
+    return [...text.matchAll(new RegExp(names.map(namePattern).join('|'), 'gu'))]
+        .map(m => [m.index, m.index + m[0].length, m[0]]);
 }
 
-/* The old-name hits in text that stand where template had {{user}}: matched one to one
-   when the counts agree; otherwise all hits, but only if the template has no literal old
-   name. Without a template, every hit. */
+/* The old-name hits in text standing where template had {{user}}: one to one when the counts
+   agree, else all hits if the template has no literal old name. Without a template, every hit. */
 function macroPositions(text, template, names) {
     const hits = occurrences(text, names);
     if (!hits.length) return [];
     if (typeof template !== 'string') return hits;
-    const tokens = [];
-    const re = new RegExp(`${MACRO_SOURCE}|${names.map(namePattern).join('|')}`, 'gu');
-    let m;
-    while ((m = re.exec(template)) !== null) {
-        tokens.push(MACRO_ONLY.test(m[0]) ? 'macro' : 'literal');
-        if (m[0].length === 0) re.lastIndex++;
-    }
+    const tokens = [...template.matchAll(new RegExp(`${MACRO_SOURCE}|${names.map(namePattern).join('|')}`, 'gu'))]
+        .map(m => (MACRO_ONLY.test(m[0]) ? 'macro' : 'literal'));
     const macros = tokens.filter(kind => kind === 'macro').length;
     if (!macros) return [];
     if (tokens.length === hits.length) return hits.filter((_, i) => tokens[i] === 'macro');
@@ -68,8 +56,7 @@ function replaceUserName(text, oldNames, newName, template) {
     if (!source || !current) return source;
     const names = cleanNames(oldNames, current);
     if (!names.length) return source;
-    // Never touch a stretch that already reads as the current name: an old name
-    // that is part of the new one ("Al" inside "Alice") is not stale.
+    // An old name inside the current one ("Al" in "Alice") is not stale.
     const keep = occurrences(source, [current]);
     const targets = macroPositions(source, template, names)
         .filter(([start, end]) => !keep.some(([a, b]) => start < b && end > a));
@@ -91,13 +78,13 @@ export function greetingNeedsUserSync(chat, index) {
     return !chat.some(message => message && message.is_user && !message.is_system);
 }
 
-// Applies replaceUserName to the greeting and its swipes; templates are the card's
-// greetings in swipe order. Returns whether anything changed.
+// replaceUserName over the greeting and its swipes; templates are the card's greetings in swipe
+// order. Answers whether anything changed.
 export function syncGreetingUser(message, oldNames, newName, templates) {
     if (!message || typeof message !== 'object') return false;
     const aligned = Array.isArray(templates);
-    // Swipes past the card's greetings were generated, so nothing says where {{user}}
-    // stood in them: left alone.
+    // Swipes past the card's greetings were generated, so nothing says where {{user}} stood in
+    // them.
     const skip = i => aligned && i >= templates.length;
     const pick = i => (aligned ? templates[i] : undefined);
     let changed = false;
@@ -119,9 +106,9 @@ export function syncGreetingUser(message, oldNames, newName, templates) {
     return changed;
 }
 
-/* The card's greetings in SillyTavern's swipe order (first_mes unless empty, then the
-   alternates), or null when the message has fewer swipes than that (card edited since);
-   more is fine, as swiping the greeting appends generated swipes. */
+/* The card's greetings in swipe order (first_mes unless empty, then the alternates), or null
+   when the message has fewer swipes (card edited since). More is fine: swiping appends generated
+   ones. */
 export function cardGreetings(card, message) {
     const first = card?.data?.first_mes ?? card?.first_mes;
     const alternates = card?.data?.alternate_greetings;
@@ -132,9 +119,9 @@ export function cardGreetings(card, message) {
     return count >= list.length ? list : null;
 }
 
-/* The side-effecting entry point: rewrites, redraws and saves the greeting. Group chats are
-   left to SillyTavern, which reloads them on a persona change. names.broad (every persona
-   name) needs the card's templates; without them only names.narrow, the names it can hold. */
+/* The side-effecting entry point: rewrites, redraws and saves the greeting. Group chats are left
+   to SillyTavern, which reloads them on a persona change. names.broad (every persona name) needs
+   the card's templates; without them only names.narrow, the names it can hold. */
 export function syncGreetingInContext(ctx, names = {}) {
     const chat = ctx?.chat;
     if (!greetingNeedsUserSync(chat, 0)) return false;
@@ -147,7 +134,7 @@ export function syncGreetingInContext(ctx, names = {}) {
     const oldNames = templates ? (names.broad ?? []) : (names.narrow ?? []);
     if (!syncGreetingUser(message, oldNames, current, templates)) return false;
     try { ctx.updateMessageBlock?.(0, message); } catch { /* the data is right; the next draw shows it */ }
-    // saveChat is async: a try around the call cannot catch its rejection.
+    // saveChat is async, so its rejection needs a catch of its own.
     try {
         Promise.resolve(ctx.saveChat?.()).catch(() => { /* saved with the next message */ });
     } catch { /* saved with the next message */ }

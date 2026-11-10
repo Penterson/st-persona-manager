@@ -23,6 +23,11 @@ export function textSignature(text) {
     return `${s.length}:${fnv1a(s).toString(36)}`;
 }
 
+// A text's lines, whatever its line endings.
+export function linesOf(text) {
+    return String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
+}
+
 // No master "enabled" flag: SillyTavern's extension manager owns that.
 export const DEFAULT_SETTINGS = Object.freeze({
     showQuickBar: true,
@@ -37,8 +42,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     // Edits in SillyTavern's own persona box flow into the items (state.js autoAbsorbOutside).
     autoAbsorbOutside: true,
     defaultHeadingFormat: 'none',
-    // How adopt seeds a description (state.js seedDescription): whole, into one 전문 item.
-    // Dividing by titles is the user's own step (the edit tab's buttons, or this setting).
+    // How adopt seeds a description (state.js seedDescription); by default whole, into one 전문 item.
     adoptSplitMode: 'whole',
     assetStyle: 'plain',
     assetPromptTemplate: STRINGS.settings.assetPromptDefault,
@@ -53,7 +57,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
     // The manager's picker view; migrate seeds it from rosterViewMode.
     pickerViewMode: 'list',
     rosterViewMode: 'list',
-    // 0 means automatic columns / everything on one page.
+    // 0: automatic columns, or everything on one page.
     rosterTileColumns: 0,
     rosterTileShape: 'circle',
     rosterTileRows: 0,
@@ -248,7 +252,7 @@ export function findVariant(persona, sectionId, variantId) {
     return (persona?.variants?.[sectionId] ?? []).find(entry => entry?.id === variantId);
 }
 
-// The choice an item currently uses (its live pick), or null.
+// The item's live pick, or null.
 export function liveVariant(persona, section) {
     const pick = persona?.activePicks?.[section?.id];
     return (persona?.variants?.[section?.id] ?? []).find(entry => entry?.id === pick) ?? null;

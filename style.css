@@ -46,7 +46,6 @@
 }
 
 .pm-panel {
-    background: var(--SmartThemeBlurTintColor);
     color: var(--SmartThemeBodyColor);
     border: 1px solid var(--pm-edge);
 }
@@ -129,14 +128,13 @@
 }
 
 .pm-quickbar-backdrop {
-    position: fixed;
+    position: absolute;
     inset: 0;
     z-index: 9998;
     background: color-mix(in srgb, var(--SmartThemeShadowColor) 45%, transparent);
 }
 
 .pm-quickbar-panel {
-    position: fixed;
     z-index: 9999;
     left: 50%;
     bottom: 12px;
@@ -263,7 +261,6 @@
 }
 
 .pm-quickbar-actions,
-.pm-quickbar-footer,
 .pm-manager-actions {
     display: flex;
     gap: 6px;
@@ -467,11 +464,6 @@
     background: color-mix(in srgb, var(--SmartThemeShadowColor) 45%, transparent);
 }
 
-.pm-quickbar-host .pm-quickbar-backdrop,
-.pm-quickbar-host .pm-quickbar-panel {
-    position: absolute;
-}
-
 /* The send-row slot is about 28px wide, too narrow for a label beside the picture. */
 #pm-quickbar .pm-quickbar-label {
     display: none;
@@ -520,13 +512,11 @@
 /* manager.js sizes this from visualViewport. Opaque: a translucent tint would show the chat
    through and repaint its blur layers on every scroll frame. */
 .pm-manager-panel {
-    position: absolute;
     left: 0;
     right: 0;
     box-sizing: border-box;
     width: min(560px, 100%);
     margin: 0 auto;
-    border-radius: 0;
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -562,8 +552,6 @@
     display: flex;
     flex-wrap: wrap;
     flex: 0 0 auto;
-    gap: 0;
-    padding: 0;
     border-bottom: var(--pm-rule);
 }
 
@@ -968,7 +956,7 @@
     padding-inline: 0;
 }
 
-/* The shell clips; the inner box scrolls, up to the cap sizeToViewport measures. */
+/* The shell clips; the inner box scrolls, up to the cap manager.js measures (--pm-history-cap). */
 .pm-manager-text {
     margin: 6px 0;
     border: var(--pm-rule);
@@ -1277,7 +1265,6 @@
     position: relative;
     display: flex;
     flex-direction: column;
-    /* Picture-to-name gap; pairs with the grid's wider row-gap. */
     gap: 3px;
     min-height: 56px;
     /* A long name ellipsizes rather than widen its column. */
@@ -1286,7 +1273,6 @@
     border: none;
     background: none;
     color: var(--SmartThemeBodyColor);
-    /* A button does not inherit the page font by default. */
     font: inherit;
     cursor: pointer;
 }
@@ -1642,7 +1628,7 @@
 /* ── Grain ───────────────────────────────────────────────────────────────────
    Two hairline gratings on the panel, not the scrolling content, so they composite once. */
 
-/* The grain's containing block. The panels stay absolute inside the top-layer host. */
+/* The grain's containing block; the panels themselves stay absolute inside their top-layer host. */
 .pm-grain {
     position: relative;
 }
@@ -1873,7 +1859,6 @@
     grid-template-columns: repeat(6, 1fr);
     justify-content: flex-end;
     gap: 0;
-    padding: 0;
     border-top: var(--pm-rule-strong);
     position: sticky;
     bottom: 0;

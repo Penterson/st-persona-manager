@@ -1,5 +1,5 @@
-// DOM helpers shared by the three screens (quick panel, manager, settings). Nothing here holds
-// a context, a state snapshot or a node past the call that made it.
+// DOM helpers shared by the three screens (quick panel, manager, settings). None keeps a context, a
+// state snapshot or a node past the call that made it.
 import { MODULE_NAME } from './store.js';
 import { isTextEntry } from './quickbar-pure.js';
 
@@ -26,7 +26,7 @@ export function disable(node) {
     node.classList.add('pm-disabled');
 }
 
-// A native select (the Android picker beats a custom list) over [value, label] pairs.
+// A native select over [value, label] pairs: Android's picker beats a custom list.
 export function selectOf(className, options, value, onChange) {
     const select = el('select', className);
     for (const [optionValue, label] of options) {
@@ -51,8 +51,8 @@ export function checkRow(name, checked, enabled, onChange) {
     return row;
 }
 
-/* A new-group field and its button. onSubmit answers false to keep the text; otherwise the
-   field empties and blurs, ending the typing session a deferred redraw waits on. */
+/* A new-group field and its button. onSubmit answers false to keep the text; otherwise the field
+   empties and blurs, ending the typing session a held redraw waits on. */
 export function newGroupRow({ placeholder, aria, buttonClass, buttonLabel, enabled, onSubmit }) {
     const row = el('div', 'pm-quickbar-newlabel');
     const input = el('input', 'pm-quickbar-newlabel-input');
@@ -81,7 +81,7 @@ export function newGroupRow({ placeholder, aria, buttonClass, buttonLabel, enabl
 
 /* Listener bookkeeping */
 
-// Registers a listener and records how to remove it, so teardown is one loop.
+// Registers a listener with its removal, so teardown is one loop.
 export function track(list, target, type, fn, options) {
     target.addEventListener(type, fn, options);
     list.push(() => target.removeEventListener(type, fn, options));
@@ -101,8 +101,8 @@ export function showHost(host) {
     try { host.showModal(); return true; } catch { host.setAttribute('open', ''); return false; }
 }
 
-/* Builds, shows and focuses a host. ESC and Android back fire cancel, routed to onCancel; without
-   showModal there is no cancel, so a document ESC stands in, only while focus is inside. */
+/* Builds, shows and focuses a host. ESC and Android back fire cancel, routed to onCancel;
+   without showModal there is no cancel, so a document ESC stands in while focus is inside. */
 export function openHost(id, className, children, onCancel, cleanups) {
     const host = document.createElement('dialog');
     host.id = id;
@@ -113,7 +113,7 @@ export function openHost(id, className, children, onCancel, cleanups) {
     host.append(...children);
     document.body.append(host);
     const modal = showHost(host);
-    // Initial focus stays neutral instead of on whatever control comes first.
+    // Focus starts neutral, not on the first control.
     try { host.focus(); } catch { /* focus is best effort */ }
     if (!modal) {
         track(cleanups, document, 'keydown', e => {
@@ -133,8 +133,7 @@ export function closeHost(id) {
     host.remove();
 }
 
-// visualViewport tracks the on-screen keyboard (vh does not). Android fires scroll, not
-// resize, when it pans a focused field into view.
+// Android fires scroll, not resize, when it pans a focused field into view.
 export function trackViewport(cleanups, onChange) {
     if (!globalThis.visualViewport) return;
     track(cleanups, globalThis.visualViewport, 'resize', onChange);
@@ -143,9 +142,9 @@ export function trackViewport(cleanups, onChange) {
 
 /* Images carried across a redraw */
 
-// Thumbnails matching selector, kept by class and address so a redraw neither decodes a
-// picture again nor shows it empty. harvest() collects a subtree's, take() reuses one or
-// makes a lazy <img>, clear() lets go of whatever no new row claimed.
+// Thumbnails kept by class and address, so a redraw neither decodes a picture again nor shows it
+// empty. harvest() collects a subtree's, take() reuses one or makes a lazy <img>, clear() drops
+// whatever no new row claimed.
 export function imagePool(selector) {
     const pool = new Map();
     return {
@@ -190,8 +189,43 @@ export function frameTask(fn) {
     };
 }
 
-/* Redraws held while the user types. Rebuilding a focused field drops a hangul composition
-   in progress, so a draw waits for the blur, then for the gesture that caused it. */
+// Runs fn once, ms after the last schedule(); cancel() drops a pending run.
+export function debounced(fn, ms) {
+    let timer = 0;
+    return {
+        schedule() {
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(() => { timer = 0; fn(); }, ms);
+        },
+        cancel() {
+            if (timer) clearTimeout(timer);
+            timer = 0;
+        },
+    };
+}
+
+/* Sizes a panel to visualViewport, which tracks the on-screen keyboard (vh does not), at most
+   once per frame. measure(height, vv) answers style properties, each written only when it
+   changed: every write invalidates layout. */
+export function viewportFit(panelId, measure) {
+    const written = new Map();
+    const fit = () => {
+        const panel = document.getElementById(panelId);
+        const vv = globalThis.visualViewport;
+        const height = vv?.height ?? globalThis.innerHeight ?? 0;
+        if (!panel || !height) return;
+        for (const [prop, value] of Object.entries(measure(height, vv))) {
+            if (written.get(prop) === value) continue;
+            written.set(prop, value);
+            panel.style.setProperty(prop, value);
+        }
+    };
+    const task = frameTask(fit);
+    return { fit, schedule: () => task.schedule(), cancel: () => task.cancel(), forget: () => written.clear() };
+}
+
+/* Redraws held while the user types: rebuilding a focused field drops a hangul composition in
+   progress, so a draw waits for the blur, then for the gesture that caused it. */
 export function typingHold(scheduleDraw) {
     return {
         held: false,
@@ -220,8 +254,8 @@ export function restoreField(input, snap) {
     }
 }
 
-// At the end of a draw: focuses the field marked data-pm-focus and centres it, since merely
-// scrolled into view it can sit behind a sticky header or footer.
+// Focuses the field marked data-pm-focus once a draw is done, centred: merely scrolled into view,
+// it can sit behind a sticky header or footer.
 export function focusMarked(panel) {
     const input = panel?.querySelector('input[data-pm-focus]');
     if (!input) return;
@@ -232,8 +266,8 @@ export function focusMarked(panel) {
 
 /* SillyTavern interaction rules */
 
-// SillyTavern closes its drawers on pointer events outside them, and a panel on body counts
-// as outside. No preventDefault here, so the touch and mouse ones are passive.
+// SillyTavern closes its drawers on pointer events outside them, and a panel on body counts as
+// outside. Nothing is prevented, so the touch and mouse listeners are passive.
 export function blockDrawerClose(node) {
     for (const type of ['touchstart', 'mousedown', 'click']) {
         node.addEventListener(type, e => e.stopPropagation(), { passive: type !== 'click' });
@@ -277,7 +311,6 @@ export function emptyBlock(text) {
     return box;
 }
 
-// A lazily loaded decorative picture.
 export function lazyImg(className, src) {
     const img = el('img', className);
     img.src = src;
@@ -293,8 +326,8 @@ export function bandRow(word) {
     return band;
 }
 
-// pm-mass marks a filled ink block, which the inverted control colours are scoped to.
-// prefix: 'pm-quickbar' or 'pm-manager'.
+// pm-mass marks a filled ink block, which the inverted control colours are scoped to. prefix: 'pm-
+// quickbar' or 'pm-manager'.
 export function bannerOf(prefix, className, message) {
     const box = el('div', `${prefix}-banner pm-mass ${className}`);
     box.append(el('div', `${prefix}-banner-text`, message));
@@ -307,9 +340,9 @@ export function groupOf(prefix, title) {
     return box;
 }
 
-/* Gesture-safe redraws. A redraw held for a focused field is released on blur, which a
-   button's own mousedown raises; rebuilding before its mouseup would send the click nowhere.
-   So a release waits until after the pointerup (and its click). */
+/* Gesture-safe redraws. A held redraw is released on blur, which a button's own mousedown
+   raises; rebuilding before its mouseup would send the click nowhere, so a release waits for the
+   pointerup and its click. */
 let pointerHeld = false;
 let trackerInstalled = false;
 const pending = [];
@@ -323,8 +356,8 @@ function onPointerUp() {
     if (batch.length) setTimeout(() => { for (const fn of batch) fn(); }, 0);
 }
 
-// Installed at boot (index.js): installed lazily, it would miss the pointerdown of the very
-// gesture whose blur first needs it.
+// Installed at boot (index.js): installed lazily, it would miss the pointerdown of the gesture
+// whose blur first needs it.
 export function installGestureTracking() {
     if (trackerInstalled || typeof document === 'undefined') return;
     trackerInstalled = true;

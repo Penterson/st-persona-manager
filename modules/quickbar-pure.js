@@ -1,5 +1,4 @@
-// Pure logic behind the quick switch bar. No DOM, so tests import it in plain Node;
-// the DOM half is quickbar.js, which tests must never import.
+// Pure logic behind the quick panel; the DOM half is quickbar.js.
 import { findVersion } from './store.js';
 import { livingLabels, filterByLabel, sortEntries } from './roster.js';
 import { STRINGS } from './strings.js';
@@ -11,7 +10,7 @@ const PERSONA_COMMAND_NAMES = Object.freeze(['persona-set', 'persona', 'name']);
 // The languages a persona can carry a name for, keyed by detectLanguage's codes.
 export const NAME_LANGUAGES = Object.freeze(['ko', 'ja', 'zh', 'en']);
 
-// Aliases kept for the names the DOM half and the tests import.
+// Aliases the tests import.
 export const NO_VERSION_LABEL = STRINGS.quick.iconNoVersion;
 export const MODIFIED_SUFFIX = STRINGS.quick.iconModifiedSuffix;
 
@@ -119,9 +118,8 @@ export function quoteArg(value) {
     return `"${text}"`;
 }
 
-// Whether our data may be written at all: not when the active persona is ambiguous or the
-// root belongs to a newer build. Label and settings writes, which are not tied to one
-// persona, check only this.
+// Whether our data may be written at all: not while the active persona is ambiguous or the root is
+// a newer build's. Writes not tied to one persona (labels, settings) check only this.
 export function rosterWritable(s) {
     return !!s && !s.ambiguous && !s.readOnly;
 }
@@ -189,7 +187,6 @@ function picksEqual(a, b, living) {
 // so a changed combination never passes for the saved one.
 export function describeSelection(persona) {
     if (!persona) return NO_VERSION_LABEL;
-    // v?.id because a hand-edited null entry survives migrate.
     const version = findVersion(persona, persona.activeVersionId);
     if (!version) return NO_VERSION_LABEL;
     const name = version.name ?? '';

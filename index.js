@@ -10,7 +10,7 @@ import { mountQuickbar, unmountQuickbar, notify, scheduleAutoName } from './modu
 import { STRINGS } from './modules/strings.js';
 import { mountManager, unmountManager } from './modules/manager.js';
 import { mountSettings, unmountSettings } from './modules/settings-ui.js';
-import { installGestureTracking, resetGestureTracking } from './modules/dom.js';
+import { installGestureTracking, resetGestureTracking, debounced } from './modules/dom.js';
 import { syncGreetingInContext } from './modules/greeting.js';
 
 const listeners = [];
@@ -133,10 +133,8 @@ function repointChatAssets() {
 }
 
 /* Keeps {{user}} in an unanswered greeting on the playing persona (greeting.js says why).
-   seenUserNames: every name1 seen this session, i.e. what a baked greeting can hold. */
+   seenUserNames: every name1 seen this session, what a baked greeting can hold. */
 const seenUserNames = new Set();
-let greetingTimer = 0;
-let absorbTimer = 0;
 
 function noteUserName() {
     const name = freshContext()?.name1;
@@ -165,27 +163,17 @@ function syncGreeting() {
 }
 
 // After SillyTavern's own reaction to a persona event, so this acts on the result.
-function scheduleGreetingSync() {
-    if (greetingTimer) clearTimeout(greetingTimer);
-    greetingTimer = setTimeout(() => { greetingTimer = 0; syncGreeting(); }, 120);
-}
+const greetingSync = debounced(() => syncGreeting(), 120);
 
 /* SillyTavern's persona box saves and emits PERSONA_UPDATED on every keystroke
    (onPersonaDescriptionInput), so an edit there is taken in after a pause, not per key. */
-const ABSORB_DELAY_MS = 700;
-
-function scheduleAbsorb() {
-    if (absorbTimer) clearTimeout(absorbTimer);
-    absorbTimer = setTimeout(() => {
-        absorbTimer = 0;
-        const result = autoAbsorbOutside();
-        if (result?.ok) document.dispatchEvent(new CustomEvent('pm:changed'));
-    }, ABSORB_DELAY_MS);
-}
+const absorb = debounced(() => {
+    if (autoAbsorbOutside()?.ok) document.dispatchEvent(new CustomEvent('pm:changed'));
+}, 700);
 
 function absorbIfDiverged() {
     const s = getState();
-    if (s?.diverged && s.settings?.autoAbsorbOutside !== false) scheduleAbsorb();
+    if (s?.diverged && s.settings?.autoAbsorbOutside !== false) absorb.schedule();
 }
 
 function stopChatObserver() {
@@ -250,7 +238,7 @@ async function init() {
     const onPersona = async origin => {
         refresh();
         absorbIfDiverged();
-        if (origin !== 'settings') scheduleGreetingSync();
+        if (origin !== 'settings') greetingSync.schedule();
         const avatar = getState()?.avatar ?? null;
         if (avatar !== lastAvatar) {
             lastAvatar = avatar;
@@ -264,7 +252,7 @@ async function init() {
         document.dispatchEvent(new CustomEvent('pm:changed'));
     };
     // Per-language auto-naming (debounced, a no-op unless enabled). Not on USER_MESSAGE_RENDERED,
-    // which fires as generation begins; the reply carries the same language signal.
+    // which fires as generation begins; the reply carries the same signal.
     const onChatText = () => scheduleAutoName();
     on('PERSONA_CHANGED', onPersona);
     on('SETTINGS_UPDATED', () => onPersona('settings'));
@@ -317,10 +305,8 @@ function destroy() {
     }
     listeners.length = 0;
     folders.clear();
-    if (greetingTimer) clearTimeout(greetingTimer);
-    greetingTimer = 0;
-    if (absorbTimer) clearTimeout(absorbTimer);
-    absorbTimer = 0;
+    greetingSync.cancel();
+    absorb.cancel();
     seenUserNames.clear();
     resetAssetProbes();
     resetGestureTracking();

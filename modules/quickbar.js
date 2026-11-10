@@ -1,5 +1,5 @@
-// The quick switch bar: one icon in #leftSendForm and a panel on body.
-// DOM code only; the testable logic lives in quickbar-pure.js.
+// The quick panel: one icon in #leftSendForm and a panel opened over the page. DOM code only; the
+// pure half is quickbar-pure.js.
 import { MODULE_NAME, getPersona, findVersion, TILE_SHAPES, VIEW_MODES, makeId, ADOPT_MODES } from './store.js';
 import {
     getState, saveAndCompose, adopt, setAdoptMode, getPreciseApi, getRoot, adoptFor, refresh, KEEP_DESCRIPTION_KINDS, applyAbsorb, logFor,
@@ -26,9 +26,9 @@ import { itemsWithText } from './classify.js';
 import { rankOf, matchRanges, srcOf, detectLanguage, pageOf } from './search-pure.js';
 import {
     el, runCleanups, blockDrawerClose, isComposingKey, makeRowActivatable, checkMark, emptyBlock,
-    bannerOf as sharedBanner, groupOf as sharedGroup, frameTask, button, disable, imagePool, selectOf,
+    bannerOf as sharedBanner, groupOf, frameTask, button, disable, imagePool, selectOf,
     checkRow, newGroupRow, showHost, openHost, closeHost, trackViewport, typingHold, fieldSnapshot,
-    restoreField, focusMarked, track,
+    restoreField, focusMarked, track, debounced, viewportFit,
 } from './dom.js';
 
 // QuickPersona puts its own icon in the same host: ours carries the pm- prefix and is appended,
@@ -39,8 +39,8 @@ const BACKDROP_ID = 'pm-quickbar-backdrop';
 const HOST_ID = 'pm-quickbar-host';
 
 let mounted = false;
-let cleanups = [];
-let panelCleanups = [];
+const cleanups = [];
+const panelCleanups = [];
 // Roster search, filters and page: panel-local, reset on close.
 const roster = listUi();
 // The avatar the open panel was drawn for. Writes are checked against it (and again in
@@ -59,15 +59,14 @@ let rosterVisible = [];
 // One redraw per frame, and none while the user is typing.
 const drawTask = frameTask(() => drawPanel());
 const drawHold = typingHold(scheduleDraw);
-// The empty-section set last toasted, as a string (see commit).
+// The empty-item set last toasted, as a string (see reportCommit).
 let lastMissing = null;
 // The popup measurement: once per session. Every popup awaits the same promise.
 let probePromise = null;
 let popupNeedsDrop = false;
 
-/* No handler closes over a context: handlers call freshContext() when they run, and only a
-   single synchronous draw passes ctx down. notify, the ask* popups and closePanel are shared
-   with manager.js. */
+/* No handler closes over a context: each calls freshContext() when it runs, and only a
+   synchronous draw passes ctx down. notify, the ask* popups and closePanel serve manager.js too. */
 
 // toastr is not guaranteed; without it the message still reaches the console.
 export function notify(kind, message) {
@@ -107,9 +106,9 @@ export function releaseToasts() {
     if (box.closest?.('dialog[id^="pm-"]')) document.body.append(box);
 }
 
-/* Per-avatar token, bumped only when that persona's picture is replaced: addresses stay stable
-   so repaints are cheap, but the long-lived send-box icon needs a new src. getThumbnailUrl's own
-   timestamp argument is never passed, as it would refetch every picture on every draw. */
+/* Per-avatar cache token, bumped only when that persona's picture is replaced, so addresses stay
+   stable and repaints cheap; the long-lived send-box icon still gets a new src.
+   getThumbnailUrl's own timestamp argument would refetch every picture on every draw. */
 const thumbBumps = new Map();
 
 // Built once, as fillRosterList runs every frame while the user types. No sensitivity: 'base',
@@ -262,50 +261,24 @@ function syncButton() {
 // Gap to the visible bottom edge; matches style.css, which applies until this runs.
 const PANEL_GAP_PX = 12;
 
-// One geometry write per frame: visualViewport fires scroll continuously while the keyboard
-// pans the page.
-const sizeTask = frameTask(() => sizeToViewport());
-
-// Last values written, so unchanged ones are skipped: each write invalidates layout and the
-// next clientHeight read reflows the whole chat.
-let sizedMaxHeight = null;
-let sizedBottom = null;
-
-function forgetSizing() {
-    sizedMaxHeight = null;
-    sizedBottom = null;
-}
-
-function sizeToViewport() {
-    const panel = document.getElementById(PANEL_ID);
-    if (!panel) return;
-    const vv = globalThis.visualViewport;
-    const height = vv?.height ?? globalThis.innerHeight ?? 0;
-    if (!height) return;
-    const maxHeight = Math.round(height * 0.7);
-    if (maxHeight !== sizedMaxHeight) {
-        sizedMaxHeight = maxHeight;
-        panel.style.maxHeight = `${maxHeight}px`;
+// A fixed element sits against the layout viewport, so the panel is lifted by the visible
+// bottom's distance from the layout bottom.
+const panelFit = viewportFit(PANEL_ID, (height, vv) => {
+    const style = { 'max-height': `${Math.round(height * 0.7)}px` };
+    if (vv) {
+        const layout = document.documentElement?.clientHeight ?? height;
+        style.bottom = `${Math.max(PANEL_GAP_PX, Math.round(layout - (vv.offsetTop + height)) + PANEL_GAP_PX)}px`;
     }
-    if (!vv) return;
-    // Same for the position: a fixed element sits against the layout viewport, so it is
-    // offset by the visible bottom's distance from the layout bottom.
-    const layout = document.documentElement?.clientHeight ?? height;
-    const bottom = Math.max(PANEL_GAP_PX, Math.round(layout - (vv.offsetTop + height)) + PANEL_GAP_PX);
-    if (bottom !== sizedBottom) {
-        sizedBottom = bottom;
-        panel.style.bottom = `${bottom}px`;
-    }
-}
+    return style;
+});
 
 function togglePanel() {
     if (document.getElementById(PANEL_ID)) closePanel();
     else openPanel();
 }
 
-// What one panel's life sets, cleared when the next opens and on teardown. A fold opened while
-// the data was unwritable belongs to that panel, not the stored choice; a new panel may repeat
-// the empty-section toast once.
+// Panel-local state, cleared when the next panel opens and on teardown: a fold opened on unwritable
+// data belongs to that panel, and a new panel may repeat the empty-item toast once.
 function resetPanelState() {
     bannerDismissed = false;
     versionFold.reset();
@@ -321,7 +294,7 @@ function resetPanelState() {
 export function openPanel() {
     if (document.getElementById(PANEL_ID)) return;
     // A new panel element has none of the old one's inline geometry.
-    forgetSizing();
+    panelFit.forget();
     resetPanelState();
     // A hold left from the previous panel would swallow this one's first redraw.
     drawHold.held = false;
@@ -340,8 +313,8 @@ export function openPanel() {
 
     openHost(HOST_ID, 'pm-quickbar-host', [backdrop, panel], closePanel, panelCleanups);
     drawPanel();
-    sizeToViewport();
-    trackViewport(panelCleanups, () => sizeTask.schedule());
+    panelFit.fit();
+    trackViewport(panelCleanups, panelFit.schedule);
 }
 
 /* Search, filters and paging, shared with the manager screen. */
@@ -471,7 +444,7 @@ export function closePanel() {
     closeHost(HOST_ID);
     document.getElementById(PANEL_ID)?.remove();
     document.getElementById(BACKDROP_ID)?.remove();
-    sizeTask.cancel();
+    panelFit.cancel();
     panelAvatar = null;
     Object.assign(roster, listUi());
     rosterVisible = [];
@@ -533,31 +506,36 @@ function commit(kind, detail, { outside, force } = {}) {
         closePanel();
         return false;
     }
-    if (persona) {
-        addLog(persona, kind, detail, Date.now());
-        // writeDescription already saved, so this line needs a save of its own.
-        saveSettings();
-    }
-    if (result.keptOutside) notify('warning', STRINGS.common.outsideKept(result.keptOutside.section));
-    // A kept description emits no PERSONA_UPDATED, so the icon hears it from here.
-    if (result.kept && typeof document !== 'undefined') document.dispatchEvent(new CustomEvent('pm:changed'));
-    // The toast fires only when the set changes, so an item left empty on purpose is quiet.
-    const signature = missingSignature(result.missing);
-    if (signature !== lastMissing) {
-        if (result.missing?.length) notify('warning', STRINGS.common.emptyItems(result.missing.length));
-        lastMissing = signature;
-    }
+    lastMissing = reportCommit(persona, kind, detail, result, lastMissing);
     scheduleDraw();
     return true;
 }
 
+/* The tail both screens' commits share once a save is accepted: the log line (kind null when the
+   caller already logged), then what the result says. Answers the empty-item set to remember, so
+   the toast fires only when it changes and an item left empty on purpose stays quiet. */
+export function reportCommit(persona, kind, detail, result, lastMissing) {
+    if (persona) {
+        if (kind) addLog(persona, kind, detail, Date.now());
+        // writeDescription already saved, so this line needs a save of its own.
+        saveSettings();
+    }
+    if (result.keptOutside) notify('warning', STRINGS.common.outsideKept(result.keptOutside.section));
+    // Only the stored copy was written; the prompt keeps the old text until reselected.
+    if (result.activeUnknown && !result.kept) notify('warning', STRINGS.common.savedActiveUnknown);
+    // A kept description emits no PERSONA_UPDATED, so the icon hears it from here.
+    if (result.kept) document.dispatchEvent(new CustomEvent('pm:changed'));
+    const signature = missingSignature(result.missing);
+    if (signature !== lastMissing && result.missing?.length) notify('warning', STRINGS.common.emptyItems(result.missing.length));
+    return signature;
+}
+
 /* SillyTavern popups */
 
-// Our screens are top-layer modal dialogs. A SillyTavern popup drawn as a <dialog>
-// joins the top layer above us; one drawn as a div sits inert under our host and its
-// await never settles. So the first popup is probed: unless a foreign dialog[open]
-// appears and stays open, our host is closed while each popup (that one too) is up.
-// Our own hosts are told apart by the pm- id prefix.
+// Our screens are top-layer modal dialogs. A SillyTavern popup drawn as a <dialog> joins the top
+// layer above us; one drawn as a div sits inert under our host and its await never settles. So the
+// first popup is probed: unless a foreign dialog[open] appears and stays open, our host (told apart
+// by its pm- id) is closed while each popup is up.
 const POPUP_PROBE_TURNS = 3;
 
 // A sentinel, since a popup may legitimately resolve with undefined or false.
@@ -626,13 +604,16 @@ async function awaitPopup(pending, host) {
     }
 }
 
+async function withHostDropped(host, run) {
+    const dropped = dropHost(host);
+    try { return await run(); }
+    finally { if (dropped) raiseHost(host); }
+}
+
 // The path taken once the build is known.
 async function runMeasuredPopup(start) {
     const host = ourOpenHost();
-    if (!popupNeedsDrop) return awaitPopup(start(), host);
-    const dropped = dropHost(host);
-    try { return await start(); }
-    finally { if (dropped) raiseHost(host); }
+    return popupNeedsDrop ? withHostDropped(host, start) : awaitPopup(start(), host);
 }
 
 async function runPopup(start) {
@@ -664,11 +645,8 @@ async function runPopup(start) {
     }
 
     if (!popupNeedsDrop) return awaitPopup(pending, host);
-
     // Applied to the popup already in flight too, or the first one would hang.
-    const dropped = dropHost(host);
-    try { return await pending; }
-    finally { if (dropped) raiseHost(host); }
+    return withHostDropped(host, () => pending);
 }
 
 // Only without callGenericPopup: a browser that blocks dialogs answers prompt with
@@ -769,7 +747,6 @@ async function applyVersion(versionId) {
     // The picture follows only an accepted write: otherwise the avatar would show a
     // combination the prompt lacks, and the one pre-overwrite backup would be spent.
     if (!applyVersionPicks(after.persona, version, () => commit('version-apply', version.name ?? ''))) return;
-    // The picture follows on its own; a failed picture never undoes the version.
     void runBoundImageFromPanel(startAvatar, versionId);
 }
 
@@ -876,8 +853,8 @@ function absorbRefusal(reason) {
     return STRINGS.quick.absorbNoItem;
 }
 
-/* Label and settings writes are not tied to the persona the panel opened on, so they check
-   only rosterWritable. A new order or group filter starts from the first page. */
+/* Label and settings writes are not tied to the panel's persona, so they check only
+   rosterWritable. A new order or group filter starts from the first page. */
 function setRosterSetting(key, value, fallback, firstPage) {
     const s = getState();
     if (!rosterWritable(s)) return;
@@ -903,8 +880,8 @@ function toggleLabelMembership(labelId, avatarId) {
     if (filtering || (before === 0) !== (living(label) === 0)) scheduleDraw();
 }
 
-/* Group edit: a row tap opens that persona's group ticks under it, moved in place. Text in
-   the closing editor's new-group field forces a full draw, which keeps it. */
+/* Group edit: a row tap opens that persona's group ticks under it, in place. Text in the closing
+   editor's new-group field forces a full draw, which keeps it. */
 function toggleEditRow(avatarId) {
     expandedAvatar = expandedAvatar === avatarId ? null : avatarId;
     if (!placeLabelEditor()) scheduleDraw();
@@ -1001,10 +978,9 @@ async function switchPersona(avatar, name, { closeOnDone = true, quiet = false }
     return false;
 }
 
-/* ── Persona names ───────────────────────────────────────────────────────────
-   One rename path for the manager and the automatic rule. The map is what the roster and
-   other extensions read, name1 what the chat and {{user}} use. Answers {ok, reason} instead
-   of toasting, so each caller words the failure. */
+/* Persona names. One rename path for the manager and the automatic rule: the map is what the
+   roster and other extensions read, name1 what the chat and {{user}} use. Answers {ok, reason}
+   instead of toasting, so each caller words the failure. */
 const PERSONA_UPDATE_COMMANDS = Object.freeze(['persona-update']);
 
 // SillyTavern's own rename, so all it does on a rename happens; verified on the map and,
@@ -1053,7 +1029,7 @@ export async function applyPersonaName(avatar, name, { closeOnDone = true, toCha
     ctx.saveSettingsDebounced();
     // The list scope stops here: re-selecting would switch the user to this persona.
     if (!toChat) return { ok: true, reason: 'listed', previous };
-    // As in renameThroughSillyTavern: no switch for a persona the user has left.
+    // No switch for a persona the user has left.
     if ((getState()?.avatar ?? null) !== avatar) return { ok: true, reason: 'listed', previous };
     const landed = await switchPersona(avatar, name, { closeOnDone, quiet });
     if (landed) return { ok: true, reason: 'applied', previous };
@@ -1064,21 +1040,18 @@ export async function applyPersonaName(avatar, name, { closeOnDone = true, toCha
     return { ok: false, reason: 'switch-failed', previous };
 }
 
-/* Automatic per-language name, decided by pickAutoName. Debounced: a rendered message, a
-   settings save and a persona update arrive together, and this ends in a persona switch. */
-let autoNameTimer = 0;
+/* Automatic per-language name (pickAutoName). Debounced: a rendered message, a settings save and
+   a persona update arrive together, and this ends in a persona switch. */
+const autoNameTimer = debounced(() => runAutoName(), 1500);
 // Bumped by cancelAutoName. A run holding an older number has been called off.
 let autoNameGen = 0;
 
 export function scheduleAutoName() {
-    if (!getRoot()?.settings?.autoLocalName) return;
-    if (autoNameTimer) clearTimeout(autoNameTimer);
-    autoNameTimer = setTimeout(() => { autoNameTimer = 0; runAutoName(); }, 1500);
+    if (getRoot()?.settings?.autoLocalName) autoNameTimer.schedule();
 }
 
 export function cancelAutoName() {
-    if (autoNameTimer) clearTimeout(autoNameTimer);
-    autoNameTimer = 0;
+    autoNameTimer.cancel();
     // A run already inside its command keeps going, but skips its log line, save and toast.
     autoNameGen += 1;
 }
@@ -1120,7 +1093,7 @@ async function runAutoName() {
     notify('info', STRINGS.quick.autoNameApplied(name));
 }
 
-/* Panel content */
+// Panel content
 
 // A split into several items is announced, since this panel shows no items.
 function adoptHere() {
@@ -1152,8 +1125,6 @@ export function adoptModeRow(s, writable, [rowClass, labelClass, selectClass], o
     row.append(select);
     return row;
 }
-
-function groupOf(title) { return sharedGroup('pm-quickbar', title); }
 
 function rowOf(text, onClick) {
     const row = el('div', 'pm-row pm-quickbar-row');
@@ -1194,8 +1165,8 @@ function divergedBanner(writable) {
 }
 
 function currentGroup(ctx, s) {
-    // One solid shape, like the manager header (style.css, The liquid edge).
-    const box = groupOf(STRINGS.quick.headCurrent);
+    // One solid ink block, like the manager header.
+    const box = groupOf('pm-quickbar', STRINGS.quick.headCurrent);
     box.classList.add('pm-mass');
     const name = personaNames(ctx)[s.avatar] ?? ctx?.name1 ?? STRINGS.quick.unknownName;
     box.append(el('div', 'pm-quickbar-current', `${name}${STRINGS.common.dotSeparator}${describeSelection(s.persona)}`));
@@ -1207,9 +1178,9 @@ function currentGroup(ctx, s) {
     return box;
 }
 
-/* A folding group whose open state is a stored preference. The override lets a read-only root
-   still fold, since folding changes no data. No save of its own: a save posts every
-   extension's settings, and the value rides along with the next one. */
+/* A folding group whose open state is a stored preference; the override lets a read-only root
+   still fold, since folding changes no data. No save of its own: a save posts every extension's
+   settings, and the value rides along with the next one. */
 function foldState(key, group) {
     let override = null;
     const isOpen = s => (override !== null ? override : !!s?.root?.settings?.[key]);
@@ -1233,9 +1204,9 @@ function foldState(key, group) {
 const versionFold = foldState('quickVersionOpen', 'version');
 const namesFold = foldState('quickNamesOpen', 'names');
 
-/* ── One group or one row, redrawn in place ──────────────────────────────────
-   A fold, a version's [⋯] and a select-mode tick rebuild only their own group or row,
-   unless a full draw is queued or held, or the persona changed since the draw. */
+/* One group or one row, redrawn in place: a fold, a version's [⋯] and a select-mode tick rebuild
+   only their own group or row, unless a full draw is queued or held, or the persona changed
+   since the draw. */
 const groupNodes = new Map();
 
 function liveGroupArgs() {
@@ -1283,8 +1254,8 @@ function markSelection(avatarId) {
     return true;
 }
 
-/* The head itself is the control, not a button around the title: a button's own box pushed
-   the title out of line with the roster head's. */
+/* The head itself is the control: a button around the title pushed it out of line with the
+   roster head's. */
 function foldHead(title, open, onToggle) {
     const head = el('div', 'pm-quickbar-head pm-quickbar-foldhead');
     head.append(el('span', 'pm-quickbar-headlabel', title));
@@ -1324,8 +1295,8 @@ function versionGroup(s, writable) {
     return box;
 }
 
-/* ── Version tools ───────────────────────────────────────────────────────────
-   [⋯] opens a row's tools in place, one row at a time, on the persona it was opened for. */
+/* Version tools: [⋯] opens a row's tools in place, one row at a time, on the persona it was
+   opened for. */
 let versionToolsAt = null;
 
 /* Duplicate and move put another version's row under the finger, so a row tap this soon after
@@ -1419,9 +1390,9 @@ function dropVersionFromPanel(versionId) {
     });
 }
 
-/* ── Per-language names ──────────────────────────────────────────────────────
-   No scope choice, unlike the manager: this panel shows the persona being played, and
-   renaming just its list entry would break personas[avatar] === name1, which identifies it. */
+/* Per-language names. No scope choice, unlike the manager: this panel shows the persona being
+   played, and renaming just its list entry would break personas[avatar] === name1, which
+   identifies it. */
 
 function toggleAutoName() {
     const s = getState();
@@ -1434,8 +1405,8 @@ function toggleAutoName() {
     scheduleDraw();
 }
 
-/* One tap applies (logged; another language's tap undoes it); only a name the chat already
-   uses asks first. One at a time, the question's await included. */
+/* One tap applies (logged; another language's tap undoes it); only a name the chat already uses
+   asks first. One at a time, the question's await included. */
 let nameApplyRunning = false;
 
 async function applyLocalName(lang, name) {
@@ -1532,8 +1503,7 @@ function chipsRow(view, writable) {
     return row;
 }
 
-/* ── Bulk actions ────────────────────────────────────────────────────────────
-   Each action reads the selection and the root when it runs, never from the draw. */
+// Bulk actions read the selection and the root when they run, never from the draw.
 function selectedPersonas(root) {
     const out = [];
     for (const avatar of selectedAvatars) {
@@ -1732,65 +1702,69 @@ function labelEditor(s, avatarId, writable) {
     return box;
 }
 
+const rosterQuery = () => (roster.open ? roster.query : '');
+
+// In select mode a row or tile is a checkbox, filled while picked.
+function markPickable(node, avatar) {
+    node.dataset.pmAvatar = avatar;
+    if (!selectMode) return;
+    const picked = selectedAvatars.includes(avatar);
+    if (picked) node.classList.add('pm-picked');
+    node.setAttribute('role', 'checkbox');
+    node.setAttribute('aria-checked', picked ? 'true' : 'false');
+}
+
 // version is rosterVersionLine's answer, null for a persona with no data here.
 function personaRow(ctx, entry, s, version) {
-    const picked = selectMode && selectedAvatars.includes(entry.avatar);
     const onClick = selectMode
         ? () => toggleSelected(entry.avatar)
         : editMode
             ? () => toggleEditRow(entry.avatar)
             // Enabled even when ambiguous: switching is the way out and writes none of our data.
             : () => switchPersona(entry.avatar, entry.name);
-    const row = el('div', `pm-row pm-quickbar-row${picked ? ' pm-picked' : ''}`);
-    row.dataset.pmAvatar = entry.avatar;
-    if (selectMode) {
-        row.setAttribute('role', 'checkbox');
-        row.setAttribute('aria-checked', picked ? 'true' : 'false');
-    }
+    const row = el('div', 'pm-row pm-quickbar-row');
+    markPickable(row, entry.avatar);
     // Every row carries the thumbnail: names cannot tell same-named personas apart.
     const url = thumbnailUrl(ctx, entry.avatar);
     if (url) row.append(thumbPool.take('pm-quickbar-rowimg', url));
     const text = el('div', 'pm-quickbar-rowtext');
     const top = el('div', 'pm-quickbar-rowtop');
-    top.append(markedText('pm-quickbar-name', entry.name ?? '', roster.open ? roster.query : ''));
+    top.append(markedText('pm-quickbar-name', entry.name ?? '', rosterQuery()));
     if (version?.badge) top.append(el('span', 'pm-quickbar-versionbadge', version.badge));
     text.append(top);
     // One line, ellipsised by CSS, so rows do not grow with the version count.
     if (version?.line) text.append(el('div', 'pm-quickbar-versionline', version.line));
     row.append(text);
     row.append(checkMark(entry.avatar === s.avatar));
-    // makeRowActivatable keeps the checkbox role set above in select mode.
+    // makeRowActivatable keeps the checkbox role set in select mode.
     if (onClick) makeRowActivatable(row, onClick);
     else row.classList.add('pm-disabled');
     return row;
 }
 
-// The tile: the avatar image sized for a thumb, the name in aria-label. Tapping
-// switches, as the row does, and stays enabled when ambiguous.
-function personaTile(ctx, entry, s, named) {
-    const active = entry.avatar === s.avatar;
-    // The shape class is on the panel, so list rows and tiles both follow it.
-    const picked = selectMode && selectedAvatars.includes(entry.avatar);
-    const tile = el('button', `pm-quickbar-tile${named ? ' pm-quickbar-tile-named' : ''}${active ? ' pm-quickbar-tile-active' : ''}${picked ? ' pm-picked' : ''}`);
-    tile.dataset.pmAvatar = entry.avatar;
-    if (selectMode) {
-        tile.setAttribute('role', 'checkbox');
-        tile.setAttribute('aria-checked', picked ? 'true' : 'false');
-    }
+/* A persona tile, shared with the manager's picker: the picture layered over the name (a picture
+   that fails to load leaves the name), plus a name strip in the named view. The current one is
+   marked by the accent ring, not a check glyph. */
+export function personaTileOf(ctx, { avatar, name, query, named, active, pool }) {
+    const tile = el('button', `pm-quickbar-tile${named ? ' pm-quickbar-tile-named' : ''}${active ? ' pm-quickbar-tile-active' : ''}`);
     tile.type = 'button';
-    tile.setAttribute('aria-label', entry.name ?? '');
+    tile.setAttribute('aria-label', name);
+    if (active) tile.setAttribute('aria-current', 'true');
     const imgbox = el('div', 'pm-quickbar-tileimgbox');
-    // The image is layered over the name, so a picture that fails to load leaves the name.
-    imgbox.append(markedText('pm-quickbar-tilename', entry.name ?? '', roster.open ? roster.query : ''));
-    const url = thumbnailUrl(ctx, entry.avatar);
-    if (url) imgbox.append(thumbPool.take('pm-quickbar-tileimg', url));
-    if (active) {
-        // No check glyph: the accent ring marks it, in thickness as well as colour.
-        tile.setAttribute('aria-current', 'true');
-    }
+    imgbox.append(markedText('pm-quickbar-tilename', name, query));
+    const url = thumbnailUrl(ctx, avatar);
+    if (url) imgbox.append(pool.take('pm-quickbar-tileimg', url));
     tile.append(imgbox);
-    // The named-tile view: the name gets its own strip under the image.
-    if (named) tile.append(markedText('pm-quickbar-tilelabel', entry.name ?? '', roster.open ? roster.query : ''));
+    if (named) tile.append(markedText('pm-quickbar-tilelabel', name, query));
+    return tile;
+}
+
+// Tapping switches, as the row does, and stays enabled when ambiguous.
+function personaTile(ctx, entry, s, named) {
+    const tile = personaTileOf(ctx, {
+        avatar: entry.avatar, name: entry.name ?? '', query: rosterQuery(), named, active: entry.avatar === s.avatar, pool: thumbPool,
+    });
+    markPickable(tile, entry.avatar);
     tile.addEventListener('click', () => {
         if (selectMode) { toggleSelected(entry.avatar); return; }
         switchPersona(entry.avatar, entry.name);
@@ -1824,7 +1798,7 @@ function fillRosterListNow() {
     const panel = document.getElementById(PANEL_ID);
     const container = panel?.querySelector('[data-pm-roster-list]');
     if (!container) return;
-    // A group name typed in a row's editor survives the rebuild, as in drawPanel.
+    // A group name typed in a row's editor survives the rebuild.
     const typed = typedGroupName(container);
     thumbPool.harvest(container);
     fillRosterList(container);
@@ -1865,8 +1839,8 @@ function publishVisible(avatars) {
     pickAll.classList.toggle('pm-disabled', !rosterVisible.length);
 }
 
-// Everything below the search row, in its own container so search can repaint it alone.
-// prebuilt is rosterGroup's view from the same draw.
+// Everything below the search row, in its own container so search can repaint it alone; prebuilt is
+// rosterGroup's view from the same draw.
 function fillRosterList(container, prebuilt) {
     const ctx = freshContext();
     const s = getState();
@@ -1911,8 +1885,8 @@ function fillRosterList(container, prebuilt) {
         return;
     }
 
-    // A tile page is columns x rows only when both are set (an automatic column count depends
-    // on the panel width); otherwise the plain per-page count applies.
+    // A tile page is columns x rows only when both are set (automatic columns depend on the panel
+    // width); otherwise the per-page count applies.
     const settings = s.root?.settings ?? {};
     const viewMode = settings.rosterViewMode;
     const cols = Number(settings.rosterTileColumns ?? 0);
@@ -2048,13 +2022,13 @@ function drawPanel() {
     // Taps are now checked against the persona drawn; saveAndCompose makes the real check.
     panelAvatar = s?.avatar ?? null;
 
-    // .pm-scroll scrolls inside the clipped panel. Emptying it clamps scrollTop to 0, so
+    // .pm-scroll scrolls inside the clipped panel, and emptying it clamps scrollTop to 0, so
     // positions are read first.
     const oldScroll = panel.querySelector('.pm-scroll');
     const scrollTop = oldScroll?.scrollTop ?? 0;
     const chipsLeft = panel.querySelector('.pm-quickbar-chips')?.scrollLeft ?? 0;
-    // Same for typed text: a tap on Add blurs the field, and the released redraw can rebuild
-    // it empty before the click submits it.
+    // Typed text too: a tap on Add blurs the field, and the released redraw can rebuild it empty
+    // before the click submits it.
     const typed = typedGroupName(panel);
     // The scrolling box itself is kept, so a fling in progress survives the redraw.
     const scroll = oldScroll ?? el('div', 'pm-scroll');

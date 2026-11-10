@@ -1,12 +1,8 @@
-// The manager screen: items, choices, versions, history, assets and groups for one persona.
-// Opened by pm:open-manager, whose sender expects detail.handled to be set. Testable logic
-// lives in manager-pure.js.
-//
-// Handlers outlive the draw that made them, so none closes over a context, a getState()
-// snapshot or a node; each reads again when it runs.
-//
-// Writes go to targetAvatar through saveAndComposeFor, which decides from its own live context
-// whether SillyTavern's prompt field is written, so a persona not being played can be edited.
+// The manager screen: items, choices, versions, history, assets and groups for one persona, opened
+// by pm:open-manager (whose sender reads detail.handled); the pure half is manager-pure.js.
+// Handlers outlive their draw, so none closes over a context, a getState() snapshot or a node.
+// Writes go to targetAvatar through saveAndComposeFor, which writes SillyTavern's prompt field only
+// for the live active persona, so a persona not being played can be edited.
 import {
     MODULE_NAME, makeId, appendSection, getPersona, findVersion, findSection, findVariant, liveVariant, ensurePersona,
     HEADING_FORMATS, VIEW_MODES, pickInEveryVersion,
@@ -17,7 +13,7 @@ import {
 import { freshContext, saveSettings } from './ctx.js';
 import {
     compose, composePicked, composeFrom, hasDiverged, headingLine, validTemplate,
-    readPlacement, writePlacement, splitFullText, fullTextSplittable,
+    readPlacement, writePlacement, splitFullText, fullTextSplittable, untitledIds,
 } from './compose.js';
 import { addLog, snapshot, capHistory, restore, diffWords } from './history.js';
 import { toggleMember, modifiedAt } from './roster.js';
@@ -33,23 +29,23 @@ import {
     closePanel, openPanel, isPanelOpen, notify, askConfirm, askChoice, askText, askName,
     thumbnailUrl, markedText, pagerRow, applyShapeClass, listUi, searchRow, rankByQuery, filterChips,
     applyPersonaName, personaImageChanged, runBoundImageWrite, notifyBoundImageFailure, adoptModeRow,
-    scheduleAutoName, cancelAutoName, releaseToasts,
+    scheduleAutoName, cancelAutoName, releaseToasts, reportCommit, personaTileOf,
 } from './quickbar.js';
 import {
     el, track, runCleanups, blockDrawerClose, makeRowActivatable, checkMark, emptyBlock, bannerOf as sharedBanner,
     frameTask, button, disable, imagePool, selectOf, checkRow, newGroupRow, showHost, openHost, closeHost,
-    trackViewport, typingHold, fieldSnapshot, restoreField, focusMarked, lazyImg, bandRow,
+    trackViewport, typingHold, fieldSnapshot, restoreField, focusMarked, lazyImg, bandRow, debounced, viewportFit,
 } from './dom.js';
 import { rankOf, textContains, detectLanguage, pageOf } from './search-pure.js';
 import {
     resolveFolderKey, claimFolderKey, listAssets, uploadAsset, deleteAsset, withoutBackups,
-    replacePersonaAvatar, feedPersonaImage, restoreAvatarBackup, findAsset, imageSize,
+    replacePersonaAvatar, feedPersonaImage, restoreAvatarBackup, findAsset, imageSize, assetClass,
 } from './assets.js';
 import {
     canDeleteSection, removeSection, removeSections, moveSection, reorderSection, deleteVariant,
     renameLabel, deleteLabel, versionSummary, versionSummaryLine, NO_PICK_LABEL,
     putDraft, peekDraft, takeDraft, clearDrafts, rowKey,
-    historyView, hasEvictionNotice, missingSignature, previewText,
+    historyView, hasEvictionNotice, previewText,
     assetSelected, toggleAssetSelection, insertTagText, insertAtCursor,
     applyReplacement, buildReplaceBlocks, makeReplaceVersion, replaceVersionUndo, undoReplaceVersion,
     addTag, removeTag, missingDefaultSections, fillDefaultSections,
@@ -69,8 +65,8 @@ const TAB_KEYS = Object.freeze(['compose', 'versions', 'history', 'assets', 'lab
 const LOG_ROWS = 50;
 
 let mounted = false;
-let cleanups = [];
-let screenCleanups = [];
+const cleanups = [];
+const screenCleanups = [];
 // Set to the active persona on open; afterwards only the header picker moves it.
 let targetAvatar = null;
 let managerTab = 'compose';
@@ -101,7 +97,7 @@ let historyMode = 'diff';
 let expandedRow = null;
 // The asset listing for targetAvatar (state.js keeps only the active persona's).
 let assetState = { avatar: null, list: [], error: null, loading: false };
-// The set of empty sections the user has already been told about. See commit.
+// The empty-item set already toasted (see reportCommit).
 let lastMissing = null;
 // Revise screen: reviseBlocks are the original blocks, reviseTexts the working copies. Each
 // reviseSteps entry holds the block index and the whole previous string, so undo is one
@@ -139,8 +135,6 @@ let personaOpen = false;
 let pickerMode = 'target';
 // SillyTavern's position and role options, read off its selects; dropped at every draw.
 let enumCache = null;
-// Debounce for the size lines: SillyTavern's token count does not run per keystroke.
-let sizeTimer = 0;
 // Search state per searchable list, keyed by the containers' data-pm-list ids.
 const lists = {
     picker: listUi(),
@@ -168,39 +162,13 @@ function scheduleDraw() {
 
 /* Shell */
 
-// One geometry write per frame: visualViewport fires scroll continuously while the keyboard
-// pans the page.
-const sizeTask = frameTask(() => sizeToViewport());
-
-// Last written geometry, so an unchanged value is not rewritten (each write invalidates layout).
-let sizedHeight = null;
-let sizedTop = null;
-
-function forgetSizing() {
-    sizedHeight = null;
-    sizedTop = null;
-}
-
-function sizeToViewport() {
-    const panel = document.getElementById(PANEL_ID);
-    if (!panel) return;
-    const vv = globalThis.visualViewport;
-    const height = vv?.height ?? globalThis.innerHeight ?? 0;
-    if (!height) return;
-    const px = Math.round(height);
-    if (px !== sizedHeight) {
-        sizedHeight = px;
-        panel.style.height = `${px}px`;
-        // Cap for the history tab's text boxes, measured for the same reason.
-        panel.style.setProperty('--pm-history-cap', `${Math.round(height * 0.4)}px`);
-    }
-    // Non-zero when the page is pinch zoomed or a focused field is panned into view.
-    const top = Math.max(0, Math.round(vv?.offsetTop ?? 0));
-    if (top !== sizedTop) {
-        sizedTop = top;
-        panel.style.top = `${top}px`;
-    }
-}
+// The history tab's text boxes are capped from the same measure. The top offset is non-zero when
+// the page is pinch zoomed or a focused field is panned into view.
+const panelFit = viewportFit(PANEL_ID, (height, vv) => ({
+    height: `${Math.round(height)}px`,
+    '--pm-history-cap': `${Math.round(height * 0.4)}px`,
+    top: `${Math.max(0, Math.round(vv?.offsetTop ?? 0))}px`,
+}));
 
 function openManager(tab) {
     const wanted = TAB_KEYS.includes(tab) ? tab : 'compose';
@@ -211,14 +179,13 @@ function openManager(tab) {
 
     managerTab = wanted;
     // A new panel element carries none of the inline geometry the old one had.
-    forgetSizing();
+    panelFit.forget();
     closeAsked = false;
     drawHold.held = false;
     historyMode = 'diff';
     pickerMode = 'target';
     moveTarget(getState()?.avatar ?? null);
 
-    // The grain sits on the panel, not the scrolling content, so it composites once.
     const panel = el('div', 'pm-panel pm-manager-panel pm-grain');
     panel.id = PANEL_ID;
     panel.setAttribute('role', 'dialog');
@@ -228,8 +195,8 @@ function openManager(tab) {
     // ESC and the Android back gesture ask about unsaved work first (requestClose).
     const host = openHost(HOST_ID, 'pm-manager-host', [panel], requestClose, screenCleanups);
     /* Chromium's close watcher lets a second back gesture close the dialog natively, so a close
-       we did not start runs our teardown (a host left behind blocks reopening). A close by
-       quickbar.js dropHost, for a non-dialog SillyTavern popup, is not one. */
+       we did not start runs our teardown (a host left behind blocks reopening). quickbar.js
+       dropHost's close, for a non-dialog SillyTavern popup, is not one. */
     host.addEventListener('close', () => {
         if (document.getElementById(HOST_ID) !== host) return;
         if (host.dataset.pmDropped === '1') return;
@@ -243,8 +210,8 @@ function openManager(tab) {
         closeManager(false);
     });
     drawManager();
-    sizeToViewport();
-    trackViewport(screenCleanups, () => sizeTask.schedule());
+    panelFit.fit();
+    trackViewport(screenCleanups, panelFit.schedule);
     // The revise screen's edit popup follows the selection, which has no per-node event.
     track(screenCleanups, document, 'selectionchange', onReviseSelectionChange);
 }
@@ -253,6 +220,11 @@ function openManager(tab) {
 async function askOnce(message) {
     closeAsked = true;
     try { return await askConfirm(message); } finally { closeAsked = false; }
+}
+
+// askOnce, answering yes only if the screen is still open afterwards.
+async function confirmOpen(message) {
+    return (await askOnce(message)) && !!document.getElementById(HOST_ID);
 }
 
 // Asks, one question per dirty screen, before revise steps or full-text bodies are dropped.
@@ -274,30 +246,18 @@ function hasWorkingCopies() {
 async function requestClose() {
     if (closeAsked) return;
     // A picked replacement image not yet applied (closing does not stop an upload).
-    if (framing?.mode === 'upload' && !framingBusy) {
-        const ok = await askOnce(STRINGS.manager.framingConfirmLeave);
-        if (!ok || !document.getElementById(HOST_ID)) return;
-    }
+    if (framing?.mode === 'upload' && !framingBusy && !(await confirmOpen(STRINGS.manager.framingConfirmLeave))) return;
     const revising = reviseDirtyCount();
     const fullDirty = fullDirtyCount();
     if (editorDirty || revising > 0 || fullDirty > 0) {
         stashDraft();
-        // The editor's text survives in the draft store; the other copies are asked about,
-        // the current tab's first.
-        const onVersions = managerTab === 'versions';
-        const first = onVersions ? revising : fullDirty;
-        const second = onVersions ? fullDirty : revising;
-        const askFirst = onVersions ? STRINGS.manager.reviseConfirmLeave : STRINGS.manager.fullTextConfirmLeave;
-        const askSecond = onVersions ? STRINGS.manager.fullTextConfirmLeave : STRINGS.manager.reviseConfirmLeave;
-        const message = first > 0 ? askFirst(first)
-            : second > 0 ? askSecond(second)
-                : STRINGS.manager.confirmCloseDirty;
-        const ok = await askOnce(message);
-        if (!ok || !document.getElementById(HOST_ID)) return;
-        if (first > 0 && second > 0) {
-            const okSecond = await askOnce(askSecond(second));
-            if (!okSecond || !document.getElementById(HOST_ID)) return;
-        }
+        // The editor's text survives in the draft store; the working copies are asked about, the
+        // current tab's first, and an editor alone gets the plain question.
+        const asks = [[revising, STRINGS.manager.reviseConfirmLeave], [fullDirty, STRINGS.manager.fullTextConfirmLeave]]
+            .filter(([count]) => count > 0);
+        if (managerTab !== 'versions') asks.reverse();
+        const questions = asks.length ? asks.map(([count, ask]) => ask(count)) : [STRINGS.manager.confirmCloseDirty];
+        for (const question of questions) if (!(await confirmOpen(question))) return;
     }
     closeManager();
 }
@@ -334,7 +294,7 @@ function closeManager(reopenPanel = true) {
     enumCache = null;
     // A stale frame would make the schedulers skip every later draw.
     drawTask.cancel();
-    sizeTask.cancel();
+    panelFit.cancel();
 
     // Last, after full teardown: openPanel opens a modal dialog of its own.
     if (!returnToPanel) return;
@@ -362,9 +322,9 @@ function targetState() {
     };
 }
 
-// Every write starts and resumes here. Across an await the target may move or the entry be
-// pruned, so writes pass the avatar they started on. Unlike the quick panel's guard this never
-// closes the screen.
+// Every write starts and resumes here. Across an await the target may move or the entry be pruned,
+// so writes pass the avatar they started on. Unlike the quick panel's guard, this never closes the
+// screen.
 function guardTarget(expected) {
     if (expected !== undefined && expected !== targetAvatar) {
         notify('error', STRINGS.manager.targetMovedNotSaved);
@@ -431,9 +391,9 @@ function ensureShape(persona) {
 
 /* Writes */
 
-// detail is shown to the user, so it carries names, never ids. kind is null when the helper
-// already logged; write overrides what the kind implies. version-apply forces the write, as
-// in the quick panel's commit.
+// detail is shown to the user, so it carries names, never ids. kind is null when the helper already
+// logged; write overrides what the kind implies; version-apply forces the write, as in the quick
+// panel.
 function commit(kind, detail, expectedAvatar, { write } = {}) {
     const avatar = expectedAvatar ?? targetAvatar;
     // Read before the save, logged only after it.
@@ -443,22 +403,7 @@ function commit(kind, detail, expectedAvatar, { write } = {}) {
         force: kind === 'version-apply',
     });
     if (!result) { notify('error', refusalMessage(avatar)); scheduleDraw(); return false; }
-    if (persona) {
-        if (kind) addLog(persona, kind, detail, Date.now());
-        // writeDescription already saved, so this line needs a save of its own.
-        saveSettings();
-    }
-    if (result.keptOutside) notify('warning', STRINGS.common.outsideKept(result.keptOutside.section));
-    // Only the stored copy was written; the prompt keeps the old text until reselected.
-    if (result.activeUnknown && !result.kept) notify('warning', STRINGS.common.savedActiveUnknown);
-    // A kept description emits no PERSONA_UPDATED, so the icon hears it from here.
-    if (result.kept) document.dispatchEvent(new CustomEvent('pm:changed'));
-    // The banner names empty items; the toast fires only when the set changes.
-    const signature = missingSignature(result.missing);
-    if (signature !== lastMissing) {
-        if (result.missing?.length) notify('warning', STRINGS.common.emptyItems(result.missing.length));
-        lastMissing = signature;
-    }
+    lastMissing = reportCommit(persona, kind, detail, result, lastMissing);
     scheduleDraw();
     return true;
 }
@@ -736,7 +681,6 @@ function shiftVersion(versionId, delta) {
     commit('version-move', version?.name ?? '', s.avatar);
 }
 
-// Rewrites a version's picks from the live ones.
 function overwriteVersion(versionId, name) {
     return afterAsking(() => askConfirm(STRINGS.manager.confirmOverwriteVersion(name)), (after, _, startAvatar) => {
         const version = overwriteVersionPicks(after.persona, versionId, Date.now());
@@ -816,8 +760,7 @@ async function loadAssets(avatar) {
 
 async function uploadAssets(files) {
     const s = guardTarget();
-    if (!s) return;
-    if (s.readOnly || s.ambiguous) { notify('error', refusalMessage(targetAvatar)); return; }
+    if (!s || refusedWrite(s)) return;
     const startAvatar = targetAvatar;
     // Claimed once for the whole batch; guardTarget proved the entry exists.
     const key = claimFolderKey(s.root, startAvatar, saveSettings);
@@ -842,8 +785,7 @@ async function uploadAssets(files) {
 
 async function dropAsset(label) {
     const s = guardTarget();
-    if (!s) return;
-    if (s.readOnly || s.ambiguous) { notify('error', refusalMessage(targetAvatar)); return; }
+    if (!s || refusedWrite(s)) return;
     const startAvatar = targetAvatar;
     // The question names the versions showing this file, old lowercased labels included.
     const bound = versionsBindingAsset(s.persona, label, assetLabels());
@@ -1075,9 +1017,9 @@ function writeReason(s) {
 
 /* Rows redrawn in place */
 
-// Each row registers how to rebuild itself, so a toggle rebuilds only the rows it touches (a
-// choice through its item). A queued or held draw, a field being typed in or replaced data
-// takes the full draw.
+// Each row registers how to rebuild itself, so a toggle rebuilds only the rows it touches (a choice
+// through its item). A queued or held draw, a field being typed in or replaced data takes the full
+// draw.
 const rowNodes = new Map();
 
 // The picker's thumbnails, reused across redraws, as in the quick panel.
@@ -1249,9 +1191,9 @@ function variantEditor(section, variant, writable, reason) {
     area.rows = 12;
     area.disabled = !writable;
     area.setAttribute('aria-label', STRINGS.manager.editorAria(variant.label ?? ''));
-    area.addEventListener('input', () => { editorDirty = true; scheduleSizeUpdate(); });
+    area.addEventListener('input', () => { editorDirty = true; sizeLines.schedule(); });
     box.append(area);
-    // Updated by sizeTimer, never by a redraw, which would pull the field out mid composition.
+    // Updated by sizeLines, never by a redraw, which would pull the field out mid composition.
     box.append(el('div', 'pm-manager-size pm-size-editor', sizeTextOf(area.value)));
 
     const buttons = [
@@ -1398,9 +1340,8 @@ let focusSearch = null;
 function listSearchButton(key) {
     const ui = lists[key];
     const btn = button('pm-manager-btn', ui.open ? STRINGS.common.searchClose : STRINGS.common.search, () => {
-        ui.open = !ui.open;
-        if (!ui.open) { ui.query = ''; ui.lang = null; ui.tags = []; ui.page = 1; }
-        else focusSearch = key;
+        if (ui.open) Object.assign(ui, listUi());
+        else { ui.open = true; focusSearch = key; }
         scheduleDraw();
     });
     btn.setAttribute('aria-pressed', ui.open ? 'true' : 'false');
@@ -1649,8 +1590,8 @@ function doOwnSplit() {
     });
 }
 
-/* Size. Tokens come from SillyTavern's own counter, whose name is unverified, so the line omits
-   them unless a probe answers a number; the probe's result is kept for the session. */
+/* Size. Tokens come from SillyTavern's own counter, whose name is unverified, so the line shows
+   them only if a probe answers a number; the probe's result is kept for the session. */
 let tokenProbe = null;
 
 function tokenCounter() {
@@ -1682,13 +1623,9 @@ function sizeTextOf(text) {
     return sizeMemoLine;
 }
 
-// Trailing, so a sentence typed at speed costs one count of the whole body.
-const SIZE_LINE_DELAY_MS = 500;
-
-function scheduleSizeUpdate() {
-    if (sizeTimer) clearTimeout(sizeTimer);
-    sizeTimer = setTimeout(() => { sizeTimer = 0; refreshSizeLines(); }, SIZE_LINE_DELAY_MS);
-}
+// Trailing, so a sentence typed at speed costs one count of the whole body (SillyTavern's token
+// count does not run per keystroke).
+const sizeLines = debounced(() => refreshSizeLines(), 500);
 
 function refreshSizeLines() {
     const panel = document.getElementById(PANEL_ID);
@@ -1713,7 +1650,7 @@ function resetFullText() {
     fullUndo = [];
     fullBlocks = null;
     fullTexts = null;
-    if (sizeTimer) { clearTimeout(sizeTimer); sizeTimer = 0; }
+    sizeLines.cancel();
 }
 
 // Live fields into the working copies, before every draw and every read.
@@ -1786,15 +1723,17 @@ function openFullText() {
     scheduleDraw();
 }
 
-async function leaveFullText() {
+// Leaves an editing screen, asking first when that would discard working copies.
+async function leaveWorking(dirtyCount, question, reset) {
     if (closeAsked) return;
-    const dirty = fullDirtyCount();
-    if (dirty > 0) {
-        const ok = await askOnce(STRINGS.manager.fullTextConfirmLeave(dirty));
-        if (!ok || !document.getElementById(HOST_ID)) return;
-    }
-    resetFullText();
+    const dirty = dirtyCount();
+    if (dirty > 0 && !(await confirmOpen(question(dirty)))) return;
+    reset();
     scheduleDraw();
+}
+
+function leaveFullText() {
+    return leaveWorking(fullDirtyCount, STRINGS.manager.fullTextConfirmLeave, resetFullText);
 }
 
 function saveFullText() {
@@ -1955,7 +1894,7 @@ function fullTextScreen(s, writable, reason) {
         area.rows = rowsFor(fullRaw.text, 8, 30);
         area.disabled = !writable;
         area.setAttribute('aria-label', STRINGS.manager.fullRawAria);
-        area.addEventListener('input', () => scheduleSizeUpdate());
+        area.addEventListener('input', () => sizeLines.schedule());
         wrap.append(area);
         wrap.append(fullFoot());
         return wrap;
@@ -1974,7 +1913,7 @@ function fullTextScreen(s, writable, reason) {
         return wrap;
     }
     if (headingLine(format, 'x', persona.headingTemplate)) wrap.append(noteOf(STRINGS.manager.fullTextHeadingNote));
-    const untitled = new Set((persona.sections ?? []).filter(section => section?.untitled).map(section => section.id));
+    const untitled = untitledIds(persona);
     blocks.forEach((block, index) => {
         const head = untitled.has(block.sectionId) ? '' : headingLine(format, block.sectionName, persona.headingTemplate);
         const variant = findVariant(persona, block.sectionId, block.variantId);
@@ -1992,7 +1931,7 @@ function fullTextScreen(s, writable, reason) {
         area.rows = rowsFor(value, 4, 20);
         area.disabled = !writable;
         area.setAttribute('aria-label', STRINGS.manager.fullTextAria(block.sectionName));
-        area.addEventListener('input', () => scheduleSizeUpdate());
+        area.addEventListener('input', () => sizeLines.schedule());
         wrap.append(area);
     });
     wrap.append(fullFoot());
@@ -2304,10 +2243,10 @@ async function renameTargetPersona(toChat) {
 }
 
 /* The persona itself: name, picture, and new personas made from it. All write SillyTavern's
-   record rather than ours, so each asks first. Name scopes: the list (SillyTavern's personas
-   map) or the chat (also name1). Chat needs the persona active, or it would switch to it.
-   List-only on the active persona needs it identified directly: otherwise ctx.js matches
-   personas[avatar] === name1, and a mismatch makes every write refuse. */
+   record, so each asks first. Name scopes: the list (SillyTavern's personas map) or the chat
+   (also name1). Chat needs the persona active, or it would switch to it; list-only on the active
+   persona needs it identified directly, as otherwise ctx.js matches personas[avatar] === name1
+   and a mismatch makes every write refuse. */
 function identifiedDirectly() {
     const source = getState()?.source;
     return source === 'precise' || source === 'dom';
@@ -2498,7 +2437,6 @@ function restoreTargetImage() {
 async function changeTargetImage(file) {
     const s = guardTarget();
     if (!s || refusedWrite(s)) return;
-    // One upload at a time.
     if (framingBusy) { notify('info', STRINGS.manager.framingUploading); return; }
     const startAvatar = targetAvatar;
     const size = await imageSize(file);
@@ -2655,9 +2593,9 @@ function versionImageBlock(version, writable, reason) {
     return box;
 }
 
-/* Framing editor. 'version' mode stores a crop on a version's bound asset; 'upload' mode
-   writes a just-picked file to the avatar with it. Module state, so a redraw rebuilds the
-   editor where it was; dropFraming revokes the object URL. */
+/* Framing editor. 'version' mode stores a crop on a version's bound asset; 'upload' mode writes
+   a just-picked file to the avatar with it. Module state, so a redraw rebuilds the editor where
+   it was; dropFraming revokes the object URL. */
 const FRAME_WIDTH = 240;
 let framing = null;
 // True while the editor's upload is in flight, so a second tap cannot send it twice.
@@ -3216,15 +3154,8 @@ function openRevise() {
     scheduleDraw();
 }
 
-async function leaveRevise() {
-    if (closeAsked) return;
-    const dirty = reviseDirtyCount();
-    if (dirty > 0) {
-        const ok = await askOnce(STRINGS.manager.reviseConfirmLeave(dirty));
-        if (!ok || !document.getElementById(HOST_ID)) return;
-    }
-    resetRevise();
-    scheduleDraw();
+function leaveRevise() {
+    return leaveWorking(reviseDirtyCount, STRINGS.manager.reviseConfirmLeave, resetRevise);
 }
 
 // A selection boundary as {block element, string offset}. A drag to a block's edge can land on
@@ -3522,8 +3453,8 @@ function historyVariantSelect(persona) {
     return select;
 }
 
-// The shell keeps the border and clips while the inner wrapper scrolls, so the
-// scrollbar stays inside the rounded edge, as on the panel.
+// The shell keeps the border and clips while the inner wrapper scrolls, so the scrollbar stays
+// inside the border.
 function textBox(extraClass) {
     const box = el('div', `pm-manager-text${extraClass ? ` ${extraClass}` : ''}`);
     const inner = el('div', 'pm-manager-textscroll');
@@ -3578,8 +3509,8 @@ function historyDetail(persona, variantId, snapshotText, writable, reason) {
         ['diff', STRINGS.manager.historyModeDiff],
     ]) {
         const active = historyMode === key;
-        // pm-manager-primary, not pm-manager-tab-active: a later button rule in style.css
-        // resets that fill, and the pressed toggle's text vanished.
+        // pm-manager-primary, not pm-manager-tab-active: the later button rule in style.css resets
+        // that fill, and the pressed toggle's text vanished.
         const btn = button(`pm-manager-btn${active ? ' pm-manager-primary' : ''}`, label, () => { historyMode = key; scheduleDraw(); });
         btn.setAttribute('aria-pressed', active ? 'true' : 'false');
         toggles.append(btn);
@@ -3678,13 +3609,6 @@ function assetLabels() {
     return visibleAssets().map(item => item.label);
 }
 
-function assetStyleClass() {
-    const style = getRoot()?.settings?.assetStyle ?? 'plain';
-    // Stripped because the style name comes from settings.json and goes into a class
-    // attribute. (buildImgHtml strips after defaulting, so all-digit names differ.)
-    return `pm-asset pm-asset-${String(style).replace(/[^a-z]/gi, '') || 'plain'}`;
-}
-
 // Insert, then close. The modal makes the send box inert, so the value is built from
 // the caret it kept from before this screen opened, and focus waits until we close.
 async function insertIntoSendBox(text) {
@@ -3709,8 +3633,7 @@ async function insertIntoSendBox(text) {
     notify('success', STRINGS.manager.sendBoxInserted);
 }
 
-// styleClass comes from the caller: assetStyleClass goes through getRoot(), which
-// runs migrate() over everything, so it is resolved once per repaint, not per row.
+// styleClass is resolved once per repaint by the caller, not per row.
 function assetRow(item, key, writable, reason, styleClass) {
     const rowId = rowKey('asset', item.label);
     const open = expandedRow === rowId;
@@ -3839,7 +3762,7 @@ function fillAssetList(container, s, writable, reason) {
     }
     const paged = pageOf(list, ui.page, s.root?.settings?.pageSizeAssets ?? 20);
     ui.page = paged.page;
-    const styleClass = assetStyleClass();
+    const styleClass = assetClass(s.root?.settings?.assetStyle);
     for (const item of paged.slice) container.append(assetRow(item, folderKey, writable, reason, styleClass));
     const pager = pagerRow(paged, ui, () => redrawManagerList('assets'));
     if (pager) container.append(pager);
@@ -3966,20 +3889,8 @@ function pickPersona(avatar) {
     else selectTarget(avatar);
 }
 
-// The quick panel's tile markup and classes, without its select mode and switching.
 function pickerTile(ctx, avatar, name, query, named) {
-    const current = avatar === targetAvatar;
-    const tile = el('button', `pm-quickbar-tile${named ? ' pm-quickbar-tile-named' : ''}${current ? ' pm-quickbar-tile-active' : ''}`);
-    tile.type = 'button';
-    tile.setAttribute('aria-label', name);
-    if (current) tile.setAttribute('aria-current', 'true');
-    const imgbox = el('div', 'pm-quickbar-tileimgbox');
-    // The name also sits under the image, so a thumbnail that fails to load still shows it.
-    imgbox.append(markedText('pm-quickbar-tilename', name, query));
-    const url = thumbnailUrl(ctx, avatar);
-    if (url) imgbox.append(pickerThumbs.take('pm-quickbar-tileimg', url));
-    tile.append(imgbox);
-    if (named) tile.append(markedText('pm-quickbar-tilelabel', name, query));
+    const tile = personaTileOf(ctx, { avatar, name, query, named, active: avatar === targetAvatar, pool: pickerThumbs });
     tile.addEventListener('click', () => pickPersona(avatar));
     return tile;
 }
@@ -4206,8 +4117,6 @@ function dropSectionAt(sectionId, target) {
 }
 
 function headerRow(ctx) {
-    // pm-mass draws the solid block and its drip edge with pseudo-elements (style.css),
-    // so nothing operable lives in the decoration.
     const head = el('div', 'pm-manager-header pm-mass');
     head.append(personaPickerButton(ctx));
     head.append(actionButton(STRINGS.common.close, () => requestClose(), true));
@@ -4253,9 +4162,9 @@ function drawManager() {
     const ctx = freshContext();
     const s = targetState();
 
-    // .pm-scroll scrolls inside the clipped panel. Emptying it clamps scrollTop to 0, so the
-    // offset is saved and restored, as is editor typing: the draw a blur releases would
-    // otherwise rebuild the textarea from the stored text. Each screen keeps its own offset.
+    // .pm-scroll scrolls inside the clipped panel and emptying it clamps scrollTop to 0, so each
+    // screen's offset is saved and restored, as is editor typing: the draw a blur releases would
+    // otherwise rebuild the textarea from the stored text.
     const oldScroll = panel.querySelector('.pm-scroll');
     const screen = screenKey();
     if (lastScreen !== null && oldScroll) scrollByScreen.set(lastScreen, oldScroll.scrollTop);
@@ -4386,9 +4295,9 @@ function onOpenRequest(e) {
     }
 }
 
-// Called by the settings screen after an import replaces the root. The listing and
-// the drafts describe the old tree, and drafts would resurface old text over imported
-// bodies that reuse ids. The modal hides the import button; the redraw is a safeguard.
+// Called by the settings screen after an import replaces the root: the listing and the drafts
+// describe the old tree, and drafts would resurface old text over imported bodies that reuse ids.
+// The modal hides the import button; the redraw is a safeguard.
 export function invalidateManagerCaches() {
     assetState = { avatar: null, list: [], error: null, loading: false };
     // languageMemo is keyed on ids the imported tree can reuse.
